@@ -6,19 +6,19 @@
       </div>
       <div class="min-w-0 space-y-1">
         <h4 class="text-sm font-semibold text-foreground">
-          {{ legacyT('批量修改用户角色') }}
+          {{ t('ui.batchUpdateUserRoles') }}
         </h4>
         <p class="text-xs leading-relaxed text-muted-foreground">
-          {{ legacyT('将所选用户统一调整为同一个角色。管理员角色拥有后台管理权限，请确认选择范围。') }}
+          {{ t('ui.setSelectedUsersToTheSameRoleAdminRolesHave') }}
         </p>
       </div>
     </div>
 
     <div class="grid gap-3 rounded-xl border border-border/70 bg-muted/25 p-3 sm:grid-cols-[10rem_minmax(0,1fr)] sm:items-center">
       <div>
-        <Label class="text-sm font-medium">{{ legacyT('目标角色') }}</Label>
+        <Label class="text-sm font-medium">{{ t('ui.targetRole') }}</Label>
         <p class="mt-1 text-[11px] text-muted-foreground">
-          {{ legacyT('对所有目标用户生效') }}
+          {{ t('ui.appliesToAllTargetUsers') }}
         </p>
       </div>
       <Select
@@ -30,13 +30,13 @@
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="user">
-            {{ legacyT('普通用户') }}
+            {{ t('ui.user') }}
           </SelectItem>
           <SelectItem value="admin">
-            {{ legacyT('管理员') }}
+            {{ t('auth.role.admin') }}
           </SelectItem>
           <SelectItem value="audit_admin">
-            {{ legacyT('审计管理员') }}
+            {{ t('auth.role.auditAdmin') }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -63,5 +63,5 @@ defineEmits<{
   'update:modelValue': [value: UserRole]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

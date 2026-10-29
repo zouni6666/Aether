@@ -3,6 +3,7 @@
  */
 
 import { isApiError } from '@/types/api-error'
+import { translate, type MessageKey } from '@/i18n'
 
 /**
  * Pydantic 验证错误项
@@ -15,106 +16,107 @@ interface ValidationError {
 }
 
 /**
- * 字段名称映射（中文化）
+ * 已知字段的消息 key。
  */
-const fieldNameMap: Record<string, string> = {
-  'api_key': 'API 密钥',
-  'priority': '优先级',
-  'rpm_limit': 'RPM 限制',
-  'rate_limit': '速率限制',
-  'daily_limit': '每日限制',
-  'monthly_limit': '每月限制',
-  'allowed_models': '允许的模型',
-  'note': '备注',
-  'is_active': '启用状态',
-  'endpoint_id': 'Endpoint ID',
-  'base_url': 'API 基础 URL',
-  'timeout': '超时时间',
-  'max_retries': '最大重试次数',
-  'weight': '权重',
-  'email': '邮箱',
-  'username': '用户名',
-  'password': '密码',
-  'name': '名称',
-  'display_name': '显示名称',
-  'description': '描述',
-  'website': '网站',
-  'provider_priority': '提供商优先级',
-  'billing_type': '计费类型',
-  'monthly_quota_usd': '月度配额',
-  'quota_reset_day': '配额重置日',
-  'quota_expires_at': '配额过期时间',
-  'cache_ttl_minutes': '缓存 TTL',
-  'max_probe_interval_minutes': '最大探测间隔',
+const fieldNameMap: Record<string, MessageKey> = {
+  'api_key': 'feedback.error.field.apiKey',
+  'priority': 'feedback.error.field.priority',
+  'rpm_limit': 'feedback.error.field.rpmLimit',
+  'rate_limit': 'feedback.error.field.rateLimit',
+  'daily_limit': 'feedback.error.field.dailyLimit',
+  'monthly_limit': 'feedback.error.field.monthlyLimit',
+  'allowed_models': 'feedback.error.field.allowedModels',
+  'note': 'feedback.error.field.note',
+  'is_active': 'feedback.error.field.isActive',
+  'endpoint_id': 'feedback.error.field.endpointId',
+  'base_url': 'feedback.error.field.baseUrl',
+  'timeout': 'feedback.error.field.timeout',
+  'max_retries': 'feedback.error.field.maxRetries',
+  'weight': 'feedback.error.field.weight',
+  'email': 'feedback.error.field.email',
+  'username': 'feedback.error.field.username',
+  'password': 'feedback.error.field.password',
+  'name': 'feedback.error.field.name',
+  'display_name': 'feedback.error.field.displayName',
+  'description': 'feedback.error.field.description',
+  'website': 'feedback.error.field.website',
+  'provider_priority': 'feedback.error.field.providerPriority',
+  'billing_type': 'feedback.error.field.billingType',
+  'monthly_quota_usd': 'feedback.error.field.monthlyQuota',
+  'quota_reset_day': 'feedback.error.field.quotaResetDay',
+  'quota_expires_at': 'feedback.error.field.quotaExpiresAt',
+  'cache_ttl_minutes': 'feedback.error.field.cacheTtl',
+  'max_probe_interval_minutes': 'feedback.error.field.maxProbeInterval',
 }
 
 /**
- * 错误类型映射（中文化）
+ * 已知验证错误使用本地消息，未知错误保留服务端文案。
  */
 const errorTypeMap: Record<string, (error: ValidationError) => string> = {
   'string_too_short': (error) => {
     const minLength = error.ctx?.min_length || 3
-    return `长度不能少于 ${minLength} 个字符`
+    return translate('feedback.error.validation.minLength', { count: String(minLength) })
   },
   'string_too_long': (error) => {
     const maxLength = error.ctx?.max_length
-    return `长度不能超过 ${maxLength} 个字符`
+    return translate('feedback.error.validation.maxLength', { count: String(maxLength) })
   },
-  'value_error.missing': () => '此字段为必填项',
-  'missing': () => '此字段为必填项',
-  'type_error.none.not_allowed': () => '此字段不能为空',
+  'value_error.missing': () => translate('feedback.error.validation.required'),
+  'missing': () => translate('feedback.error.validation.required'),
+  'type_error.none.not_allowed': () => translate('feedback.error.validation.notNull'),
   'value_error': (error) => error.msg,
-  'type_error.integer': () => '必须为整数',
-  'type_error.float': () => '必须为数字',
+  'type_error.integer': () => translate('feedback.error.validation.integer'),
+  'type_error.float': () => translate('feedback.error.validation.number'),
   'value_error.number.not_ge': (error) => {
     const limit = error.ctx?.limit_value
-    return limit !== undefined ? `不能小于 ${limit}` : '数值过小'
+    return limit !== undefined ? translate('feedback.error.validation.minInclusive', { limit: String(limit) }) : translate('feedback.error.validation.tooSmall')
   },
   'value_error.number.not_le': (error) => {
     const limit = error.ctx?.limit_value
-    return limit !== undefined ? `不能大于 ${limit}` : '数值过大'
+    return limit !== undefined ? translate('feedback.error.validation.maxInclusive', { limit: String(limit) }) : translate('feedback.error.validation.tooLarge')
   },
   'value_error.number.not_gt': (error) => {
     const limit = error.ctx?.limit_value
-    return limit !== undefined ? `必须大于 ${limit}` : '数值过小'
+    return limit !== undefined ? translate('feedback.error.validation.minExclusive', { limit: String(limit) }) : translate('feedback.error.validation.tooSmall')
   },
   'value_error.number.not_lt': (error) => {
     const limit = error.ctx?.limit_value
-    return limit !== undefined ? `必须小于 ${limit}` : '数值过大'
+    return limit !== undefined ? translate('feedback.error.validation.maxExclusive', { limit: String(limit) }) : translate('feedback.error.validation.tooLarge')
   },
   'less_than_equal': (error) => {
     const limit = error.ctx?.le
-    return limit !== undefined ? `不能大于 ${limit}` : '数值过大'
+    return limit !== undefined ? translate('feedback.error.validation.maxInclusive', { limit: String(limit) }) : translate('feedback.error.validation.tooLarge')
   },
   'greater_than_equal': (error) => {
     const limit = error.ctx?.ge
-    return limit !== undefined ? `不能小于 ${limit}` : '数值过小'
+    return limit !== undefined ? translate('feedback.error.validation.minInclusive', { limit: String(limit) }) : translate('feedback.error.validation.tooSmall')
   },
   'less_than': (error) => {
     const limit = error.ctx?.lt
-    return limit !== undefined ? `必须小于 ${limit}` : '数值过大'
+    return limit !== undefined ? translate('feedback.error.validation.maxExclusive', { limit: String(limit) }) : translate('feedback.error.validation.tooLarge')
   },
   'greater_than': (error) => {
     const limit = error.ctx?.gt
-    return limit !== undefined ? `必须大于 ${limit}` : '数值过小'
+    return limit !== undefined ? translate('feedback.error.validation.minExclusive', { limit: String(limit) }) : translate('feedback.error.validation.tooSmall')
   },
-  'value_error.email': () => '邮箱格式不正确',
-  'value_error.url': () => 'URL 格式不正确',
-  'type_error.bool': () => '必须为布尔值（true/false）',
-  'type_error.list': () => '必须为数组',
-  'type_error.dict': () => '必须为对象',
+  'value_error.email': () => translate('feedback.error.validation.email'),
+  'value_error.url': () => translate('feedback.error.validation.url'),
+  'type_error.bool': () => translate('feedback.error.validation.boolean'),
+  'type_error.list': () => translate('feedback.error.validation.array'),
+  'type_error.dict': () => translate('feedback.error.validation.object'),
 }
 
 /**
- * 获取字段的中文名称
+ * 获取字段名称
  */
 function getFieldName(loc: (string | number)[]): string {
-  if (!loc || loc.length === 0) return '字段'
+  if (!loc || loc.length === 0) return translate('feedback.error.field.default')
 
   const fieldPath = loc.filter(item => item !== 'body').join('.')
   const fieldKey = String(loc[loc.length - 1])
 
-  return fieldNameMap[fieldKey] || fieldPath || '字段'
+  const key = fieldNameMap[fieldKey]
+  return key ? translate(key) : fieldPath || translate('feedback.error.field.default')
 }
 
 /**
@@ -135,33 +137,29 @@ function formatValidationError(error: ValidationError): string {
 
 function normalizeKnownApiErrorMessage(message: string): string {
   const text = message.trim()
-  if (!text) return text
+  if (!text) return message
 
   const lowered = text.toLowerCase()
   if (
     lowered.includes('refresh_token_reused')
     || lowered.includes('already been used to generate a new access token')
   ) {
-    return 'Token 刷新失败：refresh_token 已被使用并轮换，请重新登录授权'
+    return translate('feedback.error.refresh.reused')
   }
 
   if (
     lowered.includes('refresh_token_expired')
     || lowered.includes('could not validate your refresh token')
   ) {
-    return 'Token 刷新失败：refresh_token 无效、已过期或已撤销，请重新登录授权'
+    return translate('feedback.error.refresh.expired')
   }
 
-  if (
-    lowered.includes('token refresh 失败:')
-    || lowered.includes('token refresh failed:')
-  ) {
-    return text
-      .replace(/^token refresh 失败:\s*/i, 'Token 刷新失败：')
-      .replace(/^token refresh failed:\s*/i, 'Token 刷新失败：')
+  const prefix = /^token refresh (?:失败|failed):\s*/i
+  if (prefix.test(text)) {
+    return translate('feedback.error.refresh.reason', { reason: text.replace(prefix, '') })
   }
 
-  return text
+  return message
 }
 
 /**
@@ -170,7 +168,7 @@ function normalizeKnownApiErrorMessage(message: string): string {
  * @param defaultMessage 默认错误信息
  * @returns 格式化的错误信息
  */
-export function parseApiError(err: unknown, defaultMessage: string = '操作失败'): string {
+export function parseApiError(err: unknown, defaultMessage: string = translate('feedback.error.failed')): string {
   if (!err) return defaultMessage
 
   // 处理网络错误
@@ -178,7 +176,7 @@ export function parseApiError(err: unknown, defaultMessage: string = '操作失�
     if (err instanceof Error) {
       return normalizeKnownApiErrorMessage(err.message || defaultMessage)
     }
-    return '无法连接到服务器，请检查网络连接'
+    return translate('feedback.error.network')
   }
 
   const data = err.response?.data
@@ -228,7 +226,7 @@ export function parseApiError(err: unknown, defaultMessage: string = '操作失�
 /**
  * 解析并提取第一个错误信息（用于简短提示）
  */
-export function parseApiErrorShort(err: unknown, defaultMessage: string = '操作失败'): string {
+export function parseApiErrorShort(err: unknown, defaultMessage: string = translate('feedback.error.failed')): string {
   const fullError = parseApiError(err, defaultMessage)
 
   // 如果有多行错误，只取第一行
@@ -250,23 +248,23 @@ export function parseTestModelError(result: {
     }
   }
 }): string {
-  let errorMsg = result.error || '测试失败'
+  let errorMsg = result.error || translate('feedback.error.testFailed')
 
   // 检查HTTP状态码错误
   if (result.data?.response?.status_code) {
     const status = result.data.response.status_code
     if (status === 403) {
-      errorMsg = '认证失败: API密钥无效或客户端类型不被允许'
+      errorMsg = translate('feedback.error.auth.clientNotAllowed')
     } else if (status === 401) {
-      errorMsg = '认证失败: API密钥无效或已过期'
+      errorMsg = translate('feedback.error.auth.expired')
     } else if (status === 404) {
-      errorMsg = '模型不存在: 请检查模型名称是否正确'
+      errorMsg = translate('feedback.error.modelNotFound')
     } else if (status === 429) {
-      errorMsg = '请求频率过高: 请稍后重试'
+      errorMsg = translate('feedback.error.rateLimit')
     } else if (status >= 500) {
-      errorMsg = `服务器错误: HTTP ${status}`
+      errorMsg = translate('feedback.error.serverHttp', { status })
     } else {
-      errorMsg = `请求失败: HTTP ${status}`
+      errorMsg = translate('feedback.error.requestHttp', { status })
     }
   }
 
@@ -289,7 +287,7 @@ export function parseTestModelError(result: {
  * @returns 友好的错误信息
  */
 export function parseUpstreamModelError(error: string): string {
-  if (!error) return '获取上游模型失败'
+  if (!error) return translate('feedback.error.upstream.load')
 
   // 匹配 "HTTP {status}: {body}" 格式
   const httpMatch = error.match(/^HTTP\s+(\d+):\s*(.*)$/s)
@@ -300,15 +298,15 @@ export function parseUpstreamModelError(error: string): string {
     // 根据状态码生成友好消息
     let friendlyMsg = ''
     if (status === 401) {
-      friendlyMsg = '密钥无效或已过期'
+      friendlyMsg = translate('feedback.error.upstream.invalidKey')
     } else if (status === 403) {
-      friendlyMsg = '密钥权限不足'
+      friendlyMsg = translate('feedback.error.upstream.permissions')
     } else if (status === 404) {
-      friendlyMsg = '模型列表接口不存在'
+      friendlyMsg = translate('feedback.error.upstream.notFound')
     } else if (status === 429) {
-      friendlyMsg = '请求频率过高，请稍后重试'
+      friendlyMsg = translate('feedback.error.upstream.rateLimit')
     } else if (status >= 500) {
-      friendlyMsg = '上游服务暂时不可用'
+      friendlyMsg = translate('feedback.error.upstream.unavailable')
     }
 
     // 尝试从 JSON body 中提取更详细的错误信息
@@ -332,16 +330,16 @@ export function parseUpstreamModelError(error: string): string {
           // 检查是否是 token/认证相关的错误
           const lowerMsg = detailMsg.toLowerCase()
           if (lowerMsg.includes('invalid token') || lowerMsg.includes('invalid api key')) {
-            return '密钥无效，请检查密钥是否正确'
+            return translate('feedback.error.upstream.checkKey')
           }
           if (lowerMsg.includes('expired')) {
-            return '密钥已过期，请更新密钥'
+            return translate('feedback.error.upstream.expiredKey')
           }
           if (lowerMsg.includes('quota') || lowerMsg.includes('exceeded')) {
-            return '配额已用尽或超出限制'
+            return translate('feedback.error.upstream.quota')
           }
           if (lowerMsg.includes('rate limit')) {
-            return '请求频率过高，请稍后重试'
+            return translate('feedback.error.upstream.rateLimit')
           }
           // 没有匹配特定关键词，但有详细信息，使用它作为补充
           if (friendlyMsg) {
@@ -361,24 +359,24 @@ export function parseUpstreamModelError(error: string): string {
     if (friendlyMsg) {
       return friendlyMsg
     }
-    return `请求失败 (HTTP ${status})`
+    return translate('feedback.error.upstream.http', { status })
   }
 
   // 检查是否是请求错误
   if (error.startsWith('Request error:')) {
     const detail = error.replace('Request error:', '').trim()
     if (detail.toLowerCase().includes('timeout')) {
-      return '请求超时，上游服务响应过慢'
+      return translate('feedback.error.upstream.timeout')
     }
     if (detail.toLowerCase().includes('connection')) {
-      return '无法连接到上游服务'
+      return translate('feedback.error.upstream.connection')
     }
-    return '网络请求失败'
+    return translate('feedback.error.upstream.network')
   }
 
   // 检查是否是未知 API 格式
   if (error.startsWith('Unknown API format:')) {
-    return '不支持的 API 格式'
+    return translate('feedback.error.upstream.format')
   }
 
   // 如果包含分号，可能是多个错误合并的，取第一个

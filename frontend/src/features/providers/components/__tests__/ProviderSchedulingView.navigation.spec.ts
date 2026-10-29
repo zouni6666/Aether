@@ -19,11 +19,14 @@ vi.mock('@/composables/useConfirm', () => ({ useConfirm: () => ({ confirm }) }))
 vi.mock('@/utils/logger', () => ({ log: { error: vi.fn(), warn: vi.fn() } }))
 vi.mock('@/features/providers/composables/useSchedulingProviderBalance', () => ({ provideSchedulingProviderBalance: vi.fn() }))
 vi.mock('../ProviderSchedulingStatus.vue', () => ({ default: { render: () => null } }))
-vi.mock('@/features/routing/components', async () => {
+vi.mock('@/features/routing/components/RoutingFailoverPolicyEditor.vue', async () => {
+  const { defineComponent } = await import('vue')
+  return { default: defineComponent({ setup(_, { expose }) { expose({ commitJsonDrafts: commitFailoverDrafts }); return () => null } }) }
+})
+vi.mock('@/features/routing/components/RoutingSchedulingPolicyEditor.vue', async () => {
   const { defineComponent, h } = await import('vue')
   return {
-    RoutingFailoverPolicyEditor: defineComponent({ setup(_, { expose }) { expose({ commitJsonDrafts: commitFailoverDrafts }); return () => null } }),
-    RoutingSchedulingPolicyEditor: defineComponent({
+    default: defineComponent({
       props: { refreshRevision: Number, layout: String, config: Object },
       emits: ['inspect-provider', 'selection-change'],
       setup(props, { emit, slots }) {

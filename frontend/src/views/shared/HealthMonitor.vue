@@ -12,10 +12,10 @@
               Health Dashboard
             </p>
             <h2 class="mt-2 text-2xl font-semibold tracking-tight">
-              健康监控
+              {{ t('nav.healthMonitor') }}
             </h2>
             <p class="mt-2 text-sm leading-6 text-muted-foreground">
-              统一查看端点、模型{{ isAdminPage ? '、提供商' : '' }}健康状态，先从概览判断风险，再进入具体视角排查关联健康。
+              {{ t('ui.reviewEndpointAndModel') }}{{ isAdminPage ? t('ui.provider9aa2e39') : '' }}{{ t('ui.healthIdentifyRisksInTheOverviewThenInspectTheRelevant') }}
             </p>
           </div>
         </div>
@@ -57,10 +57,10 @@
           <div class="mb-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h3 class="text-sm font-semibold">
-                综合概览
+                {{ t('ui.overview') }}
               </h3>
               <p class="text-xs text-muted-foreground">
-                点击视角卡片快速跳转到对应健康列表
+                {{ t('ui.clickAPerspectiveCardToJumpToTheMatchingHealth') }}
               </p>
             </div>
           </div>
@@ -103,7 +103,7 @@
               <div class="mt-4 grid grid-cols-3 gap-2 text-xs">
                 <div class="rounded-lg border border-border/40 bg-card/50 px-3 py-2">
                   <p class="text-muted-foreground">
-                    总数
+                    {{ t('ui.total') }}
                   </p>
                   <p class="mt-1 font-semibold tabular-nums">
                     {{ section.summary.total }}
@@ -111,7 +111,7 @@
                 </div>
                 <div class="rounded-lg border border-border/40 bg-card/50 px-3 py-2">
                   <p class="text-muted-foreground">
-                    异常
+                    {{ t('ui.unhealthy') }}
                   </p>
                   <p class="mt-1 font-semibold tabular-nums text-red-600 dark:text-red-400">
                     {{ section.summary.unhealthy }}
@@ -119,7 +119,7 @@
                 </div>
                 <div class="rounded-lg border border-border/40 bg-card/50 px-3 py-2">
                   <p class="text-muted-foreground">
-                    波动
+                    {{ t('ui.warning1e3c8be') }}
                   </p>
                   <p class="mt-1 font-semibold tabular-nums text-amber-600 dark:text-amber-400">
                     {{ section.summary.warning }}
@@ -137,7 +137,7 @@
       class="scroll-mt-6"
     >
       <HealthMonitorCard
-        title="端点健康监控"
+        :title="t('ui.endpointHealthMonitor')"
         :is-admin="isAdminPage"
         :show-provider-info="isAdminPage"
         @view-details="openHealthDetails"
@@ -150,7 +150,7 @@
       class="scroll-mt-6"
     >
       <ModelHealthMonitorCard
-        title="模型健康监控"
+        :title="t('ui.modelHealthMonitor')"
         :is-admin="isAdminPage"
         :show-provider-info="isAdminPage"
         @view-details="openHealthDetails"
@@ -164,7 +164,7 @@
       class="scroll-mt-6"
     >
       <ProviderHealthMonitorCard
-        title="提供商健康监控"
+        :title="t('ui.providerHealthMonitor')"
         @view-details="openHealthDetails"
         @summary-updated="updateSummary('provider', $event)"
       />
@@ -180,6 +180,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { computed, ref, type Component } from 'vue'
 import { useRoute } from 'vue-router'
 import { Activity, Bot, Gauge, Server, Zap } from 'lucide-vue-next'
@@ -236,7 +239,7 @@ const overviewCards = computed(() => {
   const providerSummary = getSummary('provider')
   const cards = [
     {
-      label: '总体状态',
+      get label() { return t('ui.overallStatus') },
       value: overallLabel.value,
       description: allSectionsLoaded.value
         ? `${combinedSummary.value.total} 项健康对象 / ${formatCompactNumber(combinedSummary.value.attempts)} 次请求`
@@ -245,14 +248,14 @@ const overviewCards = computed(() => {
       valueClass: getStatusValueClass(combinedSummary.value, allSectionsLoaded.value)
     },
     {
-      label: '异常端点',
+      get label() { return t('ui.unhealthyEndpoints') },
       value: endpointSummary.unhealthy,
       description: `${endpointSummary.warning} 个波动 / ${formatCompactNumber(endpointSummary.attempts)} 次请求`,
       icon: Activity,
       valueClass: endpointSummary.unhealthy > 0 ? 'text-red-600 dark:text-red-400' : ''
     },
     {
-      label: '异常模型',
+      get label() { return t('ui.unhealthyModels') },
       value: modelSummary.unhealthy,
       description: `${modelSummary.warning} 个波动 / ${formatCompactNumber(modelSummary.attempts)} 次请求`,
       icon: Bot,
@@ -262,7 +265,7 @@ const overviewCards = computed(() => {
 
   if (isAdminPage.value) {
     cards.push({
-      label: '异常提供商',
+      get label() { return t('ui.unhealthyProviders') },
       value: providerSummary.unhealthy,
       description: `${providerSummary.warning} 个波动 / ${providerSummary.empty} 个暂无请求`,
       icon: Server,
@@ -270,9 +273,9 @@ const overviewCards = computed(() => {
     })
   } else {
     cards.push({
-      label: '请求总量',
+      get label() { return t('ui.totalRequests6b08f36') },
       value: formatCompactNumber(combinedSummary.value.attempts),
-      description: '当前回溯窗口内参与健康统计的请求',
+      get description() { return t('ui.requestsIncludedInHealthStatisticsForTheCurrentLookbackWindow') },
       icon: Zap,
       valueClass: ''
     })
@@ -332,12 +335,12 @@ function buildSectionCard(
 }
 
 function getStatusLabel(summary: HealthMonitorSectionSummary, loaded: boolean) {
-  if (!loaded) return '加载中'
-  if (summary.total === 0) return '暂无数据'
-  if (summary.unhealthy > 0) return '异常'
-  if (summary.warning > 0) return '波动'
-  if (summary.empty > 0) return '部分暂无请求'
-  return '正常'
+  if (!loaded) return t('ui.loading')
+  if (summary.total === 0) return t('stats.empty.title')
+  if (summary.unhealthy > 0) return t('ui.unhealthy')
+  if (summary.warning > 0) return t('ui.warning1e3c8be')
+  if (summary.empty > 0) return t('ui.partlyNoRequests')
+  return t('ui.normal')
 }
 
 function getStatusBadgeVariant(
@@ -363,4 +366,5 @@ function scrollToSection(id: string) {
     block: 'start'
   })
 }
+
 </script>

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { ref } from 'vue'
 import { ArrowLeft } from 'lucide-vue-next'
 
@@ -9,6 +12,7 @@ const demos = [
   { id: 2, name: '中心辐射 (Central Star Hub)' },
   { id: 3, name: '2.5D 层级结构 (Isometric Layered)' },
 ]
+
 </script>
 
 <template>
@@ -19,10 +23,10 @@ const demos = [
           to="/guide/architecture"
           class="flex items-center gap-2 text-sm font-medium text-[#666663] hover:text-[#cc785c] dark:text-[#a3a094] transition-colors"
         >
-          <ArrowLeft class="w-4 h-4" /> 返回文档
+          <ArrowLeft class="w-4 h-4" /> {{ t('ui.backToDocumentation') }}
         </router-link>
         <h1 class="text-xl font-bold text-[#262624] dark:text-[#f1ead8] m-0 border-l border-[#e5e4df] dark:border-white/10 pl-4">
-          架构布局草案演示
+          {{ t('ui.architectureLayoutDrafts') }}
         </h1>
       </div>
       <div class="flex gap-2 bg-[#f5f5f0] dark:bg-[#1e1c19] p-1 rounded-xl border border-[#e5e4df] dark:border-white/5">
@@ -84,7 +88,7 @@ const demos = [
             AETHER GATEWAY
           </h2>
           <div class="text-sm font-medium w-full px-12 text-center text-[#262624] dark:text-[#f1ead8]">
-            <span class="px-3">多源聚合</span>|<span class="px-3">鉴权 / 配额管控</span>|<span class="px-3">负载均衡 / 故障转移</span>|<span class="px-3">基于亲和性路由</span>
+            <span class="px-3">{{ t('ui.multiSourceAggregation') }}</span>|<span class="px-3">{{ t('ui.authenticationQuotaControls') }}</span>|<span class="px-3">{{ t('ui.loadBalancingFailover') }}</span>|<span class="px-3">{{ t('ui.affinityBasedRouting') }}</span>
           </div>
         </div>
 
@@ -100,13 +104,13 @@ const demos = [
         <div class="flex gap-24 w-full justify-center">
           <div class="w-72 h-32 bg-[#a855f7]/10 border-2 border-[#a855f7] rounded-xl flex flex-col items-center justify-center text-[#a855f7]">
             <h3 class="font-bold text-lg mb-2">
-              3. 格式转换引擎
+              {{ t('ui.3FormatConversionEngine') }}
             </h3>
             <span class="text-xs font-mono">Protocols Translate</span>
           </div>
           <div class="w-72 h-32 bg-[#3b82f6]/10 border-2 border-[#3b82f6] rounded-xl flex flex-col items-center justify-center text-[#3b82f6]">
             <h3 class="font-bold text-lg mb-2">
-              4. 原生双向透传
+              {{ t('ui.4NativeBidirectionalPassThrough') }}
             </h3>
             <span class="text-xs font-mono">Direct Passthrough</span>
           </div>
@@ -173,7 +177,7 @@ const demos = [
         <!-- Engines Top/Bottom -->
         <div class="absolute top-24 left-1/2 -translate-x-1/2 flex flex-col items-center">
           <div class="w-48 h-16 bg-[#a855f7]/10 border-2 border-[#a855f7] rounded-xl flex items-center justify-center text-sm font-bold text-[#a855f7]">
-            格式转换引擎
+            {{ t('ui.formatConversionEngine') }}
           </div>
           <div class="w-[1px] h-12 bg-[#a855f7]" />
         </div>
@@ -181,7 +185,7 @@ const demos = [
         <div class="absolute bottom-24 left-1/2 -translate-x-1/2 flex flex-col items-center">
           <div class="w-[1px] h-12 bg-[#3b82f6]" />
           <div class="w-48 h-16 bg-[#3b82f6]/10 border-2 border-[#3b82f6] rounded-xl flex items-center justify-center text-sm font-bold text-[#3b82f6]">
-            原生直通管道
+            {{ t('ui.nativePassThroughChannel') }}
           </div>
         </div>
 

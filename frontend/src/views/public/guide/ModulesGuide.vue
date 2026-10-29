@@ -1,6 +1,10 @@
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { Blocks } from 'lucide-vue-next'
 import { panelClasses } from './guide-config'
+
 </script>
 
 <template>
@@ -8,14 +12,13 @@ import { panelClasses } from './guide-config'
     <!-- Hero 区域 -->
     <div class="space-y-4">
       <div class="inline-flex items-center gap-1.5 rounded-full bg-[#cc785c]/10 dark:bg-[#cc785c]/20 border border-[#cc785c]/20 dark:border-[#cc785c]/40 px-3 py-1 text-xs font-medium text-[#cc785c] dark:text-[#d4a27f]">
-        <Blocks class="h-3 w-3" />
-        系统扩展
+        <Blocks class="h-3 w-3" /> {{ t('ui.systemExtensions') }}
       </div>
       <h1 class="text-3xl font-bold text-[#262624] dark:text-[#f1ead8]">
-        模块管理
+        {{ t('nav.moduleManagement') }}
       </h1>
       <p class="text-base text-[#666663] dark:text-[#a3a094] max-w-2xl">
-        Aether 提供高可插入的模块化管理机制，帮助连接外部服务和授权系统。
+        {{ t('ui.aetherProvidesAHighlyPluggableModuleManagementSystemForConnecting') }}
       </p>
     </div>
 
@@ -46,10 +49,10 @@ import { panelClasses } from './guide-config'
           /></svg>
         </div>
         <h3 class="text-xl font-bold text-[#262624] dark:text-[#f1ead8] mb-2 m-0 mt-0 pt-0 border-0">
-          1. 访问令牌
+          {{ t('ui.1AccessTokens') }}
         </h3>
         <p class="text-sm text-[#666663] dark:text-[#a3a094] leading-relaxed">
-          允许通过 Management Token 授权使用全部或部分后端敏感接口（如自动化运维脚本接入）。
+          {{ t('ui.allowManagementTokensToAuthorizeAllOrSelectedSensitiveBackend') }}
         </p>
       </section>
 
@@ -80,10 +83,10 @@ import { panelClasses } from './guide-config'
           /><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" /></svg>
         </div>
         <h3 class="text-xl font-bold text-[#262624] dark:text-[#f1ead8] mb-2 m-0 mt-0 pt-0 border-0">
-          2. 邮件配置
+          {{ t('ui.2EmailConfiguration') }}
         </h3>
         <p class="text-sm text-[#666663] dark:text-[#a3a094] leading-relaxed">
-          用于注册验证及账户通知服务。管理员可以自定义 SMTP 服务器并高度定制系统发送的各种 HTML 邮件模板。
+          {{ t('ui.usedForRegistrationVerificationAndAccountNotificationsAdministratorsCanCustomize') }}
         </p>
       </section>
 
@@ -112,10 +115,10 @@ import { panelClasses } from './guide-config'
           /><polyline points="16 11 18 13 22 9" /></svg>
         </div>
         <h3 class="text-xl font-bold text-[#262624] dark:text-[#f1ead8] mb-2 m-0 mt-0 pt-0 border-0">
-          3. OAuth 登录
+          {{ t('ui.3OauthSignIn') }}
         </h3>
         <p class="text-sm text-[#666663] dark:text-[#a3a094] leading-relaxed">
-          支持包括 Linux Do OAuth 等多种第三方授权验证登录，方便统一认证渠道并提升用户体验。
+          {{ t('ui.supportsThirdPartyAuthorizationAndVerificationSignInIncludingLinux') }}
         </p>
       </section>
 
@@ -140,10 +143,10 @@ import { panelClasses } from './guide-config'
           ><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" /><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" /><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2" /><path d="M10 6h4" /><path d="M10 10h4" /><path d="M10 14h4" /><path d="M10 18h4" /></svg>
         </div>
         <h3 class="text-xl font-bold text-[#262624] dark:text-[#f1ead8] mb-2 m-0 mt-0 pt-0 border-0">
-          4. LDAP 认证
+          {{ t('ui.4LdapAuthentication') }}
         </h3>
         <p class="text-sm text-[#666663] dark:text-[#a3a094] leading-relaxed">
-          为企业管理构建。直接对接企业现有的 LDAP 或 Active Directory 目录以映射内网员工账户和组织架构。
+          {{ t('ui.builtForEnterpriseManagementConnectDirectlyToExistingLdapOr') }}
         </p>
       </section>
     </div>

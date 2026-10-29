@@ -1,7 +1,7 @@
 <template>
   <Dialog
     :model-value="open"
-    :title="`配额详情 - ${keyName}`"
+    :title="t('ui.quotaDetailsValue', { name: keyName })"
     :icon="BarChart3"
     size="2xl"
     :z-index="70"
@@ -17,7 +17,7 @@
             variant="ghost"
             size="icon"
             class="h-8 w-8"
-            title="测试模型"
+            :title="t('ui.testModel')"
             :disabled="!!testingModel"
           >
             <Loader2
@@ -77,10 +77,10 @@
             class="text-[9px] text-muted-foreground/70 mt-0.5"
           >
             <template v-if="item.resetSeconds > 0">
-              {{ formatResetTime(item.resetSeconds) }}后重置
+              {{ formatResetTime(item.resetSeconds) }}{{ t('ui.untilReset') }}
             </template>
             <template v-else>
-              已重置
+              {{ t('ui.resetd2cd2e2') }}
             </template>
           </div>
         </div>
@@ -89,7 +89,7 @@
         v-else
         class="text-center text-sm text-muted-foreground py-8"
       >
-        暂无配额数据
+        {{ t('ui.noQuotaData') }}
       </div>
     </div>
     <template #footer>
@@ -97,7 +97,7 @@
         variant="outline"
         @click="$emit('update:open', false)"
       >
-        关闭
+        {{ t('ui.close') }}
       </Button>
     </template>
   </Dialog>
@@ -139,6 +139,8 @@ defineEmits<{
   'update:open': [value: boolean]
 }>()
 
+const { t } = useI18n()
+
 interface QuotaItem {
   model: string
   label: string
@@ -149,7 +151,7 @@ interface QuotaItem {
 }
 
 const { error: showError, success: showSuccess } = useToast()
-const { t } = useI18n()
+
 const testingModel = ref<string | null>(null)
 
 function getQuotaSnapshotUpdatedAt(quota: QuotaStatusSnapshot | null | undefined): number | undefined {
@@ -355,15 +357,15 @@ async function handleTestModel(modelName: string) {
         result.data?.response?.choices?.[0]?.message?.content
         || result.data?.content_preview
       if (content) {
-        showSuccess(`测试成功，响应: ${String(content).substring(0, 100)}${String(content).length > 100 ? '...' : ''}`)
+        showSuccess(t('providers.migration.testSucceededResponse50258c', { value: String(String(content).substring(0, 100)), value_2: String(String(content).length > 100 ? '...' : '') }))
       } else {
-        showSuccess(`模型 "${modelName}" 测试成功`)
+        showSuccess(t('providers.migration.modelTestedSuccessfullyf8fc2a', { value: String(modelName) }))
       }
     } else {
-      showError(`模型测试失败: ${result.error || '未知错误'}`)
+      showError(t('providers.migration.modelTestFailed42b317', { value: String(result.error || t('ui.unknownError')) }))
     }
   } catch (err: unknown) {
-    showError(`模型测试失败: ${parseApiError(err, '测试请求失败')}`)
+    showError(t('providers.migration.modelTestFailed42b317', { value: String(parseApiError(err, t('ui.testRequestFailed'))) }))
   } finally {
     testingModel.value = null
   }
@@ -388,8 +390,8 @@ function formatResetTime(seconds: number): string {
   const hours = Math.floor((seconds % 86400) / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
 
-  if (days > 0) return `${days}天 ${hours}小时`
-  if (hours > 0) return `${hours}小时 ${minutes}分钟`
-  return `${minutes}分钟`
+  if (days > 0) return t('providers.migration.dH1f8c72', { value: String(days), value_2: String(hours) })
+  if (hours > 0) return t('providers.migration.hMeeb579', { value: String(hours), value_2: String(minutes) })
+  return t('providers.migration.m248510', { value: String(minutes) })
 }
 </script>

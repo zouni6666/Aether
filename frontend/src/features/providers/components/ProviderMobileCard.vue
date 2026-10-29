@@ -25,7 +25,7 @@
             :variant="provider.is_active ? 'success' : 'secondary'"
             class="text-xs shrink-0"
           >
-            {{ legacyT(provider.is_active ? '全局启用' : '全局停用') }}
+            {{ provider.is_active ? t('ui.enableGlobally') : t('ui.disableGlobally') }}
           </Badge>
         </div>
         <!-- 内联编辑备注 (移动端) -->
@@ -39,19 +39,19 @@
             v-model="localDescriptionValue"
             v-auto-focus
             class="flex-1 min-w-0 text-xs px-1.5 py-0.5 rounded border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
-            :placeholder="legacyT('输入备注...')"
+            :placeholder="t('ui.enterNotes')"
             @keydown="handleDescriptionKeydown"
           >
           <button
             class="shrink-0 p-0.5 rounded hover:bg-muted text-primary"
-            :title="legacyT('保存')"
+            :title="t('ui.save')"
             @click="handleSave"
           >
             <Check class="w-3.5 h-3.5" />
           </button>
           <button
             class="shrink-0 p-0.5 rounded hover:bg-muted text-muted-foreground"
-            :title="legacyT('取消')"
+            :title="t('common.cancel')"
             @click="handleCancel"
           >
             <X class="w-3.5 h-3.5" />
@@ -67,7 +67,7 @@
           v-else
           class="text-xs text-muted-foreground cursor-pointer hover:text-foreground/70 transition-colors"
           @click="handleStartEdit"
-        >{{ legacyT('添加备注') }}</span>
+        >{{ t('ui.addNotes') }}</span>
       </div>
       <div
         class="flex items-center gap-0.5 shrink-0"
@@ -78,7 +78,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7"
-          :title="legacyT('查看详情')"
+          :title="t('ui.viewDetails')"
           @click="$emit('viewDetail', provider.id)"
         >
           <Eye class="h-3.5 w-3.5" />
@@ -87,7 +87,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7"
-          :title="legacyT('编辑提供商')"
+          :title="t('ui.editProvider')"
           @click="$emit('editProvider', provider)"
         >
           <Edit class="h-3.5 w-3.5" />
@@ -96,7 +96,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7"
-          :title="legacyT('扩展操作配置')"
+          :title="t('ui.opsConfiguration')"
           @click="$emit('openOpsConfig', provider)"
         >
           <KeyRound class="h-3.5 w-3.5" />
@@ -105,8 +105,8 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7"
-          :title="legacyT(provider.is_active ? '全局停用提供商' : '全局启用提供商')"
-          :aria-label="legacyT(provider.is_active ? '全局停用提供商' : '全局启用提供商')"
+          :title="provider.is_active ? t('ui.disableProviderGlobally') : t('ui.enableProviderGlobally')"
+          :aria-label="provider.is_active ? t('ui.disableProviderGlobally') : t('ui.enableProviderGlobally')"
           @click="$emit('toggleStatus', provider)"
         >
           <Power class="h-3.5 w-3.5" />
@@ -136,31 +136,31 @@
         class="text-muted-foreground flex items-center gap-1"
       >
         <Loader2 class="h-3 w-3 animate-spin" />
-        {{ legacyT('加载中...') }}
+        {{ t('common.loading') }}
       </span>
       <!-- 余额（从上游 API 查询） -->
       <span
         v-else-if="provider.ops_configured && getProviderBalance(provider.id)"
         class="text-muted-foreground"
       >
-        {{ legacyT('余额') }} <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(getProviderBalance(provider.id)) }}</span>
+        {{ t('ui.balance') }} <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(getProviderBalance(provider.id)) }}</span>
         <!-- Cookie 失效警告 -->
         <span
           v-if="getProviderCookieExpired(provider.id)"
           class="ml-1 text-amber-600 dark:text-amber-500"
           :title="getProviderCookieExpired(provider.id)?.message"
-        >{{ legacyT('签到 Cookie 已失效') }}</span>
+        >{{ t('ui.checkInCookieExpired') }}</span>
         <!-- 签到状态显示 -->
         <span
           v-else-if="getProviderCheckin(provider.id) && getProviderCheckin(provider.id)?.success !== false"
           class="ml-1 text-muted-foreground"
           :title="getProviderCheckin(provider.id)?.message"
-        >{{ legacyT('已签到') }}</span>
+        >{{ t('ui.checkedIn') }}</span>
         <span
           v-else-if="getProviderCheckin(provider.id)?.success === false"
           class="ml-1 text-destructive/70"
           :title="getProviderCheckin(provider.id)?.message"
-        >{{ legacyT('签到失败') }}</span>
+        >{{ t('ui.checkInFailed') }}</span>
       </span>
       <!-- 余额查询失败时显示错误 -->
       <span
@@ -175,19 +175,19 @@
         v-else-if="provider.billing_type === 'monthly_quota'"
         class="text-muted-foreground"
       >
-        {{ legacyT('配额') }} <span
+        {{ t('ui.quotae284fc9') }} <span
           class="font-semibold"
           :class="getQuotaUsedColorClass(provider)"
         >${{ (provider.monthly_used_usd ?? 0).toFixed(2) }}</span>/<span class="font-medium">${{ (provider.monthly_quota_usd ?? 0).toFixed(2) }}</span>
       </span>
       <span class="text-muted-foreground">
-        {{ legacyT('端点') }} {{ provider.active_endpoints }}/{{ provider.total_endpoints }}
+        {{ t('ui.endpoint52fff16') }} {{ provider.active_endpoints }}/{{ provider.total_endpoints }}
       </span>
       <span class="text-muted-foreground">
         {{ getCredentialLabel(provider) }} {{ provider.active_keys }}/{{ provider.total_keys }}
       </span>
       <span class="text-muted-foreground">
-        {{ legacyT('模型') }} {{ provider.active_models }}/{{ provider.total_models }}
+        {{ t('ui.model') }} {{ provider.active_models }}/{{ provider.total_models }}
       </span>
     </div>
 
@@ -278,12 +278,14 @@ const emit = defineEmits<{
   'cancelEditDescription': [event?: Event]
 }>()
 
+const { t, locale } = useI18n()
+
 const vAutoFocus = {
   mounted: (el: HTMLElement) => el.focus(),
 }
 
 const localDescriptionValue = ref('')
-const { legacyT, locale } = useI18n()
+
 const safeProviderWebsite = computed(() => safeExternalWebUrl(props.provider.website))
 
 watch(
@@ -320,6 +322,6 @@ function handleDescriptionKeydown(event: KeyboardEvent) {
 }
 
 function getCredentialLabel(provider: ProviderWithEndpointsSummary): string {
-  return legacyT(isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号')
+  return isKeyManagedProviderType(provider.provider_type) ? t('ui.key') : t('ui.account')
 }
 </script>

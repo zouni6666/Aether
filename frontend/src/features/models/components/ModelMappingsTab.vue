@@ -5,10 +5,9 @@
       <div class="flex items-center justify-between">
         <div class="flex items-baseline gap-2">
           <h4 class="text-sm font-semibold">
-            映射规则
+            {{ t('ui.mappingRules') }}
           </h4>
-          <span class="text-xs text-muted-foreground">
-            支持正则表达式 ({{ localMappings.length }}/{{ MAX_MAPPINGS_PER_MODEL }})
+          <span class="text-xs text-muted-foreground"> {{ t('ui.supportsRegularExpressions') }}{{ localMappings.length }}/{{ MAX_MAPPINGS_PER_MODEL }})
           </span>
         </div>
         <div class="flex items-center gap-1">
@@ -16,7 +15,7 @@
             variant="ghost"
             size="icon"
             class="h-7 w-7"
-            title="添加规则"
+            :title="t('ui.addRule')"
             :disabled="localMappings.length >= MAX_MAPPINGS_PER_MODEL"
             @click="addMapping"
           >
@@ -26,7 +25,7 @@
             variant="ghost"
             size="icon"
             class="h-7 w-7"
-            title="刷新"
+            :title="t('ui.refresh')"
             :disabled="props.loading"
             @click="$emit('refresh')"
           >
@@ -60,7 +59,7 @@
           <div class="flex-1 min-w-0">
             <Input
               v-model="localMappings[index]"
-              placeholder="例如: claude-haiku-.*"
+              :placeholder="t('ui.eGClaudeHaiku')"
               :class="`font-mono text-sm ${normalizedMappings[index] && !mappingValidations[index].valid ? 'border-destructive' : ''}`"
               @click.stop
               @input="markDirty"
@@ -80,14 +79,14 @@
             variant="secondary"
             class="text-xs flex-shrink-0 h-6 leading-none"
           >
-            {{ mappingMatchCounts[index] }} 匹配
+            {{ mappingMatchCounts[index] }} {{ t('ui.match') }}
           </Badge>
           <Badge
             v-else-if="normalizedMappings[index] && mappingValidations[index].valid"
             variant="outline"
             class="text-xs text-muted-foreground flex-shrink-0 h-6 leading-none"
           >
-            无匹配
+            {{ t('ui.noMatches') }}
           </Badge>
           <!-- 操作按钮 -->
           <div class="flex items-center gap-1 flex-shrink-0">
@@ -96,7 +95,7 @@
               variant="ghost"
               size="icon"
               class="h-7 w-7 text-muted-foreground hover:text-primary"
-              title="保存"
+              :title="t('ui.save')"
               :disabled="saving || hasValidationErrors"
               @click.stop="saveMappings"
             >
@@ -113,7 +112,7 @@
               variant="ghost"
               size="icon"
               class="h-7 w-7 text-muted-foreground hover:text-destructive"
-              title="删除"
+              :title="t('ui.delete')"
               :disabled="saving"
               @click.stop="removeMapping(index)"
             >
@@ -139,7 +138,7 @@
             class="text-center py-4"
           >
             <p class="text-sm text-muted-foreground">
-              {{ normalizedMappings[index] ? '此规则暂无匹配的 Key 白名单' : '请输入映射规则' }}
+              {{ normalizedMappings[index] ? t('ui.noKeyAllowlistsMatchThisRule') : t('ui.enterAMappingRule') }}
             </p>
           </div>
 
@@ -164,14 +163,14 @@
                   variant="secondary"
                   class="text-xs"
                 >
-                  已关联
+                  {{ t('ui.linked59b1cc0') }}
                 </Badge>
                 <Button
                   v-else
                   variant="ghost"
                   size="icon"
                   class="h-7 w-7"
-                  title="关联到当前模型"
+                  :title="t('ui.linkToCurrentModel')"
                   @click="$emit('linkProvider', group.providerId)"
                 >
                   <Link class="w-3.5 h-3.5" />
@@ -213,13 +212,15 @@
     >
       <GitMerge class="w-10 h-10 mx-auto text-muted-foreground/30 mb-3" />
       <p class="text-sm text-muted-foreground">
-        暂无映射规则
+        {{ t('ui.noMappingRules') }}
       </p>
     </div>
   </Card>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, watch, onUnmounted, computed } from 'vue'
 import { Card, Button, Input, Badge } from '@/components/ui'
 import { Plus, Trash2, GitMerge, RefreshCw, ChevronRight, Save, AlertCircle, Link } from 'lucide-vue-next'
@@ -250,6 +251,8 @@ const emit = defineEmits<{
   linkProvider: [providerId: string]
   linkProviders: [providerIds: string[]]  // 批量关联
 }>()
+
+const { t } = useI18n()
 
 const { success: toastSuccess, error: toastError } = useToast()
 
@@ -478,7 +481,7 @@ async function removeMapping(index: number) {
   }
   // 删除后自动保存（仅在当前无校验错误时）
   if (hasValidationErrors.value) {
-    toastError('存在无效映射规则，请修正后再保存')
+    toastError(t('ui.correctInvalidMappingRulesBeforeSaving'))
     isDirty.value = true
     return
   }
@@ -487,7 +490,7 @@ async function removeMapping(index: number) {
 
 async function saveMappings() {
   if (hasValidationErrors.value) {
-    toastError('存在无效映射规则，无法保存')
+    toastError(t('ui.cannotSaveInvalidMappingRules'))
     return
   }
 
@@ -533,7 +536,7 @@ async function saveMappings() {
       toastSuccess(`映射规则已保存，正在关联 ${unlinkedProviderIds.length} 个提供商...`)
       emit('linkProviders', unlinkedProviderIds)
     } else {
-      toastSuccess('映射规则已保存')
+      toastSuccess(t('ui.mappingRulesSaved'))
     }
 
     // 保存成功后刷新数据
@@ -541,7 +544,7 @@ async function saveMappings() {
     emit('refresh')
   } catch (err) {
     log.error('保存映射规则失败:', err)
-    toastError('保存失败，请重试')
+    toastError(t('ui.failedToSaveTryAgain'))
     // 保存失败时恢复到原始值
     localMappings.value = [...originalMappings.value]
     isDirty.value = false
@@ -587,4 +590,5 @@ onUnmounted(() => {
 defineExpose({
   refresh: loadMatchPreview
 })
+
 </script>

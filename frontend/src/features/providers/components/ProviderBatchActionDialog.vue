@@ -1,7 +1,7 @@
 <template>
   <Dialog
     :model-value="modelValue"
-    title="提供商批量处理"
+    :title="t('ui.providerBulkActions')"
     :description="dialogDescription"
     :icon="Users"
     size="2xl"
@@ -47,7 +47,7 @@
           <Input
             v-model="searchText"
             class="h-9 w-full pl-9"
-            placeholder="搜索提供商名称 / 类型 / 备注"
+            :placeholder="t('ui.searchProviderNameTypeNotes')"
             :disabled="executing"
           />
         </div>
@@ -57,7 +57,7 @@
             :disabled="filteredProviders.length === 0 || executing"
             @update:checked="toggleFilteredSelection"
           />
-          <span>全选{{ searchText.trim() ? '筛选结果' : '本页' }}</span>
+          <span>{{ t('ui.selectAll') }}{{ searchText.trim() ? t('ui.filteredResults') : t('ui.thisPage') }}</span>
         </label>
         <Button
           variant="ghost"
@@ -66,7 +66,7 @@
           :disabled="selectedCount === 0 || executing"
           @click="clearSelection"
         >
-          清空选择
+          {{ t('ui.clearSelection') }}
         </Button>
       </div>
 
@@ -78,8 +78,8 @@
             :disabled="filteredProviders.length === 0 || executing"
             @update:checked="toggleFilteredSelection"
           />
-          <span class="normal-case tracking-normal">提供商</span>
-          <span class="text-right normal-case tracking-normal">资源（活跃 / 总数）</span>
+          <span class="normal-case tracking-normal">{{ t('nav.providers') }}</span>
+          <span class="text-right normal-case tracking-normal">{{ t('ui.resourcesActiveTotal') }}</span>
         </div>
         <div class="max-h-[min(52vh,440px)] overflow-y-auto">
           <div
@@ -87,7 +87,7 @@
             class="flex flex-col items-center justify-center gap-1.5 py-14 text-center"
           >
             <Search class="h-6 w-6 text-muted-foreground/50" />
-            <span class="text-sm text-muted-foreground">无匹配提供商</span>
+            <span class="text-sm text-muted-foreground">{{ t('ui.noMatchingProviders0a5b7ee') }}</span>
           </div>
           <label
             v-for="provider in filteredProviders"
@@ -107,7 +107,7 @@
                   :variant="provider.is_active ? 'success' : 'secondary'"
                   class="shrink-0 text-[10px]"
                 >
-                  {{ provider.is_active ? '活跃' : '停用' }}
+                  {{ provider.is_active ? t('ui.activee85e590') : t('ui.disable4e6fd0e') }}
                 </Badge>
               </div>
               <div class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -119,9 +119,9 @@
               </div>
             </div>
             <div class="flex flex-col items-end gap-0.5 text-[11px] leading-tight text-muted-foreground">
-              <span><span class="text-muted-foreground/70">端点</span> <span class="font-medium tabular-nums text-foreground/80">{{ provider.active_endpoints }}/{{ provider.total_endpoints }}</span></span>
-              <span><span class="text-muted-foreground/70">账号</span> <span class="font-medium tabular-nums text-foreground/80">{{ provider.active_keys }}/{{ provider.total_keys }}</span></span>
-              <span><span class="text-muted-foreground/70">模型</span> <span class="font-medium tabular-nums text-foreground/80">{{ provider.active_models }}/{{ provider.total_models }}</span></span>
+              <span><span class="text-muted-foreground/70">{{ t('ui.endpoint52fff16') }}</span> <span class="font-medium tabular-nums text-foreground/80">{{ provider.active_endpoints }}/{{ provider.total_endpoints }}</span></span>
+              <span><span class="text-muted-foreground/70">{{ t('ui.account') }}</span> <span class="font-medium tabular-nums text-foreground/80">{{ provider.active_keys }}/{{ provider.total_keys }}</span></span>
+              <span><span class="text-muted-foreground/70">{{ t('ui.model') }}</span> <span class="font-medium tabular-nums text-foreground/80">{{ provider.active_models }}/{{ provider.total_models }}</span></span>
             </div>
           </label>
         </div>
@@ -156,11 +156,11 @@
     <template #footer>
       <div class="flex w-full flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>已选 <span class="font-semibold tabular-nums text-foreground">{{ selectedCount }}</span></span>
+          <span>{{ t('ui.selected') }} <span class="font-semibold tabular-nums text-foreground">{{ selectedCount }}</span></span>
           <span class="text-border">·</span>
-          <span>本页 <span class="tabular-nums">{{ providers.length }}</span></span>
-          <span class="text-emerald-600 dark:text-emerald-400">活跃 <span class="tabular-nums">{{ activeProviderCount }}</span></span>
-          <span>停用 <span class="tabular-nums">{{ inactiveProviderCount }}</span></span>
+          <span>{{ t('ui.thisPage') }} <span class="tabular-nums">{{ providers.length }}</span></span>
+          <span class="text-emerald-600 dark:text-emerald-400">{{ t('ui.activee85e590') }} <span class="tabular-nums">{{ activeProviderCount }}</span></span>
+          <span>{{ t('ui.disable4e6fd0e') }} <span class="tabular-nums">{{ inactiveProviderCount }}</span></span>
         </div>
         <div class="flex items-center gap-2">
           <Button
@@ -168,7 +168,7 @@
             :disabled="executing"
             @click="emit('update:modelValue', false)"
           >
-            关闭
+            {{ t('ui.close') }}
           </Button>
           <Button
             :variant="selectedAction === 'delete' ? 'destructive' : 'default'"
@@ -184,6 +184,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, ref, watch, type Component } from 'vue'
 import { AlertTriangle, Power, PowerOff, Search, Trash2, Users } from 'lucide-vue-next'
 import { Badge, Button, Checkbox, Dialog, Input } from '@/components/ui'
@@ -218,13 +220,15 @@ const emit = defineEmits<{
   changed: []
 }>()
 
+const { t } = useI18n()
+
 const { confirm } = useConfirm()
 const { success, warning, error: showError } = useToast()
 
 const actionOptions: ProviderBatchActionOption[] = [
-  { value: 'enable', label: '启用', hint: '全局启用所选提供商；各策略分组的启用设置仍分别生效。', icon: Power },
-  { value: 'disable', label: '停用', hint: '在所有策略分组中停止所选提供商参与调度，保留配置。', icon: PowerOff },
-  { value: 'delete', label: '删除', hint: '永久删除所选提供商及其端点、账号和配置，此操作不可恢复。', icon: Trash2, destructive: true },
+  { value: 'enable', get label() { return t('ui.enablef4f0ead') }, get hint() { return t('providers.migration.enableSelectedProvidersGloballyEach9d0f23') }, icon: Power },
+  { value: 'disable', get label() { return t('ui.disable4e6fd0e') }, get hint() { return t('providers.migration.stopSelectedProvidersFromScheduling7244c5') }, icon: PowerOff },
+  { value: 'delete', get label() { return t('ui.delete') }, get hint() { return t('ui.permanentlyDeleteTheSelectedProvidersEndpointsAccountsAndConfigurationThis') }, icon: Trash2, destructive: true },
 ]
 
 const SEGMENT_ACCENT: Record<ProviderBatchAction, string> = {
@@ -242,15 +246,15 @@ const progressTotal = ref(0)
 const progressLabel = ref('')
 const lastResultMessage = ref('')
 
-const dialogDescription = computed(() => '批量修改当前页提供商的全局状态，或删除提供商')
+const dialogDescription = computed(() => t('providers.migration.batchUpdateTheGlobalStatusd11f2c'))
 const selectedIdSet = computed(() => new Set(selectedProviderIds.value))
 const selectedCount = computed(() => selectedProviderIds.value.length)
 const selectedActionLabel = computed(() => actionOptions.find(action => action.value === selectedAction.value)?.label || '')
 const selectedActionMeta = computed(() => actionOptions.find(action => action.value === selectedAction.value))
 const executeButtonLabel = computed(() => {
-  if (executing.value) return '执行中...'
-  if (selectedCount.value > 0) return `${selectedActionLabel.value} ${selectedCount.value} 项`
-  return `执行${selectedActionLabel.value}`
+  if (executing.value) return t('ui.runningfeed25e')
+  if (selectedCount.value > 0) return t('providers.migration.items41e151', { value: String(selectedActionLabel.value), value_2: String(selectedCount.value) })
+  return t('providers.migration.execute2e1e8c', { value: String(selectedActionLabel.value) })
 })
 const activeProviderCount = computed(() => props.providers.filter(provider => provider.is_active).length)
 const inactiveProviderCount = computed(() => props.providers.length - activeProviderCount.value)
@@ -321,13 +325,13 @@ function rowClass(providerId: string): string {
 async function confirmAndExecute(): Promise<void> {
   if (!canExecute.value) return
   const action = actionOptions.find(item => item.value === selectedAction.value)
-  const actionLabel = action?.label || '批量操作'
+  const actionLabel = action?.label || t('ui.batchActions')
   const confirmed = await confirm({
-    title: `批量${actionLabel}提供商`,
+    title: t('providers.migration.batchProviders9d3da1', { value: String(actionLabel) }),
     message: selectedAction.value === 'delete'
-      ? `将删除 ${selectedCount.value} 个提供商，并同时删除其所有端点、账号和配置。此操作不可恢复，是否继续？`
-      : `将对 ${selectedCount.value} 个提供商执行：${actionLabel}，是否继续？`,
-    confirmText: selectedAction.value === 'delete' ? '确认删除' : '确认执行',
+      ? t('providers.migration.deleteProvidersAndAllTheira6a45b', { value: String(selectedCount.value) })
+      : t('providers.migration.applyToProviders7d8b7d', { value: String(selectedCount.value), value_2: String(actionLabel) }),
+    confirmText: selectedAction.value === 'delete' ? t('ui.confirmDeletion') : t('ui.confirmAction'),
     ...(selectedAction.value === 'delete' ? { variant: 'destructive' as const } : {}),
   })
   if (!confirmed) return
@@ -367,7 +371,7 @@ async function executeBatchAction(): Promise<void> {
     .map(id => providerById.value.get(id))
     .filter((provider): provider is ProviderWithEndpointsSummary => Boolean(provider))
   if (targets.length === 0) {
-    warning('请先选择提供商')
+    warning(t('ui.selectProvidersFirst'))
     return
   }
 
@@ -380,7 +384,7 @@ async function executeBatchAction(): Promise<void> {
 
   try {
     for (const provider of targets) {
-      progressLabel.value = `正在${selectedActionLabel.value}：${provider.name}`
+      progressLabel.value = t('providers.migration.message9bfe53', { value: String(selectedActionLabel.value), value_2: String(provider.name) })
       try {
         if (selectedAction.value === 'delete') {
           const result = await deleteProvider(provider.id)
@@ -397,7 +401,7 @@ async function executeBatchAction(): Promise<void> {
       }
     }
 
-    lastResultMessage.value = `执行完成：成功 ${successCount}，失败 ${failedCount}`
+    lastResultMessage.value = t('providers.migration.completedSucceededFaileded7158', { value: String(successCount), value_2: String(failedCount) })
     if (failedCount > 0) warning(lastResultMessage.value)
     else success(lastResultMessage.value)
     if (successCount > 0) {
@@ -405,7 +409,7 @@ async function executeBatchAction(): Promise<void> {
       emit('changed')
     }
   } catch (err) {
-    showError(parseApiError(err, '批量处理提供商失败'), '错误')
+    showError(parseApiError(err, t('ui.providerBulkActionFailed')), t('ui.error'))
   } finally {
     executing.value = false
     progressDone.value = 0
@@ -432,4 +436,5 @@ watch(
     selectedProviderIds.value = selectedProviderIds.value.filter(id => availableIds.has(id))
   },
 )
+
 </script>

@@ -1,14 +1,9 @@
-import { getI18nLocale } from '@/i18n'
-import { translateLegacyText } from '@/i18n/messages'
+import { translate, type MessageKey } from '@/i18n'
 
 export type PasswordPolicyLevel = 'weak' | 'medium' | 'strong'
 export const PASSWORD_MAX_BYTES = 72
 
 const textEncoder = new TextEncoder()
-
-function tr(value: string): string {
-  return translateLegacyText(value, getI18nLocale())
-}
 
 function getPasswordByteLength(password: string): number {
   return textEncoder.encode(password).length
@@ -21,105 +16,87 @@ export const PASSWORD_POLICY_OPTIONS: Array<{
 }> = [
   {
     value: 'weak',
-    label: '弱密码',
-    description: '至少 6 个字符',
+    get label() { return translate('feedback.password.weak') },
+    get description() { return translate('feedback.password.minCharacters', { count: 6 }) },
   },
   {
     value: 'medium',
-    label: '中等密码',
-    description: '至少 8 个字符，且包含字母和数字',
+    get label() { return translate('feedback.password.medium') },
+    get description() { return translate('feedback.password.optionMedium') },
   },
   {
     value: 'strong',
-    label: '强密码',
-    description: '至少 8 个字符，且包含大小写字母、数字和特殊字符',
+    get label() { return translate('feedback.password.strong') },
+    get description() { return translate('feedback.password.optionStrong') },
   },
 ]
 
 export function normalizePasswordPolicyLevel(value: unknown): PasswordPolicyLevel {
-  if (value === 'medium' || value === 'strong') {
-    return value
-  }
-  return 'weak'
+  return value === 'medium' || value === 'strong' ? value : 'weak'
 }
 
 export function getPasswordPolicyHint(level: unknown): string {
   switch (normalizePasswordPolicyLevel(level)) {
-    case 'medium':
-      return tr('至少 8 个字符，且需包含字母和数字')
-    case 'strong':
-      return tr('至少 8 个字符，且需包含大写字母、小写字母、数字和特殊字符')
-    case 'weak':
-    default:
-      return tr('至少 6 个字符')
+    case 'medium': return translate('feedback.password.hintMedium')
+    case 'strong': return translate('feedback.password.hintStrong')
+    default: return translate('feedback.password.minCharacters', { count: 6 })
   }
 }
 
 export function getPasswordPolicyPlaceholder(level: unknown): string {
   switch (normalizePasswordPolicyLevel(level)) {
-    case 'medium':
-      return tr('至少 8 位，含字母和数字')
-    case 'strong':
-      return tr('至少 8 位，含大小写字母、数字和特殊字符')
-    case 'weak':
-    default:
-      return tr('至少 6 个字符')
+    case 'medium': return translate('feedback.password.placeholderMedium')
+    case 'strong': return translate('feedback.password.placeholderStrong')
+    default: return translate('feedback.password.minCharacters', { count: 6 })
   }
 }
 
-/**
- * 返回所有未满足的密码策略条件。
- * 空数组 = 密码合规。
- */
-function getPasswordPolicyErrorSources(password: string, level: unknown): string[] {
+interface PasswordPolicyError {
+  key: MessageKey
+  params?: Record<string, string | number>
+}
+
+function getPasswordPolicyErrorMessages(password: string, level: unknown): PasswordPolicyError[] {
   if (!password) return []
 
   const normalized = normalizePasswordPolicyLevel(level)
-  const errors: string[] = []
-
-  const byteLength = getPasswordByteLength(password)
-  if (byteLength > PASSWORD_MAX_BYTES) {
-    errors.push(`长度不能超过${PASSWORD_MAX_BYTES}字节`)
+  const errors: PasswordPolicyError[] = []
+  if (getPasswordByteLength(password) > PASSWORD_MAX_BYTES) {
+    errors.push({ key: 'feedback.password.maxBytes', params: { count: PASSWORD_MAX_BYTES } })
   }
 
-  // 根据策略确定最小长度，不做两段式报错
   const minLen = normalized === 'weak' ? 6 : 8
   if (password.length < minLen) {
-    errors.push(`至少 ${minLen} 个字符`)
+    errors.push({ key: 'feedback.password.minCharacters', params: { count: minLen } })
   }
 
   if (normalized === 'medium') {
-    if (!/[A-Za-z]/.test(password)) errors.push('包含字母')
-    if (!/[0-9]/.test(password)) errors.push('包含数字')
+    if (!/[A-Za-z]/.test(password)) errors.push({ key: 'feedback.password.letters' })
+    if (!/[0-9]/.test(password)) errors.push({ key: 'feedback.password.numbers' })
   }
 
   if (normalized === 'strong') {
-    if (!/[A-Z]/.test(password)) errors.push('包含大写字母')
-    if (!/[a-z]/.test(password)) errors.push('包含小写字母')
-    if (!/[0-9]/.test(password)) errors.push('包含数字')
-    if (!/[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/.test(password)) errors.push('包含特殊字符')
+    if (!/[A-Z]/.test(password)) errors.push({ key: 'feedback.password.uppercase' })
+    if (!/[a-z]/.test(password)) errors.push({ key: 'feedback.password.lowercase' })
+    if (!/[0-9]/.test(password)) errors.push({ key: 'feedback.password.numbers' })
+    if (!/[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/.test(password)) errors.push({ key: 'feedback.password.special' })
   }
 
   return errors
 }
 
 export function getPasswordPolicyErrors(password: string, level: unknown): string[] {
-  return getPasswordPolicyErrorSources(password, level).map(tr)
+  return getPasswordPolicyErrorMessages(password, level).map(({ key, params }) => translate(key, params))
 }
 
-/**
- * 兼容旧接口：返回单条错误字符串，空字符串表示通过。
- * 多条未满足条件时用顿号连接。
- */
 export function validatePasswordByPolicy(password: string, level: unknown): string {
-  const rawErrors = getPasswordPolicyErrorSources(password, level)
-  const errors = rawErrors.map(tr)
+  const errors = getPasswordPolicyErrorMessages(password, level)
   if (errors.length === 0) return ''
-  if (rawErrors.length === 1 && rawErrors[0].startsWith('长度不能超过')) {
-    return tr(`密码${rawErrors[0]}`)
+  if (errors.length === 1 && errors[0].key === 'feedback.password.maxBytes') {
+    return translate('feedback.password.passwordMaxBytes', { count: PASSWORD_MAX_BYTES })
   }
-  if (getI18nLocale() === 'en-US') {
-    return `Password requires: ${errors.join(', ')}`
-  }
-  return `密码需要：${errors.join('、')}`
+  const requirements = errors
+    .map(({ key, params }) => translate(key, params))
+    .join(translate('feedback.password.separator'))
+  return translate('feedback.password.requires', { requirements })
 }

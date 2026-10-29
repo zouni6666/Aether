@@ -1,7 +1,7 @@
 <template>
   <section
     class="min-w-0"
-    aria-label="提供商调度工作区"
+    :aria-label="t('ui.providerSchedulingWorkspace')"
   >
     <div
       class="grid min-w-0 items-stretch transition-[grid-template-columns,gap] duration-200 ease-out motion-reduce:transition-none"
@@ -22,16 +22,16 @@
           v-show="!panelCollapsed"
           id="provider-policy-editor"
           class="flex min-w-0 flex-col gap-3 xl:min-h-0 xl:[contain:size]"
-          aria-label="策略分组设置"
+          :aria-label="t('ui.policyGroupSettings')"
           :inert="panelCollapsed"
         >
           <Card
             class="flex min-w-0 flex-1 flex-col xl:h-0 xl:min-h-full"
-            aria-label="策略分组与调度配置"
+            :aria-label="t('ui.policyGroupsAndSchedulingConfiguration')"
           >
             <div class="flex shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 py-3 sm:py-3.5">
               <h3 class="sr-only">
-                策略分组
+                {{ t('ui.policyGroups') }}
               </h3>
               <Select
                 :model-value="selectedValue"
@@ -40,11 +40,11 @@
               >
                 <SelectTrigger
                   class="h-8 min-w-0 flex-1 px-3 text-sm"
-                  :title="draft?.name || '选择策略分组'"
-                  aria-label="当前调度策略"
+                  :title="draft?.name || t('ui.selectPolicyGroup')"
+                  :aria-label="t('ui.currentSchedulingPolicy')"
                 >
                   <span class="min-w-0 truncate">
-                    <SelectValue :placeholder="loading ? '正在加载分组' : '选择策略分组'" />
+                    <SelectValue :placeholder="loading ? t('ui.loadingGroups') : t('ui.selectPolicyGroup')" />
                   </span>
                 </SelectTrigger>
                 <SelectContent>
@@ -52,14 +52,14 @@
                     v-if="isNewDraft"
                     value="new"
                   >
-                    新建策略
+                    {{ t('ui.createPolicy') }}
                   </SelectItem>
                   <SelectItem
                     v-for="group in groups"
                     :key="group.id"
                     :value="group.id"
                   >
-                    {{ group.name }}{{ group.is_system_default ? ' · 默认' : '' }}{{ !group.enabled ? ' · 停用' : '' }}
+                    {{ group.name }}{{ group.is_system_default ? " " + t('ui.defaulte99c9aa') : '' }}{{ !group.enabled ? " " + t('ui.disabled9868d7d') : '' }}
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -69,8 +69,8 @@
                   size="icon"
                   class="h-8 w-8"
                   :disabled="busy || isNewDraft"
-                  title="新建分组"
-                  aria-label="新建策略"
+                  :title="t('ui.createGroup')"
+                  :aria-label="t('ui.createPolicy')"
                   @click="openCreate"
                 >
                   <Plus class="h-3.5 w-3.5" />
@@ -81,8 +81,8 @@
                   size="icon"
                   class="h-8 w-8 text-muted-foreground hover:text-destructive"
                   :disabled="busy"
-                  title="删除策略分组"
-                  aria-label="删除策略"
+                  :title="t('ui.deletePolicyGroup')"
+                  :aria-label="t('ui.deletePolicy')"
                   @click="deleteDialogOpen = true"
                 >
                   <Trash2 class="h-3.5 w-3.5" />
@@ -94,8 +94,8 @@
                   class="h-8 w-8"
                   :class="{ 'text-primary': draft.is_system_default }"
                   :disabled="busy"
-                  :title="draft.is_system_default ? '取消系统默认（保存后生效）' : '设为系统默认（保存后生效）'"
-                  aria-label="设为系统默认"
+                  :title="draft.is_system_default ? t('ui.removeAsSystemDefaultTakesEffectAfterSaving') : t('ui.setAsSystemDefaultTakesEffectAfterSaving')"
+                  :aria-label="t('ui.setAsSystemDefault')"
                   :aria-pressed="draft.is_system_default"
                   @click="draft.is_system_default = !draft.is_system_default"
                 >
@@ -111,8 +111,8 @@
                   class="h-8 w-8"
                   :class="{ 'text-primary': draftDirty }"
                   :disabled="!canSaveDraft"
-                  :title="saving ? '正在保存…' : billingMultiplierError ?? (!routingSchedulingValid ? '请先选择适用模型' : draftDirty ? '保存修改' : '已保存')"
-                  aria-label="保存调度"
+                  :title="saving ? t('ui.saving6bdb443') : billingMultiplierError ?? (!routingSchedulingValid ? t('ui.selectTheApplicableModelsFirst') : draftDirty ? t('ui.saveChanges') : t('ui.saved1bd91a7'))"
+                  :aria-label="t('ui.saveScheduling')"
                   :aria-busy="saving"
                   @click="saveDraft"
                 >
@@ -128,33 +128,33 @@
                 v-if="draft"
                 ref="groupMetadata"
                 class="min-w-0 space-y-2 border-b border-border/50 p-3"
-                aria-label="分组信息"
+                :aria-label="t('ui.groupInformation')"
                 :inert="busy"
               >
                 <div class="flex min-w-0 items-center gap-2">
                   <label class="block min-w-0 flex-1">
-                    <span class="sr-only">策略名称</span>
+                    <span class="sr-only">{{ t('ui.policyName') }}</span>
                     <Input
                       v-model="draft.name"
                       size="sm"
                       class="min-w-0"
-                      aria-label="策略名称"
-                      placeholder="分组名称"
+                      :aria-label="t('ui.policyName')"
+                      :placeholder="t('ui.groupName')"
                       :disabled="busy"
                     />
                   </label>
                   <label class="flex shrink-0 items-center gap-1 text-xs">
-                    <span>启用</span>
+                    <span>{{ t('ui.enablef4f0ead') }}</span>
                     <Switch
                       v-model="draft.enabled"
                       :disabled="busy"
-                      aria-label="启用策略"
+                      :aria-label="t('ui.enablePolicy')"
                     />
                   </label>
                 </div>
                 <div class="flex min-w-0 items-center justify-between gap-3">
                   <label class="flex min-w-0 items-center gap-2 text-xs">
-                    <span class="shrink-0">分组倍率</span>
+                    <span class="shrink-0">{{ t('ui.groupMultiplier') }}</span>
                     <Input
                       :model-value="billingMultiplierInput"
                       type="number"
@@ -162,20 +162,20 @@
                       step="any"
                       size="sm"
                       class="w-24 min-w-0"
-                      aria-label="分组倍率"
+                      :aria-label="t('ui.groupMultiplier')"
                       :aria-invalid="Boolean(billingMultiplierError)"
                       :aria-describedby="billingMultiplierError ? 'group-billing-multiplier-error' : undefined"
                       :disabled="busy"
                       @update:model-value="updateBillingMultiplier"
                     />
-                    <span class="shrink-0 text-muted-foreground">倍</span>
+                    <span class="shrink-0 text-muted-foreground">{{ t('ui.multiplierSuffix') }}</span>
                   </label>
                   <label class="flex shrink-0 items-center gap-1 text-xs">
-                    <span>用户可见</span>
+                    <span>{{ t('ui.visibleToUsers') }}</span>
                     <Switch
                       v-model="draft.config_json.user_visible"
                       :disabled="busy"
-                      aria-label="用户可见"
+                      :aria-label="t('ui.visibleToUsers')"
                     />
                   </label>
                 </div>
@@ -200,7 +200,7 @@
                 :disabled="busy"
                 :aria-busy="saving"
                 class="p-3"
-                aria-label="策略调度配置"
+                :aria-label="t('ui.policySchedulingConfiguration')"
                 layout="config-only"
                 sidebar
                 @update:config="updateDraftConfig"
@@ -223,10 +223,10 @@
                     type="button"
                     class="flex w-full items-center justify-between gap-3 px-3 py-3 text-left"
                     :aria-expanded="advancedOpen"
-                    aria-label="高级设置"
+                    :aria-label="t('ui.advancedSettings')"
                     @click="advancedOpen = !advancedOpen"
                   >
-                    <span class="text-sm font-medium">高级设置</span>
+                    <span class="text-sm font-medium">{{ t('ui.advancedSettings') }}</span>
                     <ChevronRight
                       class="h-4 w-4 shrink-0 text-muted-foreground transition-transform"
                       :class="{ 'rotate-90': advancedOpen }"
@@ -239,7 +239,7 @@
                     <section class="min-w-0 space-y-2">
                       <div>
                         <h3 class="text-sm font-medium">
-                          系统配置
+                          {{ t('ui.systemConfiguration') }}
                         </h3>
                       </div>
                       <div class="grid min-w-0 grid-cols-1 gap-2">
@@ -248,17 +248,17 @@
                           data-testid="keep-priority-on-conversion"
                         >
                           <div class="flex min-w-0 items-center gap-1.5">
-                            <span class="font-medium">格式转换保持优先级</span>
+                            <span class="font-medium">{{ t('ui.keepPriorityOnFormatConversion') }}</span>
                             <HelpHint
                               portal
-                              label="格式转换保持优先级"
-                              text="开启后，跨 API 格式转换的候选不会被降级到同格式候选之后；Provider 自身的同名开关仍单独生效。"
+                              :label="t('ui.keepPriorityOnFormatConversion')"
+                              :text="t('ui.whenEnabledCandidatesRequiringApiFormatConversionAreNotRanked')"
                             />
                           </div>
                           <Switch
                             :model-value="keepPriorityOnConversion"
                             :disabled="saving"
-                            aria-label="格式转换保持优先级"
+                            :aria-label="t('ui.keepPriorityOnFormatConversion')"
                             @update:model-value="updateKeepPriorityOnConversion"
                           />
                         </div>
@@ -267,17 +267,17 @@
                           data-testid="cf-heartbeat"
                         >
                           <div class="flex min-w-0 items-center gap-1.5">
-                            <span class="font-medium">CF保持心跳</span>
+                            <span class="font-medium">{{ t('ui.cfKeepalive') }}</span>
                             <HelpHint
                               portal
-                              label="CF保持心跳"
-                              text="同步生图和标准文本非流式失败时保持外层 HTTP 状态为 200，并在响应体中返回错误。"
+                              :label="t('ui.cfKeepalive')"
+                              :text="t('ui.forSynchronousImageGenerationAndStandardNonStreamingTextFailures')"
                             />
                           </div>
                           <Switch
                             :model-value="cfHeartbeat"
                             :disabled="saving"
-                            aria-label="CF保持心跳"
+                            :aria-label="t('ui.cfKeepalive')"
                             @update:model-value="updateExecutionPolicy('enable_cf_heartbeat', $event)"
                           />
                         </div>
@@ -286,17 +286,17 @@
                           data-testid="cyber-continue-failover"
                         >
                           <div class="flex min-w-0 items-center gap-1.5">
-                            <span class="font-medium">Cyber继续转移</span>
+                            <span class="font-medium">{{ t('ui.failOverOnCyberErrors') }}</span>
                             <HelpHint
                               portal
-                              label="Cyber继续转移"
-                              text="响应开始前遇到 Cyber Policy 错误时继续故障转移。"
+                              :label="t('ui.failOverOnCyberErrors')"
+                              :text="t('ui.continueFailoverIfACyberPolicyErrorOccursBeforeThe')"
                             />
                           </div>
                           <Switch
                             :model-value="cyberContinueFailover"
                             :disabled="saving"
-                            aria-label="Cyber继续转移"
+                            :aria-label="t('ui.failOverOnCyberErrors')"
                             @update:model-value="updateExecutionPolicy('cyber_continue_failover', $event)"
                           />
                         </div>
@@ -305,17 +305,17 @@
                           data-testid="cancel-on-client-disconnect"
                         >
                           <div class="flex min-w-0 items-center gap-1.5">
-                            <span class="font-medium">取消请求立即打断</span>
+                            <span class="font-medium">{{ t('ui.abortImmediatelyOnClientCancellation') }}</span>
                             <HelpHint
                               portal
-                              label="取消请求立即打断"
-                              text="默认关闭：客户端取消或断开后，服务端继续等待请求完成并正常计费。开启后立即打断且不计费，按次计费的请求仍收取单次请求费用。仅作用于当前调度策略。"
+                              :label="t('ui.abortImmediatelyOnClientCancellation')"
+                              :text="t('ui.offByDefaultAfterClientCancellationOrDisconnectionTheServer')"
                             />
                           </div>
                           <Switch
                             :model-value="cancelOnClientDisconnect"
                             :disabled="saving"
-                            aria-label="取消请求立即打断"
+                            :aria-label="t('ui.abortImmediatelyOnClientCancellation')"
                             @update:model-value="updateExecutionPolicy('cancel_on_client_disconnect', $event)"
                           />
                         </div>
@@ -328,10 +328,10 @@
                     type="button"
                     class="flex w-full items-center justify-between gap-3 px-3 py-3 text-left"
                     :aria-expanded="failoverOpen"
-                    aria-label="故障转移"
+                    :aria-label="t('ui.failover')"
                     @click="failoverOpen = !failoverOpen"
                   >
-                    <span class="text-sm font-medium">故障转移</span>
+                    <span class="text-sm font-medium">{{ t('ui.failover') }}</span>
                     <ChevronRight
                       class="h-4 w-4 shrink-0 text-muted-foreground transition-transform"
                       :class="{ 'rotate-90': failoverOpen }"
@@ -355,14 +355,14 @@
                           class="min-w-0 space-y-1.5 text-xs"
                           data-testid="sticky-key-attempts"
                         >
-                          <span>错误重试次数</span>
+                          <span>{{ t('ui.errorRetryCount') }}</span>
                           <Input
                             :model-value="stickyKeyAttempts"
                             type="number"
                             min="0"
                             max="99"
                             :disabled="saving"
-                            aria-label="错误重试次数"
+                            :aria-label="t('ui.errorRetryCount')"
                             @update:model-value="updateStickyKeyAttempts"
                           />
                         </label>
@@ -376,15 +376,15 @@
                 role="alert"
                 class="m-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm"
               >
-                <span>分组已被其他操作更新，当前修改已保留。重新加载后可基于最新配置继续编辑。</span>
+                <span>{{ t('ui.theGroupWasUpdatedByAnotherOperationYourChangesHave') }}</span>
                 <Button
                   variant="outline"
                   size="sm"
                   :disabled="busy"
-                  aria-label="重新加载分组"
+                  :aria-label="t('ui.reloadGroup')"
                   @click="reloadCurrentGroup"
                 >
-                  重新加载分组
+                  {{ t('ui.reloadGroup') }}
                 </Button>
               </div>
               <div
@@ -400,7 +400,7 @@
                   class="mt-4"
                   @click="loadingError ? refreshGroups() : groups.length ? openGroup(defaultGroupId) : openCreate()"
                 >
-                  {{ loadingError ? '重新加载' : groups.length ? '打开默认分组' : '新建策略分组' }}
+                  {{ loadingError ? t('ui.reload') : groups.length ? t('ui.openDefaultGroup') : t('ui.createPolicyGroup') }}
                 </Button>
               </div>
             </div>
@@ -409,7 +409,7 @@
       </Transition>
       <div
         class="min-w-0 xl:col-start-2"
-        aria-label="提供商目录"
+        :aria-label="t('ui.providerDirectory')"
       >
         <slot
           :panel-collapsed="panelCollapsed"
@@ -420,9 +420,9 @@
     <AlertDialog
       v-model="deleteDialogOpen"
       type="destructive"
-      title="删除调度策略"
-      :description="`确认删除调度策略「${draft?.name ?? ''}」？此操作无法撤销。`"
-      confirm-text="删除"
+      :title="t('ui.deleteRoutingPolicy')"
+      :description="t('ui.deleteSchedulingPolicyValueThisCannotBeUndone', { name: draft?.name ?? '' })"
+      :confirm-text="t('ui.delete')"
       :loading="deleting"
       @confirm="confirmDeleteDraft"
     />
@@ -430,6 +430,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useLocalStorage } from '@vueuse/core'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter, type RouteLocationNormalized } from 'vue-router'
@@ -447,7 +449,8 @@ import {
   type RoutingSchedulingMode,
   type RoutingGroupConfig,
 } from '@/features/routing/utils/routingPolicy'
-import { RoutingFailoverPolicyEditor, RoutingSchedulingPolicyEditor } from '@/features/routing/components'
+import RoutingFailoverPolicyEditor from '@/features/routing/components/RoutingFailoverPolicyEditor.vue'
+import RoutingSchedulingPolicyEditor from '@/features/routing/components/RoutingSchedulingPolicyEditor.vue'
 import { normalizeProviderSchedulingConfig } from '@/features/routing/utils/schedulingPolicies'
 import { normalizeRoutingFailoverPolicy, validateRoutingFailoverPolicy, type RoutingFailoverPolicy } from '@/features/routing/utils/routingFailover'
 import { createRoutingGroup, deleteRoutingGroup, listRoutingGroups, updateRoutingGroup, type RoutingGroupRecord } from '@/api/routing-profiles'
@@ -464,6 +467,8 @@ const emit = defineEmits<{
   saved: []
   'context-change': [context: { groupId: string | null; groupName: string; config: RoutingGroupConfig | null; busy: boolean; activePolicy: SchedulingSelection | null; providerModelIds: string[] | undefined; priorityMode: RoutingPriorityMode; schedulingMode: RoutingSchedulingMode }]
 }>()
+
+const { t } = useI18n()
 
 interface SchedulingSelection {
   id?: string | null
@@ -524,13 +529,13 @@ const isNewDraft = computed(() => draft.value != null && !draft.value.id)
 const selectedValue = computed(() => isNewDraft.value ? 'new' : draft.value?.id ?? '')
 const priorityMode = 'provider' as const
 const schedulingMode = computed(() => activePolicy.value?.schedulingMode ?? draft.value?.config_json.default_policy.scheduling_mode ?? 'cache_affinity')
-const emptyMessage = computed(() => loading.value ? '正在加载调度策略' : loadingError.value ?? (groups.value.length ? '未找到调度策略' : '还没有调度策略'))
+const emptyMessage = computed(() => loading.value ? t('ui.loadingRoutingPolicies') : loadingError.value ?? (groups.value.length ? t('ui.routingPolicyNotFound') : t('providers.migration.noSchedulingPoliciesYetf0577d')))
 const keepPriorityOnConversion = computed(() => draft.value?.config_json.default_policy.keep_priority_on_conversion ?? false)
 const stickyKeyAttempts = computed(() => draft.value?.config_json.default_policy.sticky_key_attempts ?? DEFAULT_STICKY_KEY_ATTEMPTS)
 const cfHeartbeat = computed(() => draft.value?.config_json.default_policy.enable_cf_heartbeat ?? false)
 const cyberContinueFailover = computed(() => draft.value?.config_json.default_policy.cyber_continue_failover ?? false)
 const cancelOnClientDisconnect = computed(() => draft.value?.config_json.default_policy.cancel_on_client_disconnect ?? false)
-const billingMultiplierError = computed(() => parseBillingMultiplier(billingMultiplierInput.value) == null ? '分组倍率必须是大于或等于 0 的有效数字' : null)
+const billingMultiplierError = computed(() => parseBillingMultiplier(billingMultiplierInput.value) == null ? t('providers.migration.groupMultiplierMustBeA3664f4') : null)
 const draftDirty = computed(() => draft.value != null && (Boolean(billingMultiplierError.value) || routingFailoverPending.value || savedDraftSnapshot.value !== draftSnapshotValue(draft.value)))
 const canSaveDraft = computed(() => Boolean(draft.value) && !busy.value && draftDirty.value && routingSchedulingValid.value && !billingMultiplierError.value)
 
@@ -606,7 +611,7 @@ function startNewDraft(): void {
   savedDraftSnapshot.value = null
   void nextTick(() => {
     groupMetadata.value?.scrollIntoView?.({ block: 'nearest' })
-    groupMetadata.value?.querySelector<HTMLInputElement>('[aria-label="策略名称"]')?.focus()
+    groupMetadata.value?.querySelector<HTMLInputElement>(`[aria-label="${t('ui.policyName')}"]`)?.focus()
   })
 }
 
@@ -639,7 +644,7 @@ function changeGroup(value: string): void {
 async function confirmDiscard(): Promise<boolean> {
   if (!draftDirty.value) return true
   if (!discardConfirmation) {
-    discardConfirmation = confirm({ title: '有未保存的调度修改', message: '离开后将丢弃当前策略的未保存修改。是否继续？', confirmText: '放弃修改并离开', cancelText: '继续编辑', variant: 'warning' })
+    discardConfirmation = confirm({ title: t('providers.migration.unsavedSchedulingChangesb7663a'), message: t('providers.migration.leavingWillDiscardUnsavedChanges2eb7b5'), confirmText: t('providers.migration.discardChangesAndLeavec77a61'), cancelText: t('providers.migration.continueEditing3a481b'), variant: 'warning' })
       .finally(() => { discardConfirmation = null })
   }
   return discardConfirmation
@@ -651,7 +656,7 @@ async function guardNavigation(to: RouteLocationNormalized): Promise<boolean> {
   const staysOnDraft = to.name === 'ProviderManagement' && targetGroup === selectedValue.value
   if (staysOnDraft) return true
   if (busy.value) {
-    showError('正在保存调度设置，请稍候再切换')
+    showError(t('providers.migration.savingSchedulingSettingsWaitBefore6c38e9'))
     return false
   }
   return confirmDiscard()
@@ -716,7 +721,7 @@ async function refreshGroups(): Promise<void> {
     const response = await listRoutingGroups()
     groups.value = sortGroups(response.items.map(normalizeRecord))
   } catch (err) {
-    loadingError.value = parseApiError(err, '加载调度策略失败')
+    loadingError.value = parseApiError(err, t('providers.migration.failedToLoadSchedulingPolicy9cfb4b'))
     showError(loadingError.value)
     log.error('加载调度策略失败:', err)
   } finally {
@@ -727,7 +732,7 @@ async function refreshGroups(): Promise<void> {
 
 async function reloadCurrentGroup(): Promise<void> {
   if (busy.value || !draft.value?.id) return
-  if (draftDirty.value && !await confirm({ title: '重新加载最新分组', message: '重新加载会放弃当前未保存的修改。是否继续？', confirmText: '放弃修改并重新加载', cancelText: '保留修改', variant: 'warning' })) return
+  if (draftDirty.value && !await confirm({ title: t('providers.migration.reloadTheLatestGroup6a36ee'), message: t('providers.migration.reloadingWillDiscardYourUnsaved6b357f'), confirmText: t('providers.migration.discardChangesAndReload49bf36'), cancelText: t('providers.migration.keepChanges3d1dcc'), variant: 'warning' })) return
   const groupId = draft.value.id
   await refreshGroups()
   if (loadingError.value) return
@@ -744,7 +749,7 @@ async function loadGlobalModels(options: { cacheTtlMs?: number } = {}): Promise<
     globalModels.value = response.models ?? []
   } catch (err) {
     globalModels.value = []
-    globalModelsError.value = parseApiError(err, '加载全局模型失败')
+    globalModelsError.value = parseApiError(err, t('ui.failedToLoadGlobalModels'))
     log.error('加载全局模型失败:', err)
   } finally {
     loadingGlobalModels.value = false
@@ -758,15 +763,15 @@ async function saveDraft(): Promise<boolean> {
     panelCollapsed.value = false
     await nextTick()
     groupMetadata.value?.scrollIntoView?.({ block: 'nearest' })
-    groupMetadata.value?.querySelector<HTMLInputElement>('[aria-label="策略名称"]')?.focus()
-    showError('策略名称不能为空')
+    groupMetadata.value?.querySelector<HTMLInputElement>(`[aria-label="${t('ui.policyName')}"]`)?.focus()
+    showError(t('providers.migration.policyNameCannotBeEmpty384f05'))
     return false
   }
   if (billingMultiplierError.value) {
     panelCollapsed.value = false
     await nextTick()
     groupMetadata.value?.scrollIntoView?.({ block: 'nearest' })
-    groupMetadata.value?.querySelector<HTMLInputElement>('[aria-label="分组倍率"]')?.focus()
+    groupMetadata.value?.querySelector<HTMLInputElement>(`[aria-label="${t('ui.groupMultiplier')}"]`)?.focus()
     showError(billingMultiplierError.value)
     return false
   }
@@ -784,7 +789,7 @@ async function saveDraft(): Promise<boolean> {
   }
   if (!routingSchedulingValid.value) {
     panelCollapsed.value = false
-    showError('请为每条调度配置选择适用模型')
+    showError(t('providers.migration.selectApplicableModelsForEverycdf617'))
     return false
   }
   const targetGroupId = draft.value.id
@@ -810,14 +815,14 @@ async function saveDraft(): Promise<boolean> {
       try { await router.replace({ name: 'ProviderManagement', query: { ...route.query, view: undefined, group: saved.id } }) }
       finally { internalNavigation = false }
     }
-    success(targetGroupId ? '调度策略已保存' : '策略分组已创建')
+    success(targetGroupId ? t('ui.routingPolicySaved') : t('providers.migration.policyGroupCreatedde1b43'))
     emit('saved')
     return unchanged
   } catch (err) {
     panelCollapsed.value = false
     const status = (err as { response?: { status?: number } })?.response?.status
     saveConflict.value = Boolean(targetGroupId) && status === 409
-    showError(saveConflict.value ? '此分组已在其他操作中更新。当前修改已保留，请重新加载最新分组后再编辑。' : parseApiError(err, targetGroupId ? '保存调度策略失败' : '创建策略分组失败'))
+    showError(saveConflict.value ? t('providers.migration.thisGroupWasUpdatedElsewherea29490') : parseApiError(err, targetGroupId ? t('providers.migration.failedToSaveSchedulingPolicyd47258') : t('providers.migration.failedToCreatePolicyGroup58a204')))
     log.error('保存调度策略失败:', err)
     return false
   } finally { saving.value = false }
@@ -825,7 +830,7 @@ async function saveDraft(): Promise<boolean> {
 async function ensureSaved(): Promise<boolean> {
   if (busy.value || !draft.value) return false
   if (!draftDirty.value) return true
-  const approved = await confirm({ title: '先保存当前分组', message: '当前分组有未保存的修改。保存后继续？', confirmText: '保存并继续', cancelText: '继续编辑', variant: 'question' })
+  const approved = await confirm({ title: t('providers.migration.saveTheCurrentGroupFirstf30a4f'), message: t('providers.migration.thisGroupHasUnsavedChangesa09432'), confirmText: t('providers.migration.saveAndContinue4e2605'), cancelText: t('providers.migration.continueEditing3a481b'), variant: 'question' })
   return approved && await saveDraft()
 }
 
@@ -844,10 +849,10 @@ async function confirmDeleteDraft(): Promise<void> {
     } finally {
       internalNavigation = false
     }
-    success('调度策略已删除')
+    success(t('ui.routingPolicyDeleted'))
     emit('saved')
   } catch (err) {
-    showError(parseApiError(err, '删除调度策略失败'))
+    showError(parseApiError(err, t('providers.migration.failedToDeleteSchedulingPolicyba98ea')))
     log.error('删除调度策略失败:', err)
   } finally {
     deleting.value = false
@@ -863,6 +868,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', preventUnload))
 watch(() => [route.name, route.query.group], syncRouteState)
 watch(() => [draft.value, busy.value, activePolicy.value, providerModelIds.value], () => emit('context-change', { groupId: draft.value?.id ?? null, groupName: draft.value?.name ?? '', config: draft.value?.config_json ?? null, busy: busy.value, activePolicy: activePolicy.value, providerModelIds: providerModelIds.value, priorityMode, schedulingMode: schedulingMode.value }), { deep: true, immediate: true })
 defineExpose({ updateDraftConfig, updatePriorityPolicy, refreshGroups, ensureSaved })
+
 </script>
 
 <style scoped>

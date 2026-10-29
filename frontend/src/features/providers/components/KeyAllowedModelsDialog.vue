@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="isOpen"
-    title="获取上游模型"
-    description="从上游获取所有密钥可用的模型列表。导入时会创建或复用全局模型，并关联到当前提供商。"
+    :title="t('ui.fetchUpstreamModels')"
+    :description="t('ui.fetchTheModelsAvailableToAllUpstreamKeysImportCreates')"
     :icon="Layers"
     size="2xl"
     @update:model-value="handleDialogUpdate"
@@ -11,11 +11,9 @@
       <!-- 操作区域 -->
       <div class="flex items-center justify-between">
         <div class="text-sm text-muted-foreground">
-          <span v-if="!hasQueried">点击获取按钮查询上游可用模型</span>
-          <span v-else-if="upstreamModels.length > 0">
-            共 {{ upstreamModels.length }} 个模型，已选 {{ selectedModels.length }} 个
-          </span>
-          <span v-else>未找到可用模型</span>
+          <span v-if="!hasQueried">{{ t('ui.fetchAvailableModelsFromTheUpstream') }}</span>
+          <span v-else-if="upstreamModels.length > 0"> {{ t('ui.total76e547a') }} {{ upstreamModels.length }} {{ t('ui.modelsSelected') }} {{ selectedModels.length }} {{ t('ui.items3a11681') }} </span>
+          <span v-else>{{ t('ui.noAvailableModelsFound') }}</span>
         </div>
         <Button
           variant="outline"
@@ -27,7 +25,7 @@
             class="w-3.5 h-3.5 mr-1.5"
             :class="{ 'animate-spin': loading }"
           />
-          {{ hasQueried ? '刷新' : '获取模型' }}
+          {{ hasQueried ? t('ui.refresh') : t('ui.fetchModels') }}
         </Button>
       </div>
 
@@ -37,7 +35,7 @@
         class="flex flex-col items-center justify-center py-12 space-y-3"
       >
         <div class="animate-spin rounded-full h-8 w-8 border-2 border-primary/20 border-t-primary" />
-        <span class="text-xs text-muted-foreground">正在从上游获取模型列表...</span>
+        <span class="text-xs text-muted-foreground">{{ t('ui.fetchingUpstreamModels') }}</span>
       </div>
 
       <!-- 错误状态 -->
@@ -53,7 +51,7 @@
           class="mt-3"
           @click="fetchUpstreamModels"
         >
-          重试
+          {{ t('vscodex.connection.retry') }}
         </Button>
       </div>
 
@@ -63,7 +61,7 @@
         class="flex flex-col items-center justify-center py-12 text-muted-foreground border border-dashed rounded-lg bg-muted/10"
       >
         <Layers class="w-10 h-10 mb-2 opacity-20" />
-        <span class="text-sm">点击上方按钮获取模型列表</span>
+        <span class="text-sm">{{ t('ui.fetchTheModelListToContinue') }}</span>
       </div>
 
       <!-- 无模型 -->
@@ -72,7 +70,7 @@
         class="flex flex-col items-center justify-center py-12 text-muted-foreground border border-dashed rounded-lg bg-muted/10"
       >
         <Box class="w-10 h-10 mb-2 opacity-20" />
-        <span class="text-sm">上游 API 未返回可用模型</span>
+        <span class="text-sm">{{ t('ui.theUpstreamApiReturnedNoAvailableModels') }}</span>
       </div>
 
       <!-- 模型列表 -->
@@ -89,11 +87,11 @@
               @update:checked="toggleSelectAll"
             />
             <span class="text-xs text-muted-foreground">
-              {{ isAllSelected ? '取消全选' : '全选' }}
+              {{ isAllSelected ? t('ui.deselectAll') : t('ui.selectAll') }}
             </span>
           </div>
           <div class="text-xs text-muted-foreground">
-            {{ newModelsCount }} 个新模型（不在本地）
+            {{ newModelsCount }} {{ t('ui.newModelsNotStoredLocally') }}
           </div>
         </div>
 
@@ -133,15 +131,15 @@
                   variant="secondary"
                   class="text-[10px] px-1.5 py-0 shrink-0"
                 >
-                  已存在
+                  {{ t('ui.alreadyExists') }}
                 </Badge>
                 <Badge
                   v-if="model.visibility === 'hide'"
                   variant="outline"
                   class="text-[10px] px-1.5 py-0 shrink-0 text-muted-foreground"
-                  title="运行时可调用的内部模型"
+                  :title="t('ui.internalModelAvailableAtRuntime')"
                 >
-                  内部
+                  {{ t('ui.internal') }}
                 </Badge>
               </div>
               <div class="text-[11px] text-muted-foreground/60 font-mono truncate mt-0.5">
@@ -162,9 +160,7 @@
     <template #footer>
       <div class="flex items-center justify-between w-full pt-2">
         <div class="text-xs text-muted-foreground">
-          <span v-if="selectedModels.length > 0 && newSelectedCount > 0">
-            将导入 {{ newSelectedCount }} 个新模型
-          </span>
+          <span v-if="selectedModels.length > 0 && newSelectedCount > 0"> {{ t('ui.willImport') }} {{ newSelectedCount }} {{ t('ui.newModels') }} </span>
         </div>
         <div class="flex items-center gap-2">
           <Button
@@ -172,7 +168,7 @@
             class="h-9"
             @click="handleCancel"
           >
-            取消
+            {{ t('common.cancel') }}
           </Button>
           <Button
             :disabled="importing || selectedModels.length === 0 || newSelectedCount === 0"
@@ -183,7 +179,7 @@
               v-if="importing"
               class="w-3.5 h-3.5 mr-1.5 animate-spin"
             />
-            {{ importing ? '导入中' : `导入 ${newSelectedCount} 个模型` }}
+            {{ importing ? t('ui.importing') : t('ui.importValueModels', { count: newSelectedCount }) }}
           </Button>
         </div>
       </div>
@@ -192,6 +188,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch } from 'vue'
 import { Box, Layers, Loader2, RefreshCw, AlertCircle } from 'lucide-vue-next'
 import { Dialog } from '@/components/ui'
@@ -219,6 +217,8 @@ const emit = defineEmits<{
   close: []
   saved: []
 }>()
+
+const { t } = useI18n()
 
 const { success, error: showError, warning: showWarning } = useToast()
 const { fetchModels: fetchCachedModels } = useUpstreamModelsCache()
@@ -304,7 +304,7 @@ async function fetchUpstreamModels() {
         .map((m: UpstreamModel) => m.id)
       hasQueried.value = true
       if (result.warning) {
-        showWarning(result.warning, '部分格式获取失败')
+        showWarning(result.warning, t('ui.failedToFetchSomeFormats'))
       }
     } else if (result.error) {
       errorMessage.value = result.error
@@ -313,7 +313,7 @@ async function fetchUpstreamModels() {
       hasQueried.value = true
     }
   } catch (err: unknown) {
-    errorMessage.value = parseUpstreamModelError(parseApiError(err, '获取上游模型失败'))
+    errorMessage.value = parseUpstreamModelError(parseApiError(err, t('ui.failedToFetchUpstreamModels')))
   } finally {
     loading.value = false
   }
@@ -357,7 +357,7 @@ async function handleImport() {
   // 过滤出新模型（不在已存在列表中的）
   const modelsToImport = selectedModels.value.filter(id => !existingModelIds.value.has(id))
   if (modelsToImport.length === 0) {
-    showError('所选模型都已存在', '提示')
+    showError(t('ui.allSelectedModelsAlreadyExist'), t('ui.notice'))
     return
   }
 
@@ -369,11 +369,11 @@ async function handleImport() {
     const errorCount = response.errors?.length || 0
 
     if (successCount > 0 && errorCount === 0) {
-      success(`成功导入 ${successCount} 个模型`, '导入成功')
+      success(t('providers.migration.importedModelsSuccessfully966e68', { value: String(successCount) }), t('ui.importComplete'))
       emit('saved')
       emit('close')
     } else if (successCount > 0 && errorCount > 0) {
-      success(`成功导入 ${successCount} 个模型，${errorCount} 个失败`, '部分成功')
+      success(t('providers.migration.importedModelsFailed69e3af', { value: String(successCount), value_2: String(errorCount) }), t('ui.partiallySuccessful'))
       emit('saved')
       // 刷新列表以更新已存在状态
       await loadExistingModels()
@@ -381,15 +381,16 @@ async function handleImport() {
       const successIds = new Set(response.success?.map((s: { model_id: string }) => s.model_id) || [])
       selectedModels.value = selectedModels.value.filter(id => !successIds.has(id))
     } else {
-      const errorMsg = response.errors?.[0]?.error || '导入失败'
-      showError(errorMsg, '导入失败')
+      const errorMsg = response.errors?.[0]?.error || t('ui.importFailed')
+      showError(errorMsg, t('ui.importFailed'))
     }
   } catch (err: unknown) {
-    showError(parseApiError(err, '导入失败'), '错误')
+    showError(parseApiError(err, t('ui.importFailed')), t('ui.error'))
   } finally {
     importing.value = false
   }
 }
+
 </script>
 
 <style scoped>

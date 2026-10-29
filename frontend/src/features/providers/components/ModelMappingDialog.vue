@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="open"
-    :title="editingGroup ? '编辑模型映射' : '添加模型映射'"
-    :description="editingGroup ? '修改映射配置' : '将提供商模型映射到客户端模型'"
+    :title="editingGroup ? t('ui.editModelMapping') : t('ui.addModelMapping')"
+    :description="editingGroup ? t('ui.editMappingSettings') : t('ui.mapProviderModelsToClientModels')"
     :icon="Tag"
     size="lg"
     @update:model-value="$emit('update:open', $event)"
@@ -10,14 +10,14 @@
     <div class="space-y-4">
       <!-- 目标模型选择 -->
       <div class="space-y-1.5">
-        <Label class="text-xs">客户端模型</Label>
+        <Label class="text-xs">{{ t('ui.clientModel') }}</Label>
         <Select
           :model-value="formData.modelId"
           :disabled="!!editingGroup"
           @update:model-value="handleModelChange"
         >
           <SelectTrigger class="h-9">
-            <SelectValue placeholder="请选择客户端模型" />
+            <SelectValue :placeholder="t('ui.selectAClientModel')" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem
@@ -33,20 +33,20 @@
           </SelectContent>
         </Select>
         <p class="text-xs text-muted-foreground">
-          客户端请求此模型时，将路由到选中的提供商模型
+          {{ t('ui.clientRequestsForThisModelAreRoutedToTheSelected') }}
         </p>
       </div>
 
       <!-- 映射名称选择面板 -->
       <div class="space-y-1.5">
-        <Label class="text-xs">提供商模型</Label>
+        <Label class="text-xs">{{ t('ui.providerModel') }}</Label>
         <!-- 搜索栏 -->
         <div class="flex items-center gap-2">
           <div class="flex-1 relative">
             <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               v-model="searchQuery"
-              placeholder="搜索或添加自定义提供商模型..."
+              :placeholder="t('ui.searchOrAddACustomProviderModel')"
               class="pl-8 h-9"
             />
           </div>
@@ -54,22 +54,18 @@
           <span
             v-if="selectedNames.length === 0"
             class="h-7 px-2.5 text-xs rounded-md flex items-center bg-muted text-muted-foreground shrink-0"
-          >
-            未选择
-          </span>
+          > {{ t('ui.notSelected') }} </span>
           <span
             v-else
             class="h-7 px-2.5 text-xs rounded-md flex items-center bg-primary/10 text-primary shrink-0"
-          >
-            已选 {{ selectedNames.length }} 个
-          </span>
+          > {{ t('ui.selected') }} {{ selectedNames.length }} {{ t('ui.items3a11681') }} </span>
           <!-- 刷新上游模型按钮 -->
           <button
             v-if="upstreamModelsLoaded"
             type="button"
             class="p-2 hover:bg-muted rounded-md transition-colors shrink-0"
             :disabled="fetchingUpstreamModels"
-            title="刷新上游模型"
+            :title="t('ui.refreshUpstreamModels')"
             @click="fetchUpstreamModels(true)"
           >
             <RefreshCw
@@ -81,7 +77,7 @@
             v-else-if="!fetchingUpstreamModels"
             type="button"
             class="p-2 hover:bg-muted rounded-md transition-colors shrink-0"
-            title="从提供商获取模型"
+            :title="t('ui.fetchModelsFromProvider')"
             @click="fetchUpstreamModels(true)"
           >
             <Zap class="w-4 h-4" />
@@ -117,7 +113,7 @@
                     <Plus class="w-4 h-4 text-muted-foreground" />
                     <span class="text-sm font-mono">{{ searchQuery }}</span>
                   </div>
-                  <span class="text-xs text-muted-foreground">添加自定义提供商模型</span>
+                  <span class="text-xs text-muted-foreground">{{ t('ui.addCustomProviderModel') }}</span>
                 </div>
               </div>
 
@@ -132,7 +128,7 @@
                       class="w-4 h-4 transition-transform shrink-0"
                       :class="collapsedGroups.has('custom') ? '-rotate-90' : ''"
                     />
-                    <span class="text-xs font-medium">自定义模型</span>
+                    <span class="text-xs font-medium">{{ t('ui.customModel') }}</span>
                     <span class="text-xs text-muted-foreground">({{ customNames.length }})</span>
                   </div>
                 </div>
@@ -171,7 +167,7 @@
                       class="w-4 h-4 transition-transform shrink-0"
                       :class="collapsedGroups.has('upstream') ? '-rotate-90' : ''"
                     />
-                    <span class="text-xs font-medium">上游模型</span>
+                    <span class="text-xs font-medium">{{ t('ui.upstreamModels') }}</span>
                     <span class="text-xs text-muted-foreground">({{ upstreamModelNames.length }})</span>
                   </div>
                   <button
@@ -179,7 +175,7 @@
                     class="text-xs text-primary hover:underline"
                     @click.stop="toggleAllUpstreamModels"
                   >
-                    {{ isAllUpstreamModelsSelected ? '取消全选' : '全选' }}
+                    {{ isAllUpstreamModelsSelected ? t('ui.deselectAll') : t('ui.selectAll') }}
                   </button>
                 </div>
                 <div
@@ -213,10 +209,10 @@
               >
                 <Tag class="w-10 h-10 mb-2 opacity-30" />
                 <p class="text-sm">
-                  {{ searchQuery ? '无匹配结果' : '暂无可选模型' }}
+                  {{ searchQuery ? t('ui.noMatchingResults') : t('ui.noModelsAvailableToSelect') }}
                 </p>
                 <p class="text-xs mt-1">
-                  输入模型名称后点击添加自定义提供商模型
+                  {{ t('ui.enterAModelNameToAddACustomProviderModel') }}
                 </p>
               </div>
             </template>
@@ -228,7 +224,7 @@
         <div class="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
           <div class="min-w-0 space-y-0.5">
             <h3 class="text-sm font-medium text-foreground">
-              适用范围
+              {{ t('ui.appliesTo') }}
             </h3>
             <p class="text-xs text-muted-foreground">
               {{ t('providers.modelMapping.scope.matchHelp') }}
@@ -241,13 +237,13 @@
 
         <div class="grid gap-4 sm:grid-cols-2">
           <div class="min-w-0 space-y-1.5">
-            <Label class="text-xs">适用端点</Label>
+            <Label class="text-xs">{{ t('ui.applicableEndpoints') }}</Label>
             <MultiSelect
               v-model="selectedEndpointIds"
               :options="endpointOptions"
               :placeholder="t('providers.modelMapping.scope.allEndpoints')"
-              empty-text="暂无端点"
-              no-results-text="未找到端点"
+              :empty-text="t('ui.noEndpoints')"
+              :no-results-text="t('ui.noEndpointsFound')"
               trigger-class="h-9 rounded-md"
               :search-threshold="4"
             />
@@ -257,11 +253,11 @@
           </div>
 
           <div class="min-w-0 space-y-1.5">
-            <Label class="text-xs">适用请求</Label>
+            <Label class="text-xs">{{ t('ui.applicableRequests') }}</Label>
             <div
               class="flex min-h-9 w-full flex-wrap gap-1 rounded-md bg-muted/50 p-1"
               role="radiogroup"
-              aria-label="适用请求"
+              :aria-label="t('ui.applicableRequests')"
             >
               <Button
                 v-for="option in requestScopeOptions"
@@ -291,7 +287,7 @@
         variant="outline"
         @click="$emit('update:open', false)"
       >
-        取消
+        {{ t('common.cancel') }}
       </Button>
       <Button
         :disabled="submitting || !formData.modelId || selectedNames.length === 0"
@@ -301,7 +297,7 @@
           v-if="submitting"
           class="w-4 h-4 mr-2 animate-spin"
         />
-        {{ editingGroup ? '保存映射' : '添加映射' }}
+        {{ editingGroup ? t('ui.saveMapping') : t('ui.addMapping') }}
       </Button>
     </template>
   </Dialog>
@@ -376,8 +372,10 @@ const emit = defineEmits<{
   'saved': []
 }>()
 
-const { error: showError, success: showSuccess, warning: showWarning } = useToast()
 const { t } = useI18n()
+
+const { error: showError, success: showSuccess, warning: showWarning } = useToast()
+
 const { fetchModels: fetchCachedModels } = useUpstreamModelsCache()
 
 type EndpointOption = {
@@ -694,13 +692,13 @@ async function fetchUpstreamModels(forceRefresh = false) {
       allCustomNames.value = Array.from(mergedCustom).filter(name => !upstreamIds.has(name))
     }
     if (result.warning) {
-      showWarning(result.warning, '部分格式获取失败')
+      showWarning(result.warning, t('ui.failedToFetchSomeFormats'))
     }
     if (result.error) {
-      showError(result.error, '获取上游模型失败')
+      showError(result.error, t('ui.failedToFetchUpstreamModels'))
     }
   } catch (err: unknown) {
-    showError(parseApiError(err, '获取上游模型列表失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToFetchUpstreamModelList')), t('ui.error'))
   } finally {
     loadingModels.value = false
     fetchingUpstreamModels.value = false
@@ -795,7 +793,7 @@ async function handleSubmit() {
   try {
     const targetModel = props.models.find(m => m.id === formData.value.modelId)
     if (!targetModel) {
-      showError('模型不存在', '错误')
+      showError(t('ui.modelNotFound'), t('ui.error'))
       return
     }
 
@@ -844,7 +842,7 @@ async function handleSubmit() {
         nextOperations,
       )
       if (duplicates.length > 0) {
-        showError(`以下映射名称已存在：${duplicates.join(', ')}`, '错误')
+        showError(t('providers.migration.theseMappingNamesAlreadyExistdcbf0a', { value: String(duplicates.join(', ')) }), t('ui.error'))
         return
       }
 
@@ -861,7 +859,7 @@ async function handleSubmit() {
         nextOperations,
       )
       if (duplicates.length > 0) {
-        showError(`以下映射名称已存在：${duplicates.join(', ')}`, '错误')
+        showError(t('providers.migration.theseMappingNamesAlreadyExistdcbf0a', { value: String(duplicates.join(', ')) }), t('ui.error'))
         return
       }
       newAliases = [
@@ -874,11 +872,11 @@ async function handleSubmit() {
       provider_model_mappings: newAliases
     })
 
-    showSuccess(props.editingGroup ? '映射组已更新' : '映射已添加')
+    showSuccess(props.editingGroup ? t('ui.mappingGroupUpdated') : t('ui.mappingAdded'))
     emit('update:open', false)
     emit('saved')
   } catch (err: unknown) {
-    showError(parseApiError(err, '操作失败'), '错误')
+    showError(parseApiError(err, t('ui.operationFailed')), t('ui.error'))
   } finally {
     submitting.value = false
   }

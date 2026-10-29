@@ -75,26 +75,26 @@
             <TableHeader>
               <TableRow>
                 <TableHead class="w-px px-2 text-center">
-                  <span class="sr-only">{{ legacyT('优先级') }}</span>
+                  <span class="sr-only">{{ t('ui.priority565d646') }}</span>
                 </TableHead>
                 <TableHead class="w-[18%] min-w-[200px]">
-                  {{ legacyT('提供商') }}
+                  {{ t('nav.providers') }}
                 </TableHead>
                 <TableHead class="w-[20%] min-w-[180px]">
-                  {{ legacyT('余额监控') }}
+                  {{ t('guide.nav.advanced.balanceMonitor') }}
                 </TableHead>
                 <TableHead class="w-[12%] min-w-[100px] text-center">
-                  {{ legacyT('资源统计') }}
+                  {{ t('ui.resourceStats') }}
                 </TableHead>
                 <SortableTableHead
                   class="w-[22%] min-w-[240px]"
                   column-key="api_format"
                   :sortable="false"
                   :filter-active="filterApiFormat !== 'all'"
-                  :filter-title="legacyT('筛选 API 格式')"
+                  :filter-title="t('ui.filterApiFormat')"
                   filter-content-class="w-72 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
                 >
-                  {{ legacyT('端点健康') }}
+                  {{ t('ui.endpointHealth') }}
                   <template #filter="{ close }">
                     <TableFilterMenu
                       v-model="filterApiFormat"
@@ -104,10 +104,10 @@
                   </template>
                 </SortableTableHead>
                 <TableHead class="w-[10%] min-w-[96px] text-center">
-                  {{ legacyT('状态') }}
+                  {{ t('ui.status6320b4a') }}
                 </TableHead>
                 <TableHead class="w-[18%] min-w-[192px] text-center">
-                  {{ legacyT('操作') }}
+                  {{ t('ui.actionsed31fbb') }}
                 </TableHead>
               </TableRow>
             </TableHeader>
@@ -319,7 +319,8 @@ import TableHead from '@/components/ui/table-head.vue'
 import SortableTableHead from '@/components/ui/sortable-table-head.vue'
 import TableFilterMenu from '@/components/ui/table-filter-menu.vue'
 import Pagination from '@/components/ui/pagination.vue'
-import { ProviderFormDialog, ProviderAuthDialog } from '@/features/providers/components'
+import ProviderFormDialog from '@/features/providers/components/ProviderFormDialog.vue'
+import ProviderAuthDialog from '@/features/providers/components/ProviderAuthDialog.vue'
 import ProviderBatchActionDialog from '@/features/providers/components/ProviderBatchActionDialog.vue'
 import ProviderTableHeader from '@/features/providers/components/ProviderTableHeader.vue'
 import ProviderTableRow from '@/features/providers/components/ProviderTableRow.vue'
@@ -348,6 +349,8 @@ import {
 } from '@/api/endpoints'
 import { parseApiError } from '@/utils/errorParser'
 import { useI18n } from '@/i18n'
+
+const { t } = useI18n()
 
 const ProviderDetailDrawer = defineAsyncComponent(
   () => import('@/features/providers/components/ProviderDetailDrawer.vue'),
@@ -404,10 +407,9 @@ interface ProviderDeleteProgressState {
 
 const { error: showError, success: showSuccess, info: showInfo } = useToast()
 const { confirmDanger } = useConfirm()
-const { legacyT } = useI18n()
 
-function showLegacyError(err: unknown, fallback: string, title = '错误') {
-  showError(legacyT(parseApiError(err, fallback)), legacyT(title))
+function showLegacyError(err: unknown, fallback: string, title = t('ui.error')) {
+  showError(parseApiError(err, fallback), title)
 }
 
 // 状态
@@ -480,23 +482,23 @@ async function pollProviderDeleteTask(providerId: string, taskId: string) {
 const providerDeleteStageLabel = computed(() => {
   switch (providerDeleteProgress.value?.stage) {
     case 'preparing':
-      return legacyT('准备删除')
+      return t('ui.preparingDeletion')
     case 'disabling':
-      return legacyT('停用提供商')
+      return t('ui.disableProvider31f1572')
     case 'cleaning_restrictions':
-      return legacyT('清理访问限制')
+      return t('ui.cleaningAccessLimits')
     case 'cleaning_provider_refs':
-      return legacyT('清理历史引用')
+      return t('ui.cleaningHistoricalReferences')
     case 'deleting_keys':
-      return legacyT('删除号池账号')
+      return t('ui.deletingPoolAccounts')
     case 'deleting_endpoints':
-      return legacyT('删除端点')
+      return t('ui.deleteEndpoint')
     case 'completed':
-      return legacyT('删除完成')
+      return t('ui.deletionComplete')
     case 'failed':
-      return legacyT('删除失败')
+      return t('ui.deletionFailed')
     default:
-      return legacyT('等待执行')
+      return t('ui.waitingToRun')
   }
 })
 
@@ -689,7 +691,7 @@ async function saveDescription(_event: Event, provider: ProviderWithEndpointsSum
     }
     cancelEditDescription()
   } catch (err: unknown) {
-    showLegacyError(err, '更新备注失败')
+    showLegacyError(err, t('ui.failedToUpdateNotes'))
   }
 }
 
@@ -733,7 +735,7 @@ async function loadProviders(options: { cacheTtlMs?: number } = {}) {
     loadBalances(providers.value)
   } catch (err: unknown) {
     if (requestId !== providersRequestId) return
-    showLegacyError(err, '加载提供商列表失败')
+    showLegacyError(err, t('ui.failedToLoadProviderList'))
   } finally {
     if (requestId === providersRequestId) {
       loading.value = false
@@ -754,7 +756,7 @@ function handleRowClick(event: MouseEvent, providerId: string) {
 function openAddProviderDialog() {
   const { groupId, groupName, config } = schedulingContext.value
   if (!groupId || schedulingBusy.value) {
-    showInfo(legacyT(!groupId && config ? '请先保存新分组，再添加提供商' : '请先创建或选择策略分组'))
+    showInfo(!groupId && config ? t('ui.saveTheNewGroupBeforeAddingProviders') : t('ui.createOrSelectAPolicyGroupFirst'))
     return
   }
   providerCreationGroup.value = { id: groupId, name: groupName }
@@ -789,7 +791,7 @@ function mergeUpdatedProvider(updated: ProviderWithEndpointsSummary) {
 
 async function refreshProviderSnapshot(
   providerId: string,
-  fallbackErrorMessage = '刷新提供商数据失败',
+  fallbackErrorMessage = t('ui.failedToRefreshProviderData'),
 ): Promise<ProviderWithEndpointsSummary | null> {
   try {
     const updated = await getProvider(providerId)
@@ -803,7 +805,7 @@ async function refreshProviderSnapshot(
 
 // 打开编辑提供商对话框
 async function openEditProviderDialog(provider: ProviderWithEndpointsSummary) {
-  const latest = await refreshProviderSnapshot(provider.id, '刷新提供商状态失败')
+  const latest = await refreshProviderSnapshot(provider.id, t('ui.failedToRefreshProviderStatus'))
   providerToEdit.value = latest ?? provider
   providerDialogOpen.value = true
 }
@@ -844,8 +846,8 @@ function handleProviderAdded() {
 // 删除提供商
 async function handleDeleteProvider(provider: ProviderWithEndpointsSummary) {
   const confirmed = await confirmDanger(
-    legacyT('删除提供商'),
-    legacyT(`确定要删除提供商 "${provider.name}" 吗？\n\n这将同时删除其所有端点、密钥和配置。此操作不可恢复！`),
+    t('ui.deleteProvider'),
+    t('ui.deleteProviderValueThisAlsoDeletesAllItsEndpointsKeys', { name: provider.name }),
   )
 
   if (!confirmed) return
@@ -862,9 +864,9 @@ async function handleDeleteProvider(provider: ProviderWithEndpointsSummary) {
       deletedKeys: 0,
       totalEndpoints: provider.total_endpoints || 0,
       deletedEndpoints: 0,
-      message: result.message || '删除任务已提交，后台处理中',
+      message: result.message || t('ui.deleteTaskSubmittedAndProcessingInTheBackground'),
     }
-    showInfo(legacyT(result.message || '删除任务已提交，后台处理中'))
+    showInfo((result.message || t('ui.deleteTaskSubmittedAndProcessingInTheBackground')))
 
     const task = await pollProviderDeleteTask(provider.id, result.task_id)
     if (!task) return // aborted
@@ -872,12 +874,12 @@ async function handleDeleteProvider(provider: ProviderWithEndpointsSummary) {
       throw new Error(task.message || 'provider delete task failed')
     }
 
-    showSuccess(legacyT('提供商已删除'))
+    showSuccess(t('ui.providerDeleted'))
     providerDeleteProgress.value = null
     void loadProviders()
   } catch (err: unknown) {
     providerDeleteProgress.value = null
-    showLegacyError(err, '删除提供商失败')
+    showLegacyError(err, t('ui.failedToDeleteProvider'))
   }
 }
 
@@ -897,9 +899,9 @@ async function toggleProviderStatus(provider: ProviderWithEndpointsSummary) {
     }
     providerRevision.value += 1
 
-    showSuccess(legacyT(newStatus ? '提供商已启用' : '提供商已停用'))
+    showSuccess(newStatus ? t('ui.providerEnabled') : t('ui.providerDisabled793b685'))
   } catch (err: unknown) {
-    showLegacyError(err, '操作失败')
+    showLegacyError(err, t('ui.operationFailed'))
   }
 }
 

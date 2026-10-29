@@ -296,8 +296,8 @@ import {
   ChevronRight,
   X
 } from 'lucide-vue-next'
-import GithubIcon from '@/components/icons/GithubIcon.vue'
-import HeaderLogo from '@/components/HeaderLogo.vue'
+import GithubIcon from '@/components/brand/GithubIcon.vue'
+import HeaderLogo from '@/components/brand/HeaderLogo.vue'
 import LanguageSwitcher from '@/components/common/LanguageSwitcher.vue'
 import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
 import AppShell from '@/components/layout/AppShell.vue'

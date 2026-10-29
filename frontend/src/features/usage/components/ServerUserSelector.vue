@@ -25,7 +25,7 @@
         <Input
           v-model="searchText"
           class="h-8 pl-8 text-xs"
-          placeholder="搜索用户"
+          :placeholder="t('userStats.search.user')"
           @keydown.stop
         />
       </div>
@@ -40,7 +40,7 @@
             class="absolute left-2 h-4 w-4"
             :class="modelValue === '__all__' ? 'opacity-100' : 'opacity-0'"
           />
-          <span>全部用户</span>
+          <span>{{ t('ui.allUsers') }}</span>
         </button>
 
         <div
@@ -67,27 +67,26 @@
           v-if="loading"
           class="px-3 py-6 text-center text-xs text-muted-foreground"
         >
-          加载中...
+          {{ t('common.loading') }}
         </div>
         <div
           v-else-if="loadError"
           role="alert"
           class="px-3 py-4 text-center text-xs text-destructive"
         >
-          用户加载失败
-          <button
+          {{ t('ui.failedToLoadUsers') }} <button
             type="button"
             class="ml-2 underline"
             @click="loadUsers(searchText)"
           >
-            重试
+            {{ t('vscodex.connection.retry') }}
           </button>
         </div>
         <div
           v-else-if="visibleUsers.length === 0"
           class="px-3 py-6 text-center text-xs text-muted-foreground"
         >
-          未找到用户
+          {{ t('ui.noUsersFound') }}
         </div>
         <button
           v-for="user in visibleUsers"
@@ -115,6 +114,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import { Check, ChevronDown, Search } from 'lucide-vue-next'
@@ -134,7 +135,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   initialUsers: () => [],
   dropdown: false,
-  placeholder: '全部用户',
+  placeholder: undefined,
   label: '',
   triggerClass: '',
 })
@@ -143,6 +144,8 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
   select: [value: string]
 }>()
+
+const { t } = useI18n()
 
 const rootRef = ref<HTMLElement | null>(null)
 const open = ref(false)
@@ -156,7 +159,7 @@ let loadedInitialBatch = false
 
 const selectedUser = computed(() => knownUsers.value.get(props.modelValue))
 const selectedLabel = computed(() => {
-  if (props.modelValue === '__all__') return props.placeholder
+  if (props.modelValue === '__all__') return placeholder.value
   const user = selectedUser.value
   return user ? getUserLabel(user) : `User ${props.modelValue}`
 })
@@ -258,4 +261,6 @@ onBeforeUnmount(() => {
   requestId += 1
   document.removeEventListener('pointerdown', handleDocumentPointerDown)
 })
+
+const placeholder = computed(() => props.placeholder ?? t('ui.allUsers'))
 </script>

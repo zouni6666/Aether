@@ -1,3 +1,5 @@
+
+import { translate as t } from '@/i18n'
 const MODEL_TEST_RESPONSE_PREVIEW_MAX_LENGTH = 160
 const MODEL_TEST_IMAGE_PREVIEW_MAX_ITEMS = 6
 
@@ -15,7 +17,7 @@ export function extractModelTestResponsePreview(responseBody: unknown): string |
   if (text) return text
 
   const reasoning = extractResponseReasoning(normalizedBody)
-  if (reasoning) return `推理：${reasoning}`
+  if (reasoning) return t('providers.migration.reasoninga1178b', { value: String(reasoning) })
 
   const image = extractImagePreview(normalizedBody)
   if (image) return image
@@ -210,7 +212,7 @@ function pushImagePreview(
   seen.add(preview.src)
   previews.push({
     ...preview,
-    label: `图片 ${previews.length + 1}`,
+    label: t('providers.migration.imagec1f333', { value: String(previews.length + 1) }),
   })
 }
 
@@ -402,25 +404,25 @@ function extractImagePreviewFromRecord(value: JsonRecord, depth: number): string
 
   const imageUrl = value.image_url
   if (typeof imageUrl === 'string' && imageUrl.trim()) {
-    return compactPreviewText(`图片：${imageUrl}`)
+    return compactPreviewText(t('providers.migration.image0856a3', { value: String(imageUrl) }))
   }
   if (isJsonRecord(imageUrl)) {
     const nestedUrl = compactPreviewText(imageUrl.url)
-    if (nestedUrl) return `图片：${nestedUrl}`
+    if (nestedUrl) return t('providers.migration.image0856a3', { value: String(nestedUrl) })
     if (compactPreviewText(imageUrl.b64_json)) {
-      return '图片：base64'
+      return t('ui.imageBase64')
     }
   }
 
   const url = compactPreviewText(value.url)
-  if (url) return `图片：${url}`
+  if (url) return t('providers.migration.image0856a3', { value: String(url) })
 
   if (compactPreviewText(value.b64_json)) {
-    return '图片：base64'
+    return t('ui.imageBase64')
   }
 
   if (value.type === 'image_generation_call' && compactPreviewText(value.result)) {
-    return '图片：base64'
+    return t('ui.imageBase64')
   }
 
   return extractImagePreviewFromCollection(value.data, depth + 1)
@@ -465,14 +467,14 @@ function extractResponseSummary(responseBody: unknown): string | null {
     const embeddingDimensions = responseBody.data
       .map(item => isJsonRecord(item) && Array.isArray(item.embedding) ? item.embedding.length : null)
       .find((size): size is number => typeof size === 'number')
-    if (embeddingDimensions != null) return `Embedding 维度：${embeddingDimensions}`
-    if (responseBody.data.length > 0) return `返回数据：${responseBody.data.length} 条`
+    if (embeddingDimensions != null) return t('providers.migration.embeddingDimensions760d5a', { value: String(embeddingDimensions) })
+    if (responseBody.data.length > 0) return t('providers.migration.returnedEntriesea1f1c', { value: String(responseBody.data.length) })
   }
 
-  if (Array.isArray(responseBody.results)) return `Rerank 结果：${responseBody.results.length} 条`
+  if (Array.isArray(responseBody.results)) return t('providers.migration.rerankResults89755f', { value: String(responseBody.results.length) })
 
   const model = compactPreviewText(responseBody.model)
-  if (model) return `返回模型：${model}`
+  if (model) return t('providers.migration.returnedModeld9bbdd', { value: String(model) })
 
   return null
 }

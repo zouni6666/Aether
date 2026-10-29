@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import type { PoolKeyBatchUpdatePatch } from '@/api/endpoints/pool'
 
 export interface PoolKeyBatchEditState {
@@ -31,6 +32,7 @@ export interface PoolKeyBatchPatchBuildResult {
   patch: PoolKeyBatchUpdatePatch | null
   fieldLabels: string[]
   error: string | null
+  errorField?: 'allowed_models'
 }
 
 function uniqueTrimmed(values: string[]): string[] {
@@ -50,12 +52,12 @@ function parseIntegerField(
 ): { value?: number | null; error?: string } {
   const normalized = value.trim()
   if (!normalized) {
-    return nullable ? { value: null } : { error: `${label} 不能为空` }
+    return nullable ? { value: null } : { error: translate('feedback.pool.requiredField', { label }) }
   }
   const parsed = Number(normalized)
   if (!Number.isInteger(parsed) || parsed < min || (max !== undefined && parsed > max)) {
-    const range = max === undefined ? `不小于 ${min}` : `${min}-${max}`
-    return { error: `${label} 必须是 ${range} 的整数` }
+    const range = max === undefined ? translate('feedback.pool.minimumValue', { min }) : `${min}-${max}`
+    return { error: translate('feedback.pool.integerRange', { label, range }) }
   }
   return { value: parsed }
 }
@@ -69,55 +71,55 @@ export function buildPoolKeyBatchUpdatePatch(
   if (state.applyApiFormats) {
     const apiFormats = uniqueTrimmed(state.apiFormats)
     if (apiFormats.length === 0) {
-      return { patch: null, fieldLabels, error: '请至少选择一个支持的 API' }
+      return { patch: null, fieldLabels, error: translate('ui.selectAtLeastOneSupportedApi') }
     }
     patch.api_formats = apiFormats
-    fieldLabels.push('支持 API')
+    fieldLabels.push(translate('ui.supportedApisdd7863a'))
   }
 
   if (state.applyActive) {
     patch.is_active = state.isActive
-    fieldLabels.push('启用状态')
+    fieldLabels.push(translate('ui.enablementStatus'))
   }
 
   if (state.applyInternalPriority) {
-    const parsed = parseIntegerField(state.internalPriority, '优先级', 0)
+    const parsed = parseIntegerField(state.internalPriority, translate('ui.priority565d646'), 0)
     if (parsed.error) return { patch: null, fieldLabels, error: parsed.error }
     patch.internal_priority = parsed.value as number
-    fieldLabels.push('优先级')
+    fieldLabels.push(translate('ui.priority565d646'))
   }
 
   if (state.applyRpmLimit) {
-    const parsed = parseIntegerField(state.rpmLimit, 'RPM 限制', 1, 10000, true)
+    const parsed = parseIntegerField(state.rpmLimit, translate('ui.rpmLimit50b7143'), 1, 10000, true)
     if (parsed.error) return { patch: null, fieldLabels, error: parsed.error }
     patch.rpm_limit = parsed.value
-    fieldLabels.push('RPM 限制')
+    fieldLabels.push(translate('ui.rpmLimit50b7143'))
   }
 
   if (state.applyConcurrentLimit) {
-    const parsed = parseIntegerField(state.concurrentLimit, '并发请求上限', 0, undefined, true)
+    const parsed = parseIntegerField(state.concurrentLimit, translate('ui.concurrentRequestLimit'), 0, undefined, true)
     if (parsed.error) return { patch: null, fieldLabels, error: parsed.error }
     patch.concurrent_limit = parsed.value
-    fieldLabels.push('并发请求上限')
+    fieldLabels.push(translate('ui.concurrentRequestLimit'))
   }
 
   if (state.applyCacheTtl) {
-    const parsed = parseIntegerField(state.cacheTtlMinutes, '缓存 TTL', 0, 60)
+    const parsed = parseIntegerField(state.cacheTtlMinutes, translate('ui.cacheTtld8a1617'), 0, 60)
     if (parsed.error) return { patch: null, fieldLabels, error: parsed.error }
     patch.cache_ttl_minutes = parsed.value as number
-    fieldLabels.push('缓存 TTL')
+    fieldLabels.push(translate('ui.cacheTtld8a1617'))
   }
 
   if (state.applyProbeInterval) {
-    const parsed = parseIntegerField(state.maxProbeIntervalMinutes, '熔断探测', 0, 32)
+    const parsed = parseIntegerField(state.maxProbeIntervalMinutes, translate('ui.circuitProbe'), 0, 32)
     if (parsed.error) return { patch: null, fieldLabels, error: parsed.error }
     patch.max_probe_interval_minutes = parsed.value as number
-    fieldLabels.push('熔断探测')
+    fieldLabels.push(translate('ui.circuitProbe'))
   }
 
   if (state.applyNote) {
     patch.note = state.note.trim() || null
-    fieldLabels.push('备注')
+    fieldLabels.push(translate('ui.notes'))
   }
 
   if (state.applyAutoFetchModels) {
@@ -126,23 +128,23 @@ export function buildPoolKeyBatchUpdatePatch(
       patch.model_include_patterns = parsePoolKeyModelPatterns(state.includePatterns)
       patch.model_exclude_patterns = parsePoolKeyModelPatterns(state.excludePatterns)
     }
-    fieldLabels.push('自动获取上游可用模型')
+    fieldLabels.push(translate('ui.autoFetchUpstreamModels'))
   }
 
   if (state.applyAllowedModels) {
     const selectedModels = uniqueTrimmed(state.selectedModels)
     if (!state.unrestrictedModels && selectedModels.length === 0) {
-      return { patch: null, fieldLabels, error: '请至少选择一个可用模型' }
+      return { patch: null, fieldLabels, error: translate('ui.selectAtLeastOneAvailableModel'), errorField: 'allowed_models' }
     }
     patch.allowed_models = state.unrestrictedModels ? null : selectedModels
     patch.locked_models = state.unrestrictedModels || !state.lockSelectedModels
       ? []
       : selectedModels
-    fieldLabels.push('可用模型范围')
+    fieldLabels.push(translate('ui.allowedModels'))
   }
 
   if (fieldLabels.length === 0) {
-    return { patch: null, fieldLabels, error: '请至少启用一个批量编辑字段' }
+    return { patch: null, fieldLabels, error: translate('ui.enableAtLeastOneFieldForBulkEditing') }
   }
 
   return { patch, fieldLabels, error: null }

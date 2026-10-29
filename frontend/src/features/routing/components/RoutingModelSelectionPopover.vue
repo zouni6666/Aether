@@ -7,8 +7,8 @@
         size="icon"
         class="h-7 w-7 shrink-0 text-muted-foreground"
         :disabled="disabled"
-        aria-label="编辑模型"
-        title="编辑模型"
+        :aria-label="t('ui.editModel')"
+        :title="t('ui.editModel')"
       >
         <Pencil class="h-3.5 w-3.5" />
       </Button>
@@ -18,17 +18,17 @@
       :side-offset="6"
       :collision-padding="12"
       class="w-[min(22rem,calc(100vw-1.5rem))] overflow-hidden p-0"
-      aria-label="编辑适用模型"
+      :aria-label="t('ui.editApplicableModels')"
       @open-auto-focus.prevent="focusSearch"
     >
       <div class="flex items-center justify-between gap-2 px-3 pt-2 text-xs font-medium">
-        <span>适用模型</span>
+        <span>{{ t('ui.applicableModels') }}</span>
         <Button
           type="button"
           variant="ghost"
           size="icon"
           class="h-7 w-7 text-muted-foreground"
-          aria-label="关闭模型选择"
+          :aria-label="t('ui.closeModelSelection')"
           @click="open = false"
         >
           <X class="h-3.5 w-3.5" />
@@ -55,10 +55,10 @@
           variant="ghost"
           size="sm"
           class="h-7 px-2 text-xs"
-          aria-label="完成选择"
+          :aria-label="t('ui.finishSelection')"
           @click="open = false"
         >
-          完成
+          {{ t('ui.completed') }}
         </Button>
       </div>
     </PopoverContent>
@@ -66,6 +66,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, nextTick, ref, watch } from 'vue'
 import { Pencil, X } from 'lucide-vue-next'
 import { Button, Popover, PopoverContent, PopoverTrigger } from '@/components/ui'
@@ -88,6 +90,8 @@ const emit = defineEmits<{
   'update:open': [open: boolean]
 }>()
 
+const { t } = useI18n()
+
 const open = computed({
   get: () => props.open,
   set: value => emit('update:open', value),
@@ -100,4 +104,5 @@ async function focusSearch(): Promise<void> {
   await nextTick()
   selector.value?.focusSearch()
 }
+
 </script>

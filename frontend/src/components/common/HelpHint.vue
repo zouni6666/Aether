@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref } from 'vue'
 import { CircleHelp } from 'lucide-vue-next'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -10,6 +12,8 @@ const props = defineProps<{
 }>()
 
 const open = ref(false)
+
+const { t } = useI18n()
 </script>
 
 <template>
@@ -19,7 +23,7 @@ const open = ref(false)
         <button
           type="button"
           class="inline-flex shrink-0 items-center justify-center rounded-sm p-0.5 text-muted-foreground/60 transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          :aria-label="`${props.label}说明`"
+          :aria-label="t('ui.valueHelp', { value: props.label })"
           :aria-expanded="open"
           @click.stop.prevent="open = !open"
         >
@@ -41,7 +45,7 @@ const open = ref(false)
     <button
       type="button"
       class="inline-flex items-center justify-center rounded-sm p-0.5 text-muted-foreground/60 transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      :aria-label="`${props.label}说明`"
+      :aria-label="t('ui.valueHelp', { value: props.label })"
       :aria-expanded="open"
       :title="props.text"
       @click.stop="open = !open"

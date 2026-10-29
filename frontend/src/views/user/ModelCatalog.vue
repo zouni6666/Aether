@@ -7,7 +7,7 @@
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
           <!-- 左侧：标题 -->
           <h3 class="text-sm sm:text-base font-semibold shrink-0">
-            可用模型
+            {{ t('ui.availableModels') }}
           </h3>
 
           <!-- 右侧：操作区 -->
@@ -19,7 +19,7 @@
                 id="model-search"
                 v-model="searchQuery"
                 type="text"
-                placeholder="搜索模型名称..."
+                :placeholder="t('ui.searchModels')"
                 class="w-32 sm:w-44 pl-8 pr-3 h-8 text-sm bg-background/50 border-border/60 focus:border-primary/40 transition-colors"
               />
             </div>
@@ -38,16 +38,16 @@
           <TableHeader>
             <TableRow class="border-b border-border/60 hover:bg-transparent">
               <TableHead class="w-[140px] h-12 font-semibold">
-                模型名称
+                {{ t('ui.modelName') }}
               </TableHead>
               <TableHead class="w-[140px] h-12 font-semibold text-center">
-                价格 ($/M)
+                {{ t('ui.priceM') }}
               </TableHead>
               <TableHead class="w-[80px] h-12 font-semibold text-center">
-                调用次数
+                {{ t('ui.callCount') }}
               </TableHead>
               <TableHead class="w-[70px] h-12 font-semibold text-center">
-                状态
+                {{ t('ui.status6320b4a') }}
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -65,7 +65,7 @@
                 colspan="4"
                 class="text-center py-12 text-muted-foreground"
               >
-                没有找到匹配的模型
+                {{ t('ui.noMatchingModelsFound') }}
               </TableCell>
             </TableRow>
             <template v-else>
@@ -93,7 +93,7 @@
                       <span>{{ model.name }}</span>
                       <button
                         class="p-0.5 rounded hover:bg-muted transition-colors"
-                        title="复制模型 ID"
+                        :title="t('ui.copyModelId')"
                         @click.stop="copyToClipboard(model.name)"
                       >
                         <Copy class="w-3 h-3" />
@@ -113,13 +113,13 @@
                       <span
                         v-if="hasTieredPricing(model)"
                         class="ml-1 text-muted-foreground"
-                        title="阶梯计费"
-                      >[阶梯]</span>
+                        :title="t('ui.tieredPricing')"
+                      >{{ t('ui.tiered') }}</span>
                     </div>
                     <!-- 按次计费 -->
                     <div v-if="model.default_price_per_request && model.default_price_per_request > 0">
-                      <span class="text-muted-foreground">按次:</span>
-                      <span class="font-mono ml-1">${{ model.default_price_per_request.toFixed(3) }}/次</span>
+                      <span class="text-muted-foreground">{{ t('ui.perRequest5b310fa') }}</span>
+                      <span class="font-mono ml-1">${{ model.default_price_per_request.toFixed(3) }}{{ t('ui.requestad9c0d7') }}</span>
                     </div>
                     <!-- 无计费配置 -->
                     <div
@@ -135,7 +135,7 @@
                 </TableCell>
                 <TableCell class="py-4 text-center">
                   <Badge :variant="model.is_active ? 'success' : 'secondary'">
-                    {{ model.is_active ? '可用' : '停用' }}
+                    {{ model.is_active ? t('ui.available4d99c97') : t('ui.disable4e6fd0e') }}
                   </Badge>
                 </TableCell>
               </TableRow>
@@ -179,7 +179,7 @@
                 </div>
               </div>
               <Badge :variant="model.is_active ? 'success' : 'secondary'">
-                {{ model.is_active ? '可用' : '停用' }}
+                {{ model.is_active ? t('ui.available4d99c97') : t('ui.disable4e6fd0e') }}
               </Badge>
             </div>
 
@@ -191,7 +191,7 @@
               >
                 In: ${{ getFirstTierPrice(model, 'input')?.toFixed(2) || '-' }} / Out: ${{ getFirstTierPrice(model, 'output')?.toFixed(2) || '-' }}
               </span>
-              <span class="font-mono">{{ formatUsageCount(model.usage_count || 0) }} 次</span>
+              <span class="font-mono">{{ formatUsageCount(model.usage_count || 0) }} {{ t('ui.times') }}</span>
             </div>
           </div>
         </div>
@@ -218,6 +218,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { ref, computed, onMounted, watch } from 'vue'
 import {
   Loader2,
@@ -226,6 +229,7 @@ import {
 } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
+import { useClientPagination } from '@/composables/useClientPagination'
 import {
   Card,
   Table,
@@ -242,11 +246,11 @@ import {
 import { type PublicGlobalModel } from '@/api/public-models'
 import { formatUsageCount } from '@/utils/format'
 import { meApi } from '@/api/me'
-import UserModelDetailDrawer from './components/UserModelDetailDrawer.vue'
+import UserModelDetailDrawer from '@/features/models/components/UserModelDetailDrawer.vue'
 import { useRowClick } from '@/composables/useRowClick'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
-import { getModelCapabilityLabels } from './model-catalog-helpers'
+import { getModelCapabilityLabels } from '@/features/models/utils/model-catalog-helpers'
 
 const { error: showError } = useToast()
 const { copyToClipboard } = useClipboard()
@@ -269,10 +273,6 @@ function openModelDetail(model: PublicGlobalModel, event: MouseEvent) {
   drawerOpen.value = true
 }
 
-// 分页
-const currentPage = ref(1)
-const pageSize = ref(20)
-
 // 筛选后的模型列表
 const filteredModels = computed(() => {
   let result = models.value
@@ -289,17 +289,11 @@ const filteredModels = computed(() => {
   return result
 })
 
-// 分页计算
-const paginatedModels = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  const end = start + pageSize.value
-  return filteredModels.value.slice(start, end)
-})
+// 分页
+const { currentPage, pageSize, pageItems: paginatedModels, resetPage } = useClientPagination(filteredModels)
 
 // 搜索变化时重置到第一页
-watch(searchQuery, () => {
-  currentPage.value = 1
-})
+watch(searchQuery, resetPage)
 
 async function loadModels() {
   loading.value = true
@@ -309,7 +303,7 @@ async function loadModels() {
     models.value = (response.models || []) as PublicGlobalModel[]
   } catch (err: unknown) {
     log.error('加载模型失败:', err)
-    showError(parseApiError(err, ''), '加载模型失败')
+    showError(parseApiError(err, ''), t('ui.failedToLoadModels'))
   } finally {
     loading.value = false
   }
@@ -339,4 +333,5 @@ function hasTieredPricing(model: PublicGlobalModel): boolean {
 onMounted(() => {
   refreshData()
 })
+
 </script>

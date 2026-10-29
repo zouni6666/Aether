@@ -74,17 +74,23 @@ export function formatByteSize(bytes: number | undefined | null): string {
   }
 
   const absBytes = Math.max(0, Math.abs(bytes))
+  const sign = bytes < 0 ? '-' : ''
+  if (absBytes < 1024) {
+    return `${sign}${Math.round(absBytes)} B`
+  }
+
   const units = [
+    { value: 1024 ** 4, suffix: 'TB' },
     { value: 1024 ** 3, suffix: 'GB' },
     { value: 1024 ** 2, suffix: 'MB' },
     { value: 1024, suffix: 'KB' },
   ] as const
-  const unit = units.find(candidate => absBytes >= candidate.value) ?? units[2]
+  const unit = units.find(candidate => absBytes >= candidate.value) ?? units[3]
   const scaled = absBytes / unit.value
   const fractionDigits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2
   const formatted = trimTrailingDecimalZeros(scaled.toFixed(fractionDigits))
 
-  return `${bytes < 0 ? '-' : ''}${formatted} ${unit.suffix}`
+  return `${sign}${formatted} ${unit.suffix}`
 }
 
 // Token formatting - intelligent display based on value size
@@ -165,6 +171,87 @@ export function formatDate(dateString: string | undefined | null): string {
 
 export function formatRelativeTime(value: number, unit: Intl.RelativeTimeFormatUnit): string {
   return new Intl.RelativeTimeFormat(getI18nLocale(), { numeric: 'auto' }).format(value, unit)
+}
+
+type DateInput = string | number | Date | null | undefined
+
+function toValidDate(value: DateInput): Date | null {
+  if (value === null || value === undefined || value === '') return null
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+// Date only in the locale default shape (e.g. 2026/9/7)
+export function formatDateShort(value: DateInput, nullLabel = '-'): string {
+  const date = toValidDate(value)
+  return date ? date.toLocaleDateString(getI18nLocale()) : nullLabel
+}
+
+// Date only with two-digit month and day (e.g. 2026/09/07)
+export function formatDateOnly(value: DateInput, nullLabel = '-'): string {
+  const date = toValidDate(value)
+  if (!date) return nullLabel
+  return date.toLocaleDateString(getI18nLocale(), {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+}
+
+// Date and time to the minute (e.g. 2026/09/07 12:30)
+export function formatDateTime(value: DateInput, nullLabel = '-'): string {
+  const date = toValidDate(value)
+  if (!date) return nullLabel
+  return date.toLocaleString(getI18nLocale(), {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+// Date and time including seconds, for detail panels
+export function formatDateTimeFull(value: DateInput, nullLabel = '-'): string {
+  const date = toValidDate(value)
+  if (!date) return nullLabel
+  return date.toLocaleString(getI18nLocale(), {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+// Month, day and time without the year, for dense tables (e.g. 09/07 12:30)
+export function formatDateTimeCompact(value: DateInput, nullLabel = '-'): string {
+  const date = toValidDate(value)
+  if (!date) return nullLabel
+  return date.toLocaleString(getI18nLocale(), {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+// Relative wording for recent timestamps, falling back to the date after a week
+export function formatTimeAgo(value: DateInput, nullLabel = '-'): string {
+  const date = toValidDate(value)
+  if (!date) return nullLabel
+
+  const diffMs = Date.now() - date.getTime()
+  const minutes = Math.floor(diffMs / 60_000)
+  const hours = Math.floor(diffMs / 3_600_000)
+  const days = Math.floor(diffMs / 86_400_000)
+
+  if (minutes < 1) return formatRelativeTime(0, 'second')
+  if (minutes < 60) return formatRelativeTime(-minutes, 'minute')
+  if (hours < 24) return formatRelativeTime(-hours, 'hour')
+  if (days < 7) return formatRelativeTime(-days, 'day')
+  return formatDateOnly(date)
 }
 
 // Model price formatting (already in per 1M tokens)

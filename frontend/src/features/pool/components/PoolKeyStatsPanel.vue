@@ -66,6 +66,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed } from 'vue'
 import type {
   PoolCodexCycleStatsGroup,
@@ -82,11 +84,13 @@ const props = withDefaults(defineProps<{
   variant: 'desktop',
 })
 
+const { t } = useI18n()
+
 const CYCLE_METRIC_KEYS: PoolStatsMetricKey[] = ['request_count', 'total_tokens', 'total_cost_usd']
 const CYCLE_METRIC_LABELS: Record<PoolStatsMetricKey, string> = {
-  request_count: '请求',
+  get request_count() { return t('ui.request') },
   total_tokens: 'Token',
-  total_cost_usd: '费用',
+  get total_cost_usd() { return t('ui.cost7fe8603') },
 }
 
 function missingMetric(key: PoolStatsMetricKey): PoolStatsMetric {

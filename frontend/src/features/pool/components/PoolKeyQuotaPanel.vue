@@ -4,7 +4,7 @@
     class="rounded-xl border border-border/50 bg-muted/30 px-3 py-2 text-xs"
   >
     <div class="text-muted-foreground mb-1">
-      {{ legacyT('配额') }}
+      {{ t('ui.quotae284fc9') }}
     </div>
     <div
       v-if="items.length"
@@ -103,7 +103,7 @@ const emit = defineEmits<{
   'consume-reset-credit': []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 const hasNumericOnlyItems = computed(() => props.items.length > 0 && props.items.every(item => item.numericOnly))
 
 const ResetCredits = defineComponent({
@@ -120,7 +120,7 @@ const ResetCredits = defineComponent({
             disabled: props.consumingResetCredit,
             class: 'font-medium text-primary hover:underline disabled:pointer-events-none disabled:opacity-60',
             onClick: () => emit('consume-reset-credit'),
-          }, props.consumingResetCredit ? legacyT('重置中...') : legacyT('点击以进行重置'))
+          }, props.consumingResetCredit ? t('ui.resetting') : t('ui.clickToReset'))
           : null,
         h('span', props.resetCreditText),
       ]),

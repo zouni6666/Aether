@@ -23,8 +23,7 @@
           v-if="hiddenLegendCount > 0"
           class="text-muted-foreground"
         >
-          +{{ hiddenLegendCount }} 更多
-        </span>
+          +{{ hiddenLegendCount }} {{ t('site.home.section.more') }} </span>
       </div>
     </div>
     <p
@@ -54,12 +53,14 @@
       v-else
       class="h-[160px] flex items-center justify-center text-sm text-muted-foreground"
     >
-      暂无请求间隔数据
+      {{ t('ui.noRequestIntervalData') }}
     </div>
   </Card>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import type { TimeScatterChartData } from '@/components/charts/types'
 import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import Card from '@/components/ui/card.vue'
@@ -80,6 +81,8 @@ const props = withDefaults(defineProps<{
   refreshIntervalMs: 30000,
   data: undefined,
 })
+
+const { t } = useI18n()
 
 const loading = ref(false)
 const timelineData = ref<IntervalTimelineResponse | null>(null)
@@ -276,7 +279,7 @@ const chartData = computed<TimeScatterChartData>(() => {
   // 单用户或单模型：使用主题色
   return {
     datasets: [{
-      label: '请求间隔',
+      get label() { return t('ui.requestInterval') },
       data: points.map(p => ({ x: p.x, y: p.y })),
       backgroundColor: `rgba(${primaryColor.value}, 0.6)`,
       borderColor: `rgba(${primaryColor.value}, 0.8)`,
@@ -298,7 +301,7 @@ const chartOptions = computed<ChartOptions<'scatter'>>(() => ({
           const realY = point._originalY ?? point.y
           const datasetLabel = context.dataset.label || ''
           if (hasMultipleGroups.value) {
-            return `${datasetLabel}: ${realY.toFixed(1)} 分钟`
+            return t('ui.valueValueMin', { value: datasetLabel, value2: realY.toFixed(1) })
           }
           return `间隔: ${realY.toFixed(1)} 分钟`
         }
@@ -391,4 +394,5 @@ onBeforeUnmount(() => {
   }
   stopRefreshTimer()
 })
+
 </script>

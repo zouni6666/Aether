@@ -1,13 +1,13 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="S3 备份"
-      description="按导出范围备份到 S3-compatible 存储"
+      :title="t('ui.s3Backups')"
+      :description="t('ui.backUpSelectedExportScopesToS3CompatibleStorage')"
     />
 
     <CardSection
-      title="备份配置"
-      description="配置自动备份周期、对象存储连接和保留策略"
+      :title="t('ui.backupConfiguration')"
+      :description="t('ui.configureAutomaticBackupScheduleObjectStorageConnectionAndRetentionPolicy')"
       class="mt-6"
     >
       <template #actions>
@@ -19,7 +19,7 @@
             @click="backup.runS3BackupNow"
           >
             <Play class="w-3.5 h-3.5 mr-1.5" />
-            {{ backup.running.value ? '提交中...' : '立即备份' }}
+            {{ backup.running.value ? t('ui.submitting') : t('ui.backUpNow') }}
           </Button>
           <Button
             size="sm"
@@ -27,7 +27,7 @@
             @click="backup.saveS3BackupConfig"
           >
             <Save class="w-3.5 h-3.5 mr-1.5" />
-            {{ backup.saving.value ? '保存中...' : '保存' }}
+            {{ backup.saving.value ? t('ui.saving') : t('ui.save') }}
           </Button>
         </div>
       </template>
@@ -40,10 +40,10 @@
             </div>
             <div class="min-w-0">
               <h4 class="text-sm font-medium">
-                自动备份
+                {{ t('ui.automaticBackups') }}
               </h4>
               <p class="text-xs text-muted-foreground mt-0.5">
-                {{ backup.config.value.enabled ? '已启用' : '未启用' }}
+                {{ backup.config.value.enabled ? t('ui.enableddfb8022') : t('ui.disabled') }}
               </p>
             </div>
           </div>
@@ -58,9 +58,7 @@
             <Label
               for="backup-scope"
               class="block text-sm font-medium"
-            >
-              备份范围
-            </Label>
+            > {{ t('ui.backupScope') }} </Label>
             <Select
               :model-value="backup.config.value.scope"
               @update:model-value="setScope"
@@ -73,13 +71,13 @@
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="config">
-                  配置数据
+                  {{ t('ui.configurationData') }}
                 </SelectItem>
                 <SelectItem value="users">
-                  用户数据
+                  {{ t('ui.userData') }}
                 </SelectItem>
                 <SelectItem value="data">
-                  完整备份
+                  {{ t('ui.fullBackup') }}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -148,7 +146,7 @@
                 :disabled="backup.saving.value"
                 @click="backup.clearS3SecretAccessKey"
               >
-                清除
+                {{ t('ui.clear') }}
               </button>
             </div>
             <div class="relative mt-1">
@@ -158,7 +156,7 @@
                 masked
                 disable-autofill
                 autocomplete="new-password"
-                :placeholder="backup.config.value.secretAccessKeyIsSet ? '已配置，留空不变' : ''"
+                :placeholder="backup.config.value.secretAccessKeyIsSet ? t('ui.configuredLeaveEmptyToKeepUnchanged30fda99') : ''"
                 @update:model-value="backup.config.value.secretAccessKey = String($event)"
               />
               <KeyRound
@@ -172,9 +170,7 @@
             <Label
               for="backup-retention"
               class="block text-sm font-medium"
-            >
-              最多保留备份数
-            </Label>
+            > {{ t('ui.maximumBackupsToRetain') }} </Label>
             <Input
               id="backup-retention"
               :model-value="backup.config.value.retentionCount"
@@ -191,9 +187,7 @@
             <Label
               for="backup-interval"
               class="block text-sm font-medium"
-            >
-              周期间隔
-            </Label>
+            > {{ t('ui.interval') }} </Label>
             <Input
               id="backup-interval"
               :model-value="backup.config.value.scheduleInterval"
@@ -207,9 +201,7 @@
             <Label
               for="backup-unit"
               class="block text-sm font-medium"
-            >
-              周期单位
-            </Label>
+            > {{ t('ui.intervalUnit') }} </Label>
             <Select
               :model-value="backup.config.value.scheduleUnit"
               @update:model-value="setScheduleUnit"
@@ -222,16 +214,16 @@
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="hours">
-                  小时
+                  {{ t('ui.hours') }}
                 </SelectItem>
                 <SelectItem value="days">
-                  天
+                  {{ t('ui.days') }}
                 </SelectItem>
                 <SelectItem value="weeks">
-                  周
+                  {{ t('providers.antigravity.quota.period.weekly') }}
                 </SelectItem>
                 <SelectItem value="months">
-                  月
+                  {{ t('ui.month') }}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -252,8 +244,7 @@
             <ChevronRight
               v-else
               class="w-3.5 h-3.5 mr-1.5"
-            />
-            高级选项
+            /> {{ t('ui.advancedOptions') }}
           </Button>
 
           <div
@@ -309,9 +300,7 @@
               <Label
                 for="backup-hour"
                 class="block text-sm font-medium"
-              >
-                执行小时
-              </Label>
+              > {{ t('ui.hour') }} </Label>
               <Input
                 id="backup-hour"
                 :model-value="backup.config.value.scheduleHour"
@@ -326,9 +315,7 @@
               <Label
                 for="backup-minute"
                 class="block text-sm font-medium"
-              >
-                执行分钟
-              </Label>
+              > {{ t('ui.minute') }} </Label>
               <Input
                 id="backup-minute"
                 :model-value="backup.config.value.scheduleMinute"
@@ -343,9 +330,7 @@
               <Label
                 for="backup-weekday"
                 class="block text-sm font-medium"
-              >
-                星期
-              </Label>
+              > {{ t('ui.weekday') }} </Label>
               <Select
                 :model-value="String(backup.config.value.scheduleWeekday)"
                 @update:model-value="setNumber('scheduleWeekday', $event, 1)"
@@ -371,9 +356,7 @@
               <Label
                 for="backup-month-day"
                 class="block text-sm font-medium"
-              >
-                每月日期
-              </Label>
+              > {{ t('ui.dayOfMonth') }} </Label>
               <Input
                 id="backup-month-day"
                 :model-value="backup.config.value.scheduleMonthDay"
@@ -395,9 +378,7 @@
               <Label
                 for="backup-compression"
                 class="block text-sm font-medium"
-              >
-                压缩格式
-              </Label>
+              > {{ t('ui.compressionFormat') }} </Label>
               <Select
                 :model-value="backup.config.value.compression"
                 @update:model-value="backup.config.value.compression = $event"
@@ -423,6 +404,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { computed, onMounted } from 'vue'
 import {
   ChevronDown,
@@ -459,13 +443,13 @@ const backupRunDisabled = computed(() =>
 )
 
 const weekdays = [
-  { value: 1, label: '周一' },
-  { value: 2, label: '周二' },
-  { value: 3, label: '周三' },
-  { value: 4, label: '周四' },
-  { value: 5, label: '周五' },
-  { value: 6, label: '周六' },
-  { value: 7, label: '周日' },
+  { value: 1, get label() { return t('ui.mon') } },
+  { value: 2, get label() { return t('ui.tue') } },
+  { value: 3, get label() { return t('ui.wed') } },
+  { value: 4, get label() { return t('ui.thu') } },
+  { value: 5, get label() { return t('ui.fri') } },
+  { value: 6, get label() { return t('ui.sat') } },
+  { value: 7, get label() { return t('ui.sun') } },
 ]
 
 function setScope(value: string) {
@@ -496,4 +480,5 @@ function setNumber(field: keyof Pick<
 onMounted(() => {
   backup.loadS3BackupConfig()
 })
+
 </script>

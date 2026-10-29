@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App, type VNode } from 'vue'
 import type { GlobalModelResponse } from '@/api/global-models'
+import { getI18nLocale, setI18nLocale } from '@/i18n'
 import RoutingSchedulingPolicyEditor from '../components/RoutingSchedulingPolicyEditor.vue'
 import {
   createEmptyRoutingGroupConfig,
@@ -130,6 +131,24 @@ afterEach(() => {
 })
 
 describe('RoutingSchedulingPolicyEditor', () => {
+  it('localizes expand and collapse actions when the language changes', async () => {
+    const previousLocale = getI18nLocale()
+    try {
+      setI18nLocale('zh-CN')
+      const { root } = mountEditor()
+      await openModels(root)
+      const button = control<HTMLButtonElement>(root, '收起调度配置 1')
+      setI18nLocale('en-US')
+      await flush()
+      expect(button.getAttribute('aria-label')).toBe('Collapse scheduling configuration 1')
+      button.click()
+      await flush()
+      expect(button.getAttribute('aria-label')).toBe('Expand scheduling configuration 1')
+    } finally {
+      setI18nLocale(previousLocale)
+    }
+  })
+
   it('opens legacy Key configurations as provider scheduling without exposing a mode switch', async () => {
     const initial = createEmptyRoutingGroupConfig()
     initial.default_policy.priority_mode = 'global_key'

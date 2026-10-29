@@ -9,7 +9,7 @@
           :variant="provider.is_active ? 'default' : 'secondary'"
           class="text-xs shrink-0"
         >
-          {{ legacyT(provider.is_active ? '活跃' : '停用') }}
+          {{ provider.is_active ? t('ui.activee85e590') : t('ui.disable4e6fd0e') }}
         </Badge>
       </div>
       <div class="flex items-center gap-1 shrink-0">
@@ -35,7 +35,7 @@
             <Layers class="w-4 h-4" />
           </Button>
         </span>
-        <span :title="legacyT(hasFailoverRules ? '已配置故障转移规则（点击编辑）' : '配置故障转移规则')">
+        <span :title="hasFailoverRules ? t('ui.failoverRulesConfiguredClickToEdit') : t('ui.configureFailoverRules')">
           <Button
             variant="ghost"
             size="icon"
@@ -55,7 +55,7 @@
               size="icon"
               :class="provider.proxy?.node_id ? 'text-blue-500' : ''"
               :disabled="savingProviderProxy"
-              :title="provider.proxy?.node_id ? `${legacyT('代理')}: ${providerProxyNodeName}` : legacyT('设置代理节点')"
+              :title="provider.proxy?.node_id ? `${t('ui.proxy')}: ${providerProxyNodeName}` : t('ui.setProxyNode')"
             >
               <Globe class="w-4 h-4" />
             </Button>
@@ -67,7 +67,7 @@
           >
             <div class="space-y-2">
               <div class="flex items-center justify-between">
-                <span class="text-xs font-medium">{{ legacyT('代理节点') }}</span>
+                <span class="text-xs font-medium">{{ t('ui.proxyNodes23f1b6a') }}</span>
                 <Button
                   v-if="provider.proxy?.node_id"
                   variant="ghost"
@@ -76,7 +76,7 @@
                   :disabled="savingProviderProxy"
                   @click="$emit('clearProviderProxy')"
                 >
-                  {{ legacyT('清除') }}
+                  {{ t('ui.clear') }}
                 </Button>
               </div>
               <ProxyNodeSelect
@@ -85,7 +85,7 @@
                 @update:model-value="$emit('setProviderProxy', $event)"
               />
               <p class="text-[10px] text-muted-foreground">
-                {{ legacyT(provider.proxy?.node_id ? '当前使用独立代理' : '未设置代理节点') }}
+                {{ provider.proxy?.node_id ? t('ui.currentlyUsingAnIndividualProxy') : t('ui.noProxyNodeSet') }}
               </p>
             </div>
           </PopoverContent>
@@ -93,7 +93,7 @@
         <Button
           variant="ghost"
           size="icon"
-          :title="legacyT('编辑提供商')"
+          :title="t('ui.editProvider')"
           @click="$emit('edit', provider)"
         >
           <Edit class="w-4 h-4" />
@@ -101,8 +101,8 @@
         <Button
           variant="ghost"
           size="icon"
-          :title="legacyT(provider.is_active ? '点击停用' : '点击启用')"
-          :aria-label="legacyT(provider.is_active ? '点击停用' : '点击启用')"
+          :title="provider.is_active ? t('ui.clickToDisable') : t('ui.clickToEnable')"
+          :aria-label="provider.is_active ? t('ui.clickToDisable') : t('ui.clickToEnable')"
           data-testid="provider-toggle-active"
           @click="$emit('toggleStatus', provider)"
         >
@@ -111,7 +111,7 @@
         <Button
           variant="ghost"
           size="icon"
-          :title="legacyT('关闭')"
+          :title="t('ui.close')"
           @click="$emit('close')"
         >
           <X class="w-4 h-4" />
@@ -136,7 +136,7 @@
       <template v-if="loadingProviderEndpoints && endpoints.length === 0">
         <span class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
           <Loader2 class="w-3.5 h-3.5 animate-spin" />
-          {{ legacyT('加载端点中') }}
+          {{ t('ui.loadingEndpoints') }}
         </span>
       </template>
       <template v-else>
@@ -147,16 +147,16 @@
           <span
             class="text-xs px-2 py-0.5 rounded-md border border-border bg-background hover:bg-accent hover:border-accent-foreground/20 cursor-pointer transition-colors font-medium"
             :class="{ 'opacity-40': !endpoint.is_active }"
-            :title="legacyT('编辑端点')"
+            :title="t('ui.editEndpoint')"
             @click="$emit('editEndpoint', endpoint)"
           >{{ formatApiFormat(endpoint.api_format) }}</span>
         </template>
         <span
           v-if="endpoints.length > 0"
           class="text-xs px-2 py-0.5 rounded-md border border-dashed border-border hover:bg-accent hover:border-accent-foreground/20 cursor-pointer transition-colors text-muted-foreground"
-          :title="legacyT('编辑端点')"
+          :title="t('ui.editEndpoint')"
           @click="$emit('addEndpoint')"
-        >{{ legacyT('编辑') }}</span>
+        >{{ t('ui.edit0518365') }}</span>
         <Button
           v-else
           variant="outline"
@@ -165,7 +165,7 @@
           @click="$emit('addEndpoint')"
         >
           <Plus class="w-3 h-3 mr-1" />
-          {{ legacyT('添加 API 端点') }}
+          {{ t('ui.addApiEndpoint') }}
         </Button>
       </template>
     </div>
@@ -209,13 +209,14 @@ defineEmits<{
   (e: 'addEndpoint'): void
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
+
 const safeProviderWebsite = computed(() => safeExternalWebUrl(props.provider.website))
 
 const formatConversionTitle = computed(() => {
-  if (props.systemFormatConversionEnabled) return legacyT('系统级格式转换已启用')
-  if (props.provider.enable_format_conversion) return legacyT('已启用格式转换（点击关闭）')
-  return legacyT('启用格式转换')
+  if (props.systemFormatConversionEnabled) return t('ui.systemLevelFormatConversionIsEnabled')
+  if (props.provider.enable_format_conversion) return t('ui.formatConversionEnabledClickToDisable')
+  return t('ui.enableFormatConversion')
 })
 
 const formatConversionAvailable = computed(() => (
@@ -223,9 +224,9 @@ const formatConversionAvailable = computed(() => (
 ))
 
 const keepPriorityTitle = computed(() => {
-  if (!formatConversionAvailable.value) return legacyT('请先启用格式转换')
+  if (!formatConversionAvailable.value) return t('ui.enableFormatConversionFirst')
   return props.provider.keep_priority_on_conversion
-    ? legacyT('已启用格式转换保持优先级（点击关闭）')
-    : legacyT('启用格式转换保持优先级')
+    ? t('ui.priorityPreservationEnabledClickToDisable')
+    : t('ui.preservePriorityDuringFormatConversion')
 })
 </script>

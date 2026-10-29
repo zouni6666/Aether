@@ -2,10 +2,10 @@
   <div class="mb-4 flex items-start justify-between gap-3">
     <div class="min-w-0">
       <h4 class="text-balance break-words text-base font-semibold text-foreground">
-        {{ legacyT(editing ? '编辑分组' : '新建分组') }}
+        {{ editing ? t('ui.editGroup') : t('ui.createGroup') }}
       </h4>
       <p class="text-xs text-muted-foreground">
-        {{ legacyT(isDefault ? '当前为所有用户的默认组' : '通过额外分组配置访问限制') }}
+        {{ isDefault ? t('ui.currentlyTheDefaultGroupForAllUsers') : t('ui.configureAccessLimitsThroughAdditionalGroups') }}
       </p>
     </div>
     <div
@@ -18,7 +18,7 @@
         class="h-10 w-10"
         :class="isDefault ? 'text-emerald-500 hover:text-emerald-500' : ''"
         :disabled="saving || isDefault"
-        :title="legacyT(isDefault ? '默认注册组' : '设为默认注册组')"
+        :title="isDefault ? t('ui.defaultRegistrationGroup') : t('ui.setAsDefaultRegistrationGroup')"
         @click="$emit('setDefault')"
       >
         <BadgeCheck class="h-4 w-4" />
@@ -28,7 +28,7 @@
         size="icon"
         class="h-10 w-10"
         :disabled="saving || isDefault"
-        :title="legacyT('删除分组')"
+        :title="t('ui.deleteGroup')"
         @click="$emit('delete')"
       >
         <Trash2 class="h-4 w-4" />
@@ -53,5 +53,5 @@ defineEmits<{
   delete: []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

@@ -42,10 +42,12 @@ vi.mock('@/components/ui', async () => {
 vi.mock('@/components/common', async () => {
   const { defineComponent, h } = await import('vue')
   const empty = defineComponent({ setup: () => () => h('div') })
+  return { EmptyState: empty, LoadingState: empty }
+})
+vi.mock('@/features/wallet/components/StripePaymentDialog.vue', async () => {
+  const { defineComponent, h } = await import('vue')
   return {
-    EmptyState: empty,
-    LoadingState: empty,
-    StripePaymentDialog: defineComponent({
+    default: defineComponent({
       emits: ['success'],
       setup: (_, { emit }) => () => h('button', {
         'data-stripe-success': true,

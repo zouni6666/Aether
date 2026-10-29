@@ -4,22 +4,22 @@
       :variant="row.statusVariant"
       class="h-5 px-1.5 py-0 text-[10px] font-medium"
     >
-      {{ legacyT(row.statusLabel) }}
+      {{ row.statusLabel }}
     </Badge>
     <Badge
       v-if="row.hasWallet"
       :variant="row.walletStatusVariant"
       class="h-5 px-1.5 py-0 text-[10px] font-medium"
     >
-      {{ legacyT(row.walletStatusLabel) }}
+      {{ row.walletStatusLabel }}
     </Badge>
     <Badge
       v-if="mobile"
       variant="secondary"
       class="h-5 px-1.5 py-0 text-[10px] font-medium"
-      :title="legacyT(row.rateLimitSource)"
+      :title="row.rateLimitSource"
     >
-      {{ legacyT(row.rateLimitLabel) }}
+      {{ row.rateLimitLabel }}
     </Badge>
     <Badge
       v-for="group in mobile ? row.user.groups || [] : []"
@@ -34,7 +34,6 @@
 
 <script setup lang="ts">
 import Badge from '@/components/ui/badge.vue'
-import { useI18n } from '@/i18n'
 import type { UserManagementRow } from './user-management-types'
 
 withDefaults(defineProps<{
@@ -44,5 +43,4 @@ withDefaults(defineProps<{
   mobile: false,
 })
 
-const { legacyT } = useI18n()
 </script>

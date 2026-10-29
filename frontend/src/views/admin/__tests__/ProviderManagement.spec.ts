@@ -58,10 +58,14 @@ vi.mock('@/features/providers/composables/useProviderBalance', () => ({
   }),
 }))
 
-vi.mock('@/features/providers/components', async () => {
+vi.mock('@/features/providers/components/ProviderAuthDialog.vue', () => ({
+  default: { render: () => null },
+}))
+
+vi.mock('@/features/providers/components/ProviderFormDialog.vue', async () => {
   const { defineComponent, h } = await import('vue')
   return {
-    ProviderFormDialog: defineComponent({
+    default: defineComponent({
       props: {
         modelValue: Boolean,
         provider: { type: Object as PropType<ProviderWithEndpointsSummary | null>, default: null },
@@ -81,7 +85,6 @@ vi.mock('@/features/providers/components', async () => {
           }, '保存提供商编辑')
         : null,
     }),
-    ProviderAuthDialog: { render: () => null },
   }
 })
 

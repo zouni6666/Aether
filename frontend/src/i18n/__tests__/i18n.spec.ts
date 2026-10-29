@@ -3,8 +3,7 @@ import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 
 import { createI18n, getI18nLocale, normalizeLocale, setI18nLocale, useI18n, useLocaleOptions } from '@/i18n'
 import { formatDate, formatRelativeTime } from '@/utils/format'
-import { translateLegacyText } from '@/i18n/messages'
-import { transformLegacyTemplateI18n } from '@/i18n/legacy-template-transform'
+import { BUILTIN_TOOLS, BUILTIN_TOOL_BREADCRUMBS } from '@/config/builtin-tools'
 
 describe('i18n infrastructure', () => {
   beforeEach(() => {
@@ -19,7 +18,6 @@ describe('i18n infrastructure', () => {
 
     expect(['zh-CN', 'en-US']).toContain(document.documentElement.lang)
     expect(app.config.globalProperties.$t('site.home.login')).toBeTruthy()
-    expect(app.config.globalProperties.$legacyT('保存')).toBeTruthy()
     expect(localStorage.getItem('aether_locale')).toBe(document.documentElement.lang)
   })
 
@@ -59,67 +57,40 @@ describe('i18n infrastructure', () => {
     root.remove()
   })
 
-  it('exposes legacy text translation through the app-level helper', async () => {
+  it('renders keyed UI while preserving application content across language switches', async () => {
     const Probe = defineComponent({
       setup() {
-        const { legacyT, setLocale } = useI18n()
+        const { t, setLocale } = useI18n()
         const source = ref('保存')
-
-        return { legacyT, setLocale, source }
+        return { t, setLocale, source }
       },
       render() {
-        return h('button', { title: this.legacyT('关闭') }, this.legacyT(this.source))
+        return h('div', [
+          h('button', { title: this.t('common.cancel') }, this.t('common.copy')),
+          h('span', { title: this.source }, this.source),
+        ])
       },
     })
-
     const root = document.createElement('div')
     document.body.appendChild(root)
     const app = createApp(Probe)
     app.use(createI18n())
-    const vm = app.mount(root) as InstanceType<typeof Probe> & {
-      setLocale: (locale: 'zh-CN' | 'en-US') => void
-      source: string
-    }
-
+    const vm = app.mount(root) as InstanceType<typeof Probe>
     vm.setLocale('en-US')
     await nextTick()
-
-    expect(root.querySelector('button')?.textContent).toBe('Save')
-    expect(root.querySelector('button')?.getAttribute('title')).toBe('Close')
-
-    vm.source = '保存中...'
+    expect(root.querySelector('button')?.textContent).toBe('Copy')
+    expect(root.querySelector('button')?.title).toBe('Cancel')
+    expect(root.querySelector('span')?.textContent).toBe('保存')
+    expect(root.querySelector('span')?.title).toBe('保存')
+    vm.source = '删除'
     await nextTick()
-
-    expect(root.querySelector('button')?.textContent).toBe('Saving...')
-
+    expect(root.querySelector('span')?.textContent).toBe('删除')
+    vm.setLocale('zh-CN')
+    await nextTick()
+    expect(root.querySelector('button')?.textContent).toBe('复制')
+    expect(root.querySelector('span')?.textContent).toBe('删除')
     app.unmount()
     root.remove()
-  })
-
-  it('rewrites template text and static attributes without touching code blocks', () => {
-    const result = transformLegacyTemplateI18n(`
-      <button title="关闭">取消</button>
-      <input placeholder="全部状态">
-      <code>复制 配置</code>
-    `)
-
-    expect(result.changed).toBe(true)
-    expect(result.needsHelper).toBe(true)
-    expect(result.code).toContain(`:title='__aetherLegacyT("关闭")'`)
-    expect(result.code).toContain(`{{ __aetherLegacyT("取消") }}`)
-    expect(result.code).toContain(`:placeholder='__aetherLegacyT("全部状态")'`)
-    expect(result.code).toContain('<code>复制 配置</code>')
-  })
-
-  it('translates common legacy phrases without adding new message entry points', () => {
-    expect(translateLegacyText('请求记录清理策略', 'en-US')).toBe('Request log cleanup policy')
-    expect(translateLegacyText('精简 Base64 图片', 'en-US')).toBe('Compact Base64 images')
-    expect(translateLegacyText('Body 大小上限（KB）', 'en-US')).toBe('Body size limit (KB)')
-    expect(translateLegacyText('最大转移次数', 'en-US')).toBe('Max transfers')
-    expect(translateLegacyText('最大转移超时', 'en-US')).toBe('Max transfer timeout')
-    expect(translateLegacyText('0 (不限制)', 'en-US')).toBe('0 (unlimited)')
-    expect(translateLegacyText('  发布于 2026-01-01  ', 'en-US')).toBe('  Published at 2026-01-01  ')
-    expect(translateLegacyText('git clone https://github.com/fawney19/Aether.git', 'en-US')).toBe('git clone https://github.com/fawney19/Aether.git')
   })
 
   it('normalizes saved language aliases without accepting unrelated language names', () => {
@@ -128,6 +99,20 @@ describe('i18n infrastructure', () => {
     expect(normalizeLocale(' ZH-cn ')).toBe('zh-CN')
     expect(normalizeLocale('english')).toBeUndefined()
     expect(normalizeLocale('fr-FR')).toBeUndefined()
+  })
+
+  it('updates built-in tool names and breadcrumbs after their module has loaded', () => {
+    const previousLocale = getI18nLocale()
+    try {
+      setI18nLocale('en-US')
+      expect(BUILTIN_TOOLS.find(tool => tool.href === '/admin/ip-security')?.name).toBe('IP security')
+      expect(BUILTIN_TOOL_BREADCRUMBS['/admin/audit-logs']).toBe('Audit logs')
+      setI18nLocale('zh-CN')
+      expect(BUILTIN_TOOLS.find(tool => tool.href === '/admin/ip-security')?.name).toBe('IP 安全')
+      expect(BUILTIN_TOOL_BREADCRUMBS['/admin/audit-logs']).toBe('审计日志')
+    } finally {
+      setI18nLocale(previousLocale)
+    }
   })
 
   it('continues switching language when browser storage is unavailable', () => {

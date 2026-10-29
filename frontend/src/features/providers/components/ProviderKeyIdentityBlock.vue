@@ -4,11 +4,11 @@
       <span
         class="text-sm font-medium truncate"
         :class="apiKey.name ? 'cursor-pointer hover:text-primary transition-colors' : ''"
-        :title="apiKey.name ? legacyT('点击复制') : ''"
+        :title="apiKey.name ? t('ui.clickToCopy') : ''"
         data-testid="provider-key-name"
         @click.stop="apiKey.name && $emit('copyName', apiKey.name)"
       >
-        {{ apiKey.name || legacyT('未命名密钥') }}
+        {{ apiKey.name || t('ui.unnamedKey') }}
       </span>
 
       <Badge
@@ -52,7 +52,7 @@
         variant="ghost"
         size="icon"
         class="h-4 w-4 shrink-0"
-        :title="legacyT('下载 OAuth 授权文件')"
+        :title="t('ui.downloadOauthAuthorizationFile')"
         @click.stop="$emit('downloadCredential')"
       >
         <Download class="w-2.5 h-2.5" />
@@ -62,7 +62,7 @@
         variant="ghost"
         size="icon"
         class="h-4 w-4 shrink-0"
-        :title="legacyT('复制密钥')"
+        :title="t('ui.copyKey')"
         @click.stop="$emit('copyFullKey')"
       >
         <Copy class="w-2.5 h-2.5" />
@@ -77,14 +77,14 @@
             data-testid="provider-key-account-block"
           >
             <ShieldX class="w-2.5 h-2.5" />
-            {{ legacyT('账号异常') }}
+            {{ t('ui.accountIssue') }}
           </Badge>
           <Button
             variant="ghost"
             size="icon"
             class="h-4 w-4 shrink-0 text-destructive hover:text-destructive"
             :disabled="clearingOAuthInvalid"
-            :title="legacyT('清除异常标记（确认账号已完成验证后使用）')"
+            :title="t('ui.clearIssueMarkerAfterConfirmingTheAccountHasCompletedVerification')"
             @click.stop="$emit('clearOAuthInvalid')"
           >
             <RefreshCw
@@ -107,10 +107,10 @@
             v-if="apiKey.oauth_temporary"
             variant="outline"
             class="text-[10px] px-1.5 py-0 shrink-0"
-            :title="legacyT('仅通过 Access Token 导入，无法自动刷新，到期后需要重新导入')"
+            :title="t('ui.importedWithAccessTokenOnlyItCannotRefreshAutomaticallyAnd')"
             data-testid="provider-key-temporary"
           >
-            {{ legacyT('临时') }}
+            {{ t('ui.temporary') }}
           </Badge>
           <Button
             variant="ghost"
@@ -131,10 +131,10 @@
       <span
         v-if="antigravityInactive"
         class="text-[10px] text-orange-500 dark:text-orange-400"
-        :title="legacyT('该账号尚未完成 Gemini Code Assist 激活，无法获取配额和使用模型')"
+        :title="t('ui.thisAccountHasNotCompletedGeminiCodeAssistActivationSo')"
         data-testid="provider-key-antigravity-inactive"
       >
-        {{ legacyT('账号未激活') }}
+        {{ t('ui.accountNotActivated') }}
       </span>
     </div>
   </div>
@@ -198,7 +198,7 @@ defineEmits<{
   (e: 'refreshOAuth'): void
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const oauthStatusClass = computed(() => {
   const status = props.oauthStatus

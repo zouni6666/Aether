@@ -1,10 +1,11 @@
+import { translate } from '@/i18n'
 import type { CheckUpdateResponse } from '@/api/admin'
 
 export function describeUpdateStatus(status: CheckUpdateResponse | null): string {
-  if (!status) return '检查中'
-  if (status.has_update) return '有新版本'
-  if (status.error) return '检查失败'
-  return '已是最新'
+  if (!status) return translate('ui.checking')
+  if (status.has_update) return translate('ui.newVersionAvailable')
+  if (status.error) return translate('ui.checkFailed')
+  return translate('ui.upToDate')
 }
 
 export function buildUpdateErrorStatus(

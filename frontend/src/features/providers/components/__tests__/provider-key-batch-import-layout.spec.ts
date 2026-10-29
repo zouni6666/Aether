@@ -19,7 +19,7 @@ describe('provider key batch import UI contract', () => {
     const source = readSource('src/features/providers/components/ProviderKeyBatchImportDialog.vue')
 
     expect(source).toContain('parseProviderKeyBatchImport')
-    expect(source).toContain("{ id: 3, label: '逐项确认' }")
+    expect(source).toContain("{ id: 3, get label() { return t('ui.reviewEachEntry') } }")
     expect(source).toContain('ProviderKeyImportSettingsFields')
     expect(source).toContain('REVIEW_PAGE_SIZE')
     expect(source).toContain('item.customized')
@@ -38,7 +38,7 @@ describe('provider key batch import UI contract', () => {
     expect(source).toContain("selectedAction === 'update_settings'")
     expect(source).toContain('buildPoolKeySettingsPatch')
     expect(source).toContain('confirmAndExecuteAction(selectedAction)')
-    expect(source).toContain('仅更新已勾选字段')
+    expect(source).toContain('ui.updateOnlyCheckedFieldsOtherSettingsRemainUnchanged')
     expect(source).not.toContain('v-for="item in ACTION_OPTIONS"')
   })
 })

@@ -11,7 +11,7 @@
             {{ group.name }}
           </p>
           <p class="truncate text-xs text-muted-foreground">
-            {{ group.description || '未填写描述' }}
+            {{ group.description || t('ui.noDescription') }}
           </p>
         </div>
       </div>
@@ -20,6 +20,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 export interface RoutingGroupListItem {
   id: string
   name: string
@@ -30,4 +32,7 @@ export interface RoutingGroupListItem {
 defineProps<{
   groups: RoutingGroupListItem[]
 }>()
+
+const { t } = useI18n()
+
 </script>

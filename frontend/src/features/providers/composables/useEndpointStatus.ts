@@ -1,6 +1,6 @@
 import type { EndpointHealthDetail } from '@/api/endpoints'
 import { compareApiFormats, formatApiFormat } from '@/api/endpoints/types/api-format'
-import { defaultLocale, translateLegacyText, type Locale } from '@/i18n/messages'
+import { defaultLocale, translateMessage, type Locale } from '@/i18n/messages'
 
 // 端点状态枚举
 export type EndpointStatus = 'disabled' | 'no_keys' | 'keys_disabled' | 'available'
@@ -75,21 +75,20 @@ export function getEndpointDotColor(endpoint: EndpointHealthDetail): string {
 export function getEndpointTooltip(endpoint: EndpointHealthDetail, locale: Locale = defaultLocale): string {
   const format = formatApiFormat(endpoint.api_format)
   const status = getEndpointStatus(endpoint)
-  const t = (value: string) => translateLegacyText(value, locale)
 
   switch (status) {
     case 'disabled':
-      return `${format}: ${t('端点禁用')}`
+      return `${format}: ${translateMessage('feedback.endpoint.disabled', locale)}`
     case 'no_keys':
-      return `${format}: ${t('未配置密钥')}`
+      return `${format}: ${translateMessage('feedback.endpoint.noKeys', locale)}`
     case 'keys_disabled':
-      return `${format}: ${t('无可用密钥')}`
+      return `${format}: ${translateMessage('feedback.endpoint.keysDisabled', locale)}`
     case 'available': {
       const score = getEndpointHealthScore(endpoint)
       if (score === null) {
-        return `${format}: ${t('暂无健康数据')}`
+        return `${format}: ${translateMessage('feedback.endpoint.unknownHealth', locale)}`
       }
-      return `${format}: ${t('健康度')} ${(score * 100).toFixed(0)}%`
+      return `${format}: ${translateMessage('feedback.endpoint.health', locale, { value: (score * 100).toFixed(0) })}`
     }
   }
 }

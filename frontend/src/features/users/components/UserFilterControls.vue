@@ -20,7 +20,7 @@
         @update:model-value="updateRole"
       >
         <SelectTrigger :class="mobile ? 'w-24 h-8 text-xs border-border/60' : 'w-32 h-8 text-xs border-border/60'">
-          <SelectValue :placeholder="legacyT(mobile ? '角色' : '全部角色')" />
+          <SelectValue :placeholder="mobile ? t('ui.role') : t('ui.allRoles')" />
         </SelectTrigger>
         <SelectContent>
           <SelectItem
@@ -28,7 +28,7 @@
             :key="option.value"
             :value="option.value"
           >
-            {{ legacyT(option.label) }}
+            {{ option.label }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -40,7 +40,7 @@
         @update:model-value="updateStatus"
       >
         <SelectTrigger :class="mobile ? 'w-20 h-8 text-xs border-border/60' : 'w-28 h-8 text-xs border-border/60'">
-          <SelectValue :placeholder="legacyT(mobile ? '状态' : '全部状态')" />
+          <SelectValue :placeholder="mobile ? t('ui.status6320b4a') : t('ui.allStatuses')" />
         </SelectTrigger>
         <SelectContent>
           <SelectItem
@@ -48,7 +48,7 @@
             :key="option.value"
             :value="option.value"
           >
-            {{ legacyT(option.label) }}
+            {{ option.label }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -59,11 +59,11 @@
       @update:model-value="$emit('update:filterGroup', $event)"
     >
       <SelectTrigger :class="mobile ? 'w-24 h-8 text-xs border-border/60' : 'w-32 h-8 text-xs border-border/60'">
-        <SelectValue :placeholder="legacyT(mobile ? '分组' : '全部分组')" />
+        <SelectValue :placeholder="mobile ? t('ui.group') : t('ui.allGroups')" />
       </SelectTrigger>
       <SelectContent>
         <SelectItem value="all">
-          {{ legacyT(mobile ? '全部' : '全部分组') }}
+          {{ mobile ? t('ui.all5c55a67') : t('ui.allGroups') }}
         </SelectItem>
         <SelectItem
           v-for="group in userGroups"
@@ -81,7 +81,7 @@
         @update:model-value="updateSort"
       >
         <SelectTrigger :class="mobile ? 'w-32 h-8 text-xs border-border/60' : 'w-40 h-8 text-xs border-border/60'">
-          <SelectValue :placeholder="legacyT('排序')" />
+          <SelectValue :placeholder="t('common.sort')" />
         </SelectTrigger>
         <SelectContent>
           <SelectItem
@@ -89,7 +89,7 @@
             :key="option.value"
             :value="option.value"
           >
-            {{ legacyT(option.label) }}
+            {{ option.label }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -156,6 +156,6 @@ function updateSort(value: string) {
   if (option) emit('update:sortOption', option.value)
 }
 
-const { legacyT } = useI18n()
-const searchPlaceholder = computed(() => props.mobile ? legacyT('搜索...') : legacyT('搜索用户名或邮箱...'))
+const { t } = useI18n()
+const searchPlaceholder = computed(() => props.mobile ? t('ui.searchc304ad3') : t('ui.searchUsernameOrEmail'))
 </script>

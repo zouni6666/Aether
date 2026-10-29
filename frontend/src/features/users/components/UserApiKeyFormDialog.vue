@@ -12,10 +12,10 @@
           </div>
           <div class="min-w-0 flex-1">
             <h3 class="text-lg font-semibold leading-tight text-foreground">
-              {{ isEditing ? legacyT('编辑 API Key') : legacyT('创建 API Key') }}
+              {{ isEditing ? t('ui.editApiKeyc8e0b86') : t('ui.createApiKey3c07765') }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ isEditing ? legacyT('更新用户 API Key 的名称、速率限制和并发限制') : legacyT('为用户创建新的 API Key') }}
+              {{ isEditing ? t('ui.updateTheUserApiKeyNameRateLimitAndConcurrency') : t('ui.createANewApiKeyForTheUser') }}
             </p>
           </div>
         </div>
@@ -28,13 +28,13 @@
           for="admin-user-key-name"
           class="text-sm font-medium"
         >
-          {{ legacyT('密钥名称') }}
+          {{ t('ui.keyName') }}
         </Label>
         <Input
           id="admin-user-key-name"
           :model-value="form.name"
           class="h-10"
-          :placeholder="legacyT('例如：生产环境 Key')"
+          :placeholder="t('ui.exampleProductionKey')"
           @update:model-value="updateField('name', String($event))"
         />
       </div>
@@ -44,7 +44,7 @@
           for="admin-user-key-rate-limit"
           class="text-sm font-medium"
         >
-          {{ legacyT('速率限制 (请求/分钟)') }}
+          {{ t('ui.rateLimitRequestsMin') }}
         </Label>
         <Input
           id="admin-user-key-rate-limit"
@@ -53,11 +53,11 @@
           min="0"
           max="10000"
           class="h-10"
-          :placeholder="legacyT('留空不限')"
+          :placeholder="t('ui.leaveEmptyForUnlimited')"
           @update:model-value="updateField('rate_limit', parseNumberInput($event, { min: 0, max: 10000 }))"
         />
         <p class="text-xs text-muted-foreground">
-          {{ legacyT('留空表示不限制') }}
+          {{ t('ui.leaveEmptyForNoLimit7b2466a') }}
         </p>
       </div>
 
@@ -66,7 +66,7 @@
           for="admin-user-key-concurrent-limit"
           class="text-sm font-medium"
         >
-          {{ legacyT('并发限制') }}
+          {{ t('ui.concurrencyLimit') }}
         </Label>
         <Input
           id="admin-user-key-concurrent-limit"
@@ -79,7 +79,7 @@
           @update:model-value="updateField('concurrent_limit', parseNumberInput($event, { min: 0, max: 10000 }))"
         />
         <p class="text-xs text-muted-foreground">
-          {{ legacyT(isEditing ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发') }}
+          {{ isEditing ? t('ui.leaveEmptyToKeepTheCurrentValueEnter0For') : t('ui.leaveEmptyForUnlimitedConcurrency0IsAlsoUnlimited') }}
         </p>
       </div>
 
@@ -88,7 +88,7 @@
           for="admin-user-key-ip-rules"
           class="text-sm font-medium"
         >
-          {{ legacyT('IP 限制') }}
+          {{ t('ui.ipRestrictions477036d') }}
         </Label>
         <Input
           id="admin-user-key-ip-rules"
@@ -98,7 +98,7 @@
           @update:model-value="updateField('ip_rules_text', String($event))"
         />
         <p class="text-xs text-muted-foreground">
-          {{ legacyT('留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝，多个规则用英文逗号分隔') }}
+          {{ t('ui.leaveEmptyForNoRestrictionSupportsIpCidrIpv4Wildcardsc2888de') }}
         </p>
       </div>
 
@@ -106,10 +106,10 @@
         <div class="flex items-center justify-between gap-3">
           <div>
             <Label class="text-sm font-medium">
-              {{ legacyT('敏感信息保护') }}
+              {{ t('ui.sensitiveInformationProtection') }}
             </Label>
             <p class="mt-1 text-xs text-muted-foreground">
-              {{ legacyT(form.chat_pii_redaction_mode === 'inherit' ? '跟随目标用户设置' : '仅覆盖此 API Key') }}
+              {{ form.chat_pii_redaction_mode === 'inherit' ? t('ui.useTheSelectedUserSettings') : t('ui.overrideOnlyThisApiKey') }}
             </p>
           </div>
           <div class="flex items-center gap-2">
@@ -118,14 +118,14 @@
               :variant="form.chat_pii_redaction_mode === 'inherit' ? 'default' : 'outline'"
               @click="updateField('chat_pii_redaction_mode', 'inherit')"
             >
-              {{ legacyT('跟随用户') }}
+              {{ t('ui.useUserSettings') }}
             </Button>
             <Button
               size="sm"
               :variant="form.chat_pii_redaction_mode === 'custom' ? 'default' : 'outline'"
               @click="updateField('chat_pii_redaction_mode', 'custom')"
             >
-              {{ legacyT('单独配置') }}
+              {{ t('ui.separateConfiguration') }}
             </Button>
           </div>
         </div>
@@ -134,7 +134,7 @@
           class="flex items-center justify-between gap-3 border-t border-border/50 pt-3"
         >
           <Label class="text-sm font-medium">
-            {{ legacyT('启用保护') }}
+            {{ t('ui.enableProtection') }}
           </Label>
           <Switch
             :model-value="form.chat_pii_redaction_enabled"
@@ -146,7 +146,7 @@
           class="flex items-center justify-between gap-3 border-t border-border/50 pt-3"
         >
           <Label class="text-sm font-medium">
-            {{ legacyT('占位符说明') }}
+            {{ t('ui.placeholderNotes') }}
           </Label>
           <Switch
             :model-value="form.chat_pii_redaction_placeholder_notice"
@@ -163,7 +163,7 @@
         class="h-10 px-5"
         @click="$emit('close')"
       >
-        {{ legacyT('取消') }}
+        {{ t('common.cancel') }}
       </Button>
       <Button
         class="h-10 px-5"
@@ -206,13 +206,13 @@ const emit = defineEmits<{
   'update:form': [value: UserApiKeyFormState]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const submitLabel = computed(() => {
   if (props.creating) {
-    return legacyT(props.isEditing ? '保存中...' : '创建中...')
+    return props.isEditing ? t('ui.saving') : t('ui.creating')
   }
-  return legacyT(props.isEditing ? '保存' : '创建')
+  return props.isEditing ? t('ui.save') : t('ui.create')
 })
 
 function updateField<TKey extends keyof UserApiKeyFormState>(key: TKey, value: UserApiKeyFormState[TKey]): void {

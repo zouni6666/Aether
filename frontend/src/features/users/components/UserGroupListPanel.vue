@@ -1,12 +1,12 @@
 <template>
   <div class="rounded-lg border border-border/70 bg-muted/20 p-2.5 sm:rounded-xl sm:p-3">
     <div class="mb-2 flex items-center justify-between gap-2 sm:mb-3">
-      <Label class="text-sm font-semibold">{{ legacyT('分组') }}</Label>
+      <Label class="text-sm font-semibold">{{ t('ui.group') }}</Label>
       <Button
         variant="ghost"
         size="icon"
         class="h-10 w-10"
-        :title="legacyT('新建分组')"
+        :title="t('ui.createGroup')"
         @click="$emit('create')"
       >
         <Plus class="h-4 w-4" />
@@ -17,13 +17,13 @@
       v-if="loading"
       class="rounded-lg border border-dashed border-border/70 px-3 py-8 text-center text-xs text-muted-foreground"
     >
-      {{ legacyT('正在加载...') }}
+      {{ t('site.privacy.loading') }}
     </div>
     <div
       v-else-if="groups.length === 0"
       class="rounded-lg border border-dashed border-border/70 px-3 py-8 text-center text-xs text-muted-foreground"
     >
-      {{ legacyT('暂无分组') }}
+      {{ t('ui.noGroups') }}
     </div>
     <div
       v-else
@@ -44,7 +44,7 @@
               variant="secondary"
               class="h-5 px-1.5 py-0 text-[10px]"
             >
-              {{ legacyT('默认') }}
+              {{ t('ui.default844b8cc') }}
             </Badge>
           </span>
         </span>
@@ -72,7 +72,7 @@ defineEmits<{
   select: [groupId: string]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 function groupButtonClass(groupId: string): string {
   return cn(

@@ -6,7 +6,7 @@
   >
     <div class="flex min-w-0 items-baseline justify-between gap-3 sm:block">
       <dt class="text-muted-foreground">
-        上游请求层级
+        {{ t('ui.upstreamRequestTier') }}
       </dt>
       <dd
         class="truncate font-mono font-medium text-foreground sm:mt-0.5"
@@ -17,7 +17,7 @@
     </div>
     <div class="flex min-w-0 items-baseline justify-between gap-3 sm:block">
       <dt class="text-muted-foreground">
-        计费层级
+        {{ t('ui.billingTier') }}
       </dt>
       <dd
         class="truncate font-mono font-medium text-foreground sm:mt-0.5"
@@ -32,7 +32,7 @@
       data-testid="service-tier-price-multiplier"
     >
       <dt class="text-muted-foreground">
-        {{ multiplierTierLabel }} 倍率
+        {{ multiplierTierLabel }} {{ t('ui.multiplier') }}
       </dt>
       <dd class="truncate font-mono font-medium text-foreground sm:mt-0.5">
         {{ formattedPriceMultiplier }}×
@@ -42,6 +42,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed } from 'vue'
 import { formatServiceTierFact } from '../utils/service-tier'
 
@@ -49,6 +51,8 @@ const props = defineProps<{
   requested: string | null
   priceMultiplier?: number | null
 }>()
+
+const { t } = useI18n()
 
 const hasPriceMultiplier = computed(() => (
   typeof props.priceMultiplier === 'number'
@@ -63,4 +67,5 @@ const multiplierTierLabel = computed(() => (
 const formattedPriceMultiplier = computed(() => (
   hasPriceMultiplier.value ? String(props.priceMultiplier) : ''
 ))
+
 </script>

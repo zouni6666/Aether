@@ -7,7 +7,7 @@
       :title="circuitBreakerTitle"
       data-testid="provider-key-circuit-badge"
     >
-      {{ legacyT('熔断') }}{{ circuitProbeCountdown }}
+      {{ t('ui.circuitOpen') }}{{ circuitProbeCountdown }}
     </Badge>
 
     <div
@@ -45,7 +45,7 @@
       variant="ghost"
       size="icon"
       class="h-7 w-7"
-      :title="legacyT('模型权限')"
+      :title="t('guide.nav.concepts.modelPermission')"
       @click="$emit('permissions')"
     >
       <Shield class="w-3.5 h-3.5" />
@@ -62,7 +62,7 @@
           class="h-7 w-7"
           :class="apiKey.proxy?.node_id ? 'text-blue-500' : ''"
           :disabled="savingProxy"
-          :title="apiKey.proxy?.node_id ? `${legacyT('代理')}: ${proxyNodeName}` : legacyT('设置代理节点')"
+          :title="apiKey.proxy?.node_id ? `${t('ui.proxy')}: ${proxyNodeName}` : t('ui.setProxyNode')"
           @click.stop
         >
           <Globe class="w-3.5 h-3.5" />
@@ -75,7 +75,7 @@
       >
         <div class="space-y-2">
           <div class="flex items-center justify-between">
-            <span class="text-xs font-medium">{{ legacyT('代理节点') }}</span>
+            <span class="text-xs font-medium">{{ t('ui.proxyNodes23f1b6a') }}</span>
             <Button
               v-if="apiKey.proxy?.node_id"
               variant="ghost"
@@ -84,7 +84,7 @@
               :disabled="savingProxy"
               @click="$emit('clearProxy')"
             >
-              {{ legacyT('清除') }}
+              {{ t('ui.clear') }}
             </Button>
           </div>
           <ProxyNodeSelect
@@ -93,7 +93,7 @@
             @update:model-value="$emit('setProxy', $event)"
           />
           <p class="text-[10px] text-muted-foreground">
-            {{ legacyT(apiKey.proxy?.node_id ? '当前使用独立代理' : '未设置，使用提供商级别代理') }}
+            {{ apiKey.proxy?.node_id ? t('ui.currentlyUsingAnIndividualProxy') : t('ui.notSetUsesProviderLevelProxy') }}
           </p>
         </div>
       </PopoverContent>
@@ -103,7 +103,7 @@
       variant="ghost"
       size="icon"
       class="h-7 w-7"
-      :title="legacyT('编辑密钥')"
+      :title="t('ui.editKey')"
       @click="$emit('edit')"
     >
       <Edit class="w-3.5 h-3.5" />
@@ -114,7 +114,7 @@
       variant="ghost"
       size="icon"
       class="h-7 w-7"
-      :title="legacyT('配额详情')"
+      :title="t('ui.quotaDetails')"
       @click="$emit('openAntigravityQuota')"
     >
       <BarChart3 class="w-3.5 h-3.5" />
@@ -125,8 +125,8 @@
       size="icon"
       class="h-7 w-7"
       :disabled="toggling"
-      :title="legacyT(apiKey.is_active ? '点击停用' : '点击启用')"
-      :aria-label="legacyT(apiKey.is_active ? '点击停用' : '点击启用')"
+      :title="apiKey.is_active ? t('ui.clickToDisable') : t('ui.clickToEnable')"
+      :aria-label="apiKey.is_active ? t('ui.clickToDisable') : t('ui.clickToEnable')"
       data-testid="provider-key-toggle-active"
       @click="$emit('toggleActive')"
     >
@@ -137,7 +137,7 @@
       variant="ghost"
       size="icon"
       class="h-7 w-7"
-      :title="legacyT('删除密钥')"
+      :title="t('ui.deleteKey')"
       @click="$emit('delete')"
     >
       <Trash2 class="w-3.5 h-3.5" />
@@ -202,7 +202,7 @@ defineEmits<{
   (e: 'delete'): void
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const healthScorePercent = computed(() => {
   const score = Number(props.apiKey.health_score ?? 0)

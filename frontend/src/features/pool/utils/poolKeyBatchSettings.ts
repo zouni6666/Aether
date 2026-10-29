@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import type { PoolKeySettingsPatch } from '@/api/endpoints/pool'
 
 export type PoolKeyBatchSettingField =
@@ -56,34 +57,34 @@ export function validatePoolKeyBatchSettings(
   draft: PoolKeyBatchSettingsDraft,
 ): string[] {
   const errors: string[] = []
-  if (!Object.values(selection).some(Boolean)) errors.push('请至少选择一个要修改的设置')
+  if (!Object.values(selection).some(Boolean)) errors.push(translate('ui.selectAtLeastOneSettingToChange'))
   if (selection.internal_priority && (!Number.isInteger(draft.internal_priority) || draft.internal_priority < 0)) {
-    errors.push('优先级必须是大于等于 0 的整数')
+    errors.push(translate('ui.priorityMustBeANonNegativeInteger'))
   }
   if (selection.rpm_limit && draft.rpm_limit !== null && (
     !Number.isInteger(draft.rpm_limit) || draft.rpm_limit < 1 || draft.rpm_limit > 10_000
   )) {
-    errors.push('RPM 必须在 1 到 10000 之间，留空表示自适应')
+    errors.push(translate('ui.rpmMustBeBetween1And10000LeaveEmptyFor'))
   }
   if (selection.concurrent_limit && draft.concurrent_limit !== null && (
     !Number.isInteger(draft.concurrent_limit) || draft.concurrent_limit < 0
   )) {
-    errors.push('并发上限必须是大于等于 0 的整数')
+    errors.push(translate('ui.concurrencyLimitMustBeANonNegativeInteger'))
   }
   if (selection.cache_ttl_minutes && (
     !Number.isInteger(draft.cache_ttl_minutes) || draft.cache_ttl_minutes < 0 || draft.cache_ttl_minutes > 60
   )) {
-    errors.push('缓存 TTL 必须在 0 到 60 分钟之间')
+    errors.push(translate('ui.cacheTtlMustBeBetween0And60Minutes'))
   }
   if (selection.max_probe_interval_minutes && (
     !Number.isInteger(draft.max_probe_interval_minutes)
     || draft.max_probe_interval_minutes < 0
     || draft.max_probe_interval_minutes > 32
   )) {
-    errors.push('熔断探测必须在 0 到 32 分钟之间')
+    errors.push(translate('ui.circuitBreakerProbeIntervalMustBeBetween0And32'))
   }
   if (selection.proxy_node_id && draft.proxy_mode === 'set' && !draft.proxy_node_id.trim()) {
-    errors.push('请选择要设置的代理节点')
+    errors.push(translate('ui.selectAProxyNodeToAssign57701f8'))
   }
   return errors
 }

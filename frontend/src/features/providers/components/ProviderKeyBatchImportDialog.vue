@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="open"
-    title="批量导入 Key"
-    :description="providerName ? `${providerName} · 名称和 Key 均为必填` : '名称和 Key 均为必填'"
+    :title="t('ui.importKeysInBulk')"
+    :description="providerName ? t('ui.valueNameAndKeyAreBothRequired', { name: providerName }) : t('ui.bothNameAndKeyAreRequired')"
     :icon="ListPlus"
     size="4xl"
     persistent
@@ -11,7 +11,7 @@
     <div class="space-y-3.5">
       <nav
         class="grid grid-cols-3 gap-1.5 rounded-xl bg-muted/40 p-1.5"
-        aria-label="批量导入步骤"
+        :aria-label="t('ui.bulkImportSteps')"
       >
         <button
           v-for="step in steps"
@@ -41,10 +41,10 @@
             <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-semibold text-background">1</span>
             <div class="min-w-0">
               <h3 class="text-balance text-sm font-semibold text-foreground">
-                粘贴名称与 Key
+                {{ t('ui.pasteNamesAndKeys') }}
               </h3>
               <p class="text-pretty text-[11px] leading-4 text-muted-foreground">
-                每行一条，仅接受四个短横线分隔
+                {{ t('ui.oneEntryPerLineSeparatedByExactlyFourHyphens') }}
               </p>
             </div>
           </div>
@@ -60,13 +60,13 @@
           <Label
             for="provider-key-batch-input"
             class="sr-only"
-          >Key 列表</Label>
+          >{{ t('ui.keyList') }}</Label>
           <Textarea
             id="provider-key-batch-input"
             v-model="inputText"
             class="h-[280px] min-h-[220px] max-h-[520px] !resize-y !rounded-none !border-0 !bg-transparent !px-4 !py-4 font-mono text-[13px] leading-6 !shadow-none !ring-0 focus-visible:!ring-0"
             spellcheck="false"
-            placeholder="主账号----sk-xxxx&#10;备用账号----sk-yyyy"
+            :placeholder="t('providers.migration.2b292cd1')"
           />
           <div
             v-if="parsed.errors.length > 0"
@@ -76,19 +76,19 @@
               v-for="(item, index) in parsed.errors.slice(0, 6)"
               :key="`${item.lineNumber}-${index}`"
             >
-              {{ item.lineNumber ? `第 ${item.lineNumber} 行：` : '' }}{{ item.message }}
+              {{ item.lineNumber ? t('ui.lineValue', { value: item.lineNumber }) : '' }}{{ item.message }}
             </div>
             <div
               v-if="parsed.errors.length > 6"
               class="font-medium"
             >
-              另有 {{ parsed.errors.length - 6 }} 个问题
+              {{ t('ui.another') }} {{ parsed.errors.length - 6 }} {{ t('ui.issues') }}
             </div>
           </div>
           <div class="flex flex-wrap items-center gap-2 border-t border-border/50 bg-muted/10 px-4 py-2.5 text-[11px] text-muted-foreground">
-            <span class="rounded-md bg-muted px-2 py-1 font-mono text-foreground/80">名称----Key</span>
-            <span>名称和 Key 都不能为空</span>
-            <span class="ml-auto hidden tabular-nums sm:inline">已识别 {{ parsed.items.length }} 条</span>
+            <span class="rounded-md bg-muted px-2 py-1 font-mono text-foreground/80">{{ t('ui.nameKey') }}</span>
+            <span>{{ t('ui.nameAndKeyCannotBeEmpty') }}</span>
+            <span class="ml-auto hidden tabular-nums sm:inline">{{ t('ui.recognized') }} {{ parsed.items.length }} {{ t('ui.itemsf004f1d') }}</span>
           </div>
         </div>
       </section>
@@ -102,7 +102,7 @@
             2
           </span>
           <span class="min-w-0 flex-1">
-            <span class="block text-sm font-semibold">统一配置</span>
+            <span class="block text-sm font-semibold">{{ t('ui.sharedConfiguration') }}</span>
             <span class="mt-1 flex flex-wrap gap-1.5">
               <span
                 v-for="item in settingsSummaryItems"
@@ -115,7 +115,7 @@
             :variant="selectedApiFormats.length > 0 ? 'success' : 'destructive'"
             class="ml-auto shrink-0 tabular-nums"
           >
-            {{ selectedApiFormats.length }} 种格式
+            {{ selectedApiFormats.length }} {{ t('ui.formats') }}
           </Badge>
         </header>
 
@@ -140,16 +140,16 @@
           <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-foreground text-xs font-semibold text-background">3</span>
           <div class="min-w-0 flex-1">
             <h3 class="text-balance text-sm font-semibold">
-              逐项确认
+              {{ t('ui.reviewEachEntry') }}
             </h3>
             <p class="text-pretty text-[11px] leading-4 text-muted-foreground">
-              展开任意 Key 可修改内容或设置单独配置
+              {{ t('ui.expandAKeyToEditItOrOverrideSharedSettings') }}
             </p>
           </div>
           <div class="shrink-0 text-right text-[11px] text-muted-foreground">
-            <div><span class="font-semibold tabular-nums text-foreground">{{ reviewItems.length }}</span> 个 Key</div>
+            <div><span class="font-semibold tabular-nums text-foreground">{{ reviewItems.length }}</span> {{ t('ui.keysa80b9b9') }}</div>
             <div v-if="customizedItemCount > 0">
-              <span class="tabular-nums">{{ customizedItemCount }}</span> 个单独配置
+              <span class="tabular-nums">{{ customizedItemCount }}</span> {{ t('ui.customConfigurations') }}
             </div>
           </div>
         </header>
@@ -158,7 +158,7 @@
           v-if="reviewErrorItemCount > 0"
           class="border-b border-destructive/15 bg-destructive/5 px-4 py-2 text-xs text-destructive"
         >
-          {{ reviewErrorItemCount }} 个 Key 需要修正后才能导入
+          {{ reviewErrorItemCount }} {{ t('ui.keysMustBeCorrectedBeforeImport') }}
         </div>
 
         <div class="max-h-[min(52vh,520px)] divide-y divide-border/50 overflow-y-auto overscroll-contain">
@@ -173,13 +173,13 @@
               </span>
               <div class="min-w-0 flex-1">
                 <div class="flex min-w-0 items-center gap-2">
-                  <span class="truncate text-xs font-semibold">{{ entry.item.name || '未填写名称' }}</span>
+                  <span class="truncate text-xs font-semibold">{{ entry.item.name || t('ui.nameMissing') }}</span>
                   <Badge
                     v-if="reviewErrorsByIndex.has(entry.index)"
                     variant="destructive"
                     class="shrink-0 text-[10px]"
                   >
-                    需修正
+                    {{ t('ui.needsCorrection') }}
                   </Badge>
                 </div>
                 <div class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
@@ -188,17 +188,17 @@
               </div>
               <div class="hidden shrink-0 items-center gap-1.5 sm:flex">
                 <span class="rounded-md bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{{ effectiveAuthLabel(entry.item) }}</span>
-                <span class="rounded-md bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{{ effectiveFormatCount(entry.item) }} 种格式</span>
+                <span class="rounded-md bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">{{ effectiveFormatCount(entry.item) }} {{ t('ui.formats') }}</span>
                 <span
                   class="rounded-md px-2 py-0.5 text-[10px]"
                   :class="entry.item.customized ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'"
-                >{{ entry.item.customized ? '单独配置' : '统一配置' }}</span>
+                >{{ entry.item.customized ? t('ui.separateConfiguration') : t('ui.sharedConfiguration') }}</span>
               </div>
               <button
                 type="button"
                 class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-[background-color,color,scale] hover:bg-muted hover:text-foreground active:scale-[0.96]"
-                :aria-label="`编辑 ${entry.item.name || `第 ${entry.index + 1} 项`}`"
-                :title="editingItemIndex === entry.index ? '收起编辑' : '编辑此 Key'"
+                :aria-label="t('ui.editValue', { name: entry.item.name || `第 ${entry.index + 1} 项` })"
+                :title="editingItemIndex === entry.index ? t('ui.collapseEditor') : t('ui.editThisKey')"
                 @click="toggleItemEditor(entry.index)"
               >
                 <Pencil class="h-4 w-4" />
@@ -211,11 +211,11 @@
             >
               <div class="grid gap-3 sm:grid-cols-2">
                 <div class="space-y-1.5">
-                  <Label class="text-xs">名称</Label>
+                  <Label class="text-xs">{{ t('stats.column.name') }}</Label>
                   <Input
                     v-model="entry.item.name"
                     class="h-10"
-                    placeholder="必填"
+                    :placeholder="t('ui.required')"
                   />
                 </div>
                 <div class="space-y-1.5">
@@ -223,7 +223,7 @@
                   <Input
                     v-model="entry.item.apiKey"
                     class="h-10 font-mono text-xs"
-                    placeholder="必填"
+                    :placeholder="t('ui.required')"
                   />
                 </div>
               </div>
@@ -231,10 +231,10 @@
               <div class="flex min-h-12 items-center justify-between gap-3 rounded-lg bg-background px-3 shadow-[0_0_0_1px_rgb(0_0_0/0.06)] dark:shadow-[0_0_0_1px_rgb(255_255_255/0.08)]">
                 <div>
                   <div class="text-xs font-medium">
-                    单独配置此 Key
+                    {{ t('ui.configureThisKeySeparately') }}
                   </div>
                   <div class="text-[11px] text-muted-foreground">
-                    开启后覆盖第二步中的统一配置
+                    {{ t('ui.overrideTheSharedConfigurationFromStep2') }}
                   </div>
                 </div>
                 <Switch
@@ -280,8 +280,7 @@
             :disabled="reviewPage === 1"
             @click="changeReviewPage(reviewPage - 1)"
           >
-            <ChevronLeft class="mr-1 h-4 w-4" />
-            上一页
+            <ChevronLeft class="mr-1 h-4 w-4" /> {{ t('userStats.pagination.previous') }}
           </Button>
           <span class="text-[11px] tabular-nums text-muted-foreground">{{ reviewPage }} / {{ reviewPageCount }}</span>
           <Button
@@ -291,8 +290,7 @@
             :disabled="reviewPage === reviewPageCount"
             @click="changeReviewPage(reviewPage + 1)"
           >
-            下一页
-            <ChevronRight class="ml-1 h-4 w-4" />
+            {{ t('userStats.pagination.next') }} <ChevronRight class="ml-1 h-4 w-4" />
           </Button>
         </div>
       </section>
@@ -310,7 +308,7 @@
             v-if="currentStep > 1"
             class="mr-2 h-4 w-4"
           />
-          {{ currentStep === 1 ? '取消' : '上一步' }}
+          {{ currentStep === 1 ? t('common.cancel') : t('ui.previousStep') }}
         </Button>
         <Button
           class="w-full sm:w-auto"
@@ -337,6 +335,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, reactive, ref, watch } from 'vue'
 import {
   ArrowLeft,
@@ -391,11 +391,13 @@ const emit = defineEmits<{
   saved: []
 }>()
 
+const { t } = useI18n()
+
 const REVIEW_PAGE_SIZE = 50
 const steps: ReadonlyArray<{ id: WizardStep; label: string }> = [
-  { id: 1, label: '导入内容' },
-  { id: 2, label: '统一配置' },
-  { id: 3, label: '逐项确认' },
+  { id: 1, get label() { return t('ui.importContent') } },
+  { id: 2, get label() { return t('ui.sharedConfiguration') } },
+  { id: 3, get label() { return t('ui.reviewEachEntry') } },
 ]
 
 const { success, warning, error: showError } = useToast()
@@ -415,9 +417,9 @@ const canContinueInput = computed(() => (
 ))
 const canContinueSettings = computed(() => selectedApiFormats.value.length > 0)
 const inputStatusText = computed(() => {
-  if (parsed.value.errors.length > 0) return `${parsed.value.errors.length} 个问题`
-  if (parsed.value.items.length > 0) return `${parsed.value.items.length} 条有效`
-  return '等待输入'
+  if (parsed.value.errors.length > 0) return t('providers.migration.issues463bcd', { value: String(parsed.value.errors.length) })
+  if (parsed.value.items.length > 0) return t('providers.migration.validEntriesc3414d', { value: String(parsed.value.items.length) })
+  return t('ui.waitingForInput')
 })
 const reviewErrorsByIndex = computed(() => {
   const errors = new Map<number, string[]>()
@@ -428,17 +430,17 @@ const reviewErrorsByIndex = computed(() => {
     const messages: string[] = []
     const name = item.name.trim()
     const apiKey = item.apiKey.trim()
-    if (!name) messages.push('名称不能为空')
-    else if (name.length > 100) messages.push('名称不能超过 100 个字符')
-    else if (seenNames.has(name)) messages.push('名称与前面的 Key 重复')
+    if (!name) messages.push(t('ui.nameIsRequired'))
+    else if (name.length > 100) messages.push(t('ui.nameMustBe100CharactersOrFewer'))
+    else if (seenNames.has(name)) messages.push(t('ui.nameDuplicatesAnEarlierEntry'))
     else seenNames.add(name)
 
-    if (!apiKey) messages.push('Key 不能为空')
-    else if (seenKeys.has(apiKey)) messages.push('Key 与前面的 Key 重复')
+    if (!apiKey) messages.push(t('ui.keyIsRequired'))
+    else if (seenKeys.has(apiKey)) messages.push(t('ui.keyDuplicatesAnEarlierEntry'))
     else seenKeys.add(apiKey)
 
     if (item.customized && item.apiFormats.length === 0) {
-      messages.push('单独配置时至少选择一种 API 格式')
+      messages.push(t('ui.selectAtLeastOneApiFormatForIndividualConfiguration'))
     }
     if (messages.length > 0) errors.set(index, messages)
   })
@@ -470,17 +472,17 @@ const primaryActionDisabled = computed(() => {
   return !canImport.value
 })
 const primaryActionLabel = computed(() => {
-  if (importing.value) return '正在导入...'
-  if (currentStep.value === 1) return '下一步：统一配置'
-  if (currentStep.value === 2) return '下一步：逐项确认'
-  return `导入 ${reviewItems.value.length} 个 Key`
+  if (importing.value) return t('ui.importingd0e2dee')
+  if (currentStep.value === 1) return t('ui.nextSharedConfiguration')
+  if (currentStep.value === 2) return t('ui.nextReviewEntries')
+  return t('providers.migration.importKeysb1464e', { value: String(reviewItems.value.length) })
 })
 const settingsSummaryItems = computed(() => {
-  const rpm = settings.rpm_limit == null ? 'RPM 自适应' : `RPM ${settings.rpm_limit}`
+  const rpm = settings.rpm_limit == null ? t('ui.adaptiveRpm') : `RPM ${settings.rpm_limit}`
   const concurrent = settings.concurrent_limit == null || settings.concurrent_limit === 0
-    ? '不限并发'
-    : `并发 ${settings.concurrent_limit}`
-  const proxy = settings.proxy_node_id ? '独立代理' : '沿用 Provider 代理'
+    ? t('ui.unlimitedConcurrency')
+    : t('providers.migration.concurrencya525e6', { value: String(settings.concurrent_limit) })
+  const proxy = settings.proxy_node_id ? t('ui.dedicatedProxy') : t('ui.useProviderProxy')
   return [authType.value === 'bearer' ? 'Bearer' : 'API Key', rpm, concurrent, proxy]
 })
 
@@ -647,15 +649,16 @@ async function submitImport(): Promise<void> {
     })
     if (result.imported > 0) emit('saved')
     if (result.errors.length > 0) {
-      warning(`已导入 ${result.imported} 个，${result.errors.length} 个失败`)
+      warning(t('providers.migration.importedFailedbe0f08', { value: String(result.imported), value_2: String(result.errors.length) }))
       return
     }
-    success(`已导入 ${result.imported} 个 Key`)
+    success(t('providers.migration.importedKeysecd789', { value: String(result.imported) }))
     emit('close')
   } catch (error) {
-    showError(parseApiError(error, '批量导入 Key 失败'))
+    showError(parseApiError(error, t('ui.failedToImportKeysInBulk')))
   } finally {
     importing.value = false
   }
 }
+
 </script>

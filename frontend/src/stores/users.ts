@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import {
@@ -97,7 +98,7 @@ export const useUsersStore = defineStore('users', () => {
       users.value.push(newUser)
       return newUser
     } catch (err: unknown) {
-      error.value = parseApiError(err, '创建用户失败')
+      error.value = parseApiError(err, translate('ui.failedToCreateUser'))
       throw err
     } finally {
       loading.value = false
@@ -120,7 +121,7 @@ export const useUsersStore = defineStore('users', () => {
       }
       return updatedUser
     } catch (err: unknown) {
-      error.value = parseApiError(err, '更新用户失败')
+      error.value = parseApiError(err, translate('ui.failedToUpdateUser'))
       throw err
     } finally {
       loading.value = false
@@ -135,7 +136,7 @@ export const useUsersStore = defineStore('users', () => {
       await usersApi.deleteUser(userId)
       users.value = users.value.filter(u => u.id !== userId)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '删除用户失败')
+      error.value = parseApiError(err, translate('ui.failedToDeleteUser'))
       throw err
     } finally {
       loading.value = false
@@ -148,7 +149,7 @@ export const useUsersStore = defineStore('users', () => {
     try {
       return await usersApi.resolveBatchSelection(selection)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '解析用户选择失败')
+      error.value = parseApiError(err, translate('ui.failedToResolveUserSelection'))
       throw err
     }
   }
@@ -200,7 +201,7 @@ export const useUsersStore = defineStore('users', () => {
     try {
       await usersApi.deleteUserGroup(groupId)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '删除用户分组失败')
+      error.value = parseApiError(err, translate('ui.failedToDeleteUserGroup'))
       throw err
     }
   }
@@ -248,7 +249,7 @@ export const useUsersStore = defineStore('users', () => {
     try {
       return await usersApi.createApiKey(userId, data)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '创建 API Key 失败')
+      error.value = parseApiError(err, translate('ui.failedToCreateApiKey438ebef'))
       throw err
     }
   }
@@ -261,7 +262,7 @@ export const useUsersStore = defineStore('users', () => {
     try {
       return await usersApi.updateApiKey(userId, keyId, data)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '更新 API Key 失败')
+      error.value = parseApiError(err, translate('ui.failedToUpdateApiKeydce5430'))
       throw err
     }
   }
@@ -270,7 +271,7 @@ export const useUsersStore = defineStore('users', () => {
     try {
       await usersApi.deleteApiKey(userId, keyId)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '删除 API Key 失败')
+      error.value = parseApiError(err, translate('ui.failedToDeleteApiKey0130c20'))
       throw err
     }
   }
@@ -331,7 +332,7 @@ export const useUsersStore = defineStore('users', () => {
     try {
       return await usersApi.revokeAllUserSessions(userId)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '强制下线全部设备失败')
+      error.value = parseApiError(err, translate('ui.failedToSignOutAllDevices'))
       throw err
     }
   }

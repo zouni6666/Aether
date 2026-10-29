@@ -31,21 +31,21 @@
       >
         <div class="grid min-h-8 w-full items-center gap-2 sm:h-8 sm:grid-cols-2">
           <div class="text-sm font-medium text-foreground">
-            选择测试端点
+            {{ t('ui.selectTestEndpoint') }}
           </div>
           <div
             v-if="modelMappingAvailable"
             class="grid w-full grid-cols-[auto_1fr] items-center gap-2"
           >
             <div class="text-sm font-medium text-foreground">
-              模型映射
+              {{ t('guide.nav.concepts.modelMapping') }}
             </div>
             <Select
               :model-value="selectedModelMappingValue"
               @update:model-value="handleModelMappingValueChange"
             >
               <SelectTrigger class="h-8 min-h-8 w-full shrink-0 overflow-hidden border-border/60 py-0 text-xs leading-none [transition-property:none] [&>span:first-child]:min-w-0 [&>span:first-child]:flex-1 [&>span:first-child]:text-left [&>span:first-child]:leading-none">
-                <SelectValue :placeholder="requestedModelName || '当前模型'" />
+                <SelectValue :placeholder="requestedModelName || t('ui.currentModel')" />
               </SelectTrigger>
               <SelectContent
                 class="w-[var(--radix-select-trigger-width)]"
@@ -92,7 +92,7 @@
                 </div>
               </div>
               <Badge :variant="selectedEndpoint?.id === endpoint.id ? 'success' : 'outline'">
-                {{ selectedEndpoint?.id === endpoint.id ? '已选择' : (endpoint.is_active ? '可用' : '已禁用') }}
+                {{ selectedEndpoint?.id === endpoint.id ? t('ui.selected3f4ebc4') : (endpoint.is_active ? t('ui.available4d99c97') : t('ui.disabledbc5a87a')) }}
               </Badge>
             </div>
           </button>
@@ -105,7 +105,7 @@
       >
         <div class="flex items-center justify-between gap-3">
           <div class="text-sm font-medium text-foreground">
-            测试 Key
+            {{ t('ui.testKey') }}
           </div>
           <div class="text-xs text-muted-foreground">
             {{ keySelectionStatus }}
@@ -115,9 +115,9 @@
           :model-value="selectedKeyIds"
           :options="keyOptions"
           :placeholder="keySelectorPlaceholder"
-          search-placeholder="搜索 Key"
-          empty-text="暂无可选 Key"
-          no-results-text="未找到匹配 Key"
+          :search-placeholder="t('ui.searchKeys')"
+          :empty-text="t('ui.noKeysAvailableToSelect')"
+          :no-results-text="t('ui.noMatchingKeys')"
           trigger-class="h-9 min-h-9 rounded-md border-border/60 text-xs"
           dropdown-min-width="24rem"
           :search-threshold="0"
@@ -130,14 +130,14 @@
         <div class="space-y-2">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-medium">
-              测试请求头
+              {{ t('ui.testRequestHeaders') }}
             </div>
             <div class="flex items-center gap-1">
               <Button
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8 rounded-lg text-muted-foreground"
-                title="格式化请求头 JSON"
+                :title="t('ui.formatHeadersJson')"
                 @click="formatRequestHeadersDraft"
               >
                 <Code2 class="h-4 w-4" />
@@ -146,7 +146,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8 rounded-lg text-muted-foreground"
-                title="重置请求头"
+                :title="t('ui.resetHeaders')"
                 @click="resetRequestHeadersDraft"
               >
                 <RotateCcw class="h-4 w-4" />
@@ -156,7 +156,7 @@
           <Textarea
             :model-value="requestHeadersDraft"
             class="min-h-[220px] font-mono text-xs"
-            placeholder="输入 JSON 请求头"
+            :placeholder="t('ui.enterRequestHeadersAsJson')"
             @update:model-value="emit('update:requestHeadersDraft', $event)"
           />
           <div
@@ -166,21 +166,21 @@
             {{ requestHeadersError }}
           </div>
           <div class="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
-            这里的请求头会合并到测试请求里；鉴权头和必要系统头仍由后端按端点规则补齐。
+            {{ t('ui.theseHeadersAreMergedIntoTheTestRequestAuthenticationAnd') }}
           </div>
         </div>
 
         <div class="space-y-2">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm font-medium">
-              测试请求体
+              {{ t('ui.testRequestBody') }}
             </div>
             <div class="flex items-center gap-1">
               <Button
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8 rounded-lg text-muted-foreground"
-                title="格式化请求体 JSON"
+                :title="t('ui.formatBodyJson')"
                 @click="formatRequestBodyDraft"
               >
                 <Code2 class="h-4 w-4" />
@@ -189,7 +189,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8 rounded-lg text-muted-foreground"
-                title="重置请求体"
+                :title="t('ui.resetRequestBody')"
                 @click="resetRequestBodyDraft"
               >
                 <RotateCcw class="h-4 w-4" />
@@ -199,7 +199,7 @@
           <Textarea
             :model-value="requestBodyDraft"
             class="min-h-[220px] font-mono text-xs"
-            placeholder="输入 JSON 请求体"
+            :placeholder="t('ui.enterRequestBodyAsJson')"
             @update:model-value="emit('update:requestBodyDraft', $event)"
           />
           <div
@@ -209,7 +209,7 @@
             {{ requestBodyError }}
           </div>
           <div class="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
-            请求体中的 model 会按当前编辑内容发送；未填写时使用当前测试模型，实际发送时会按端点格式转换并应用规则。
+            {{ t('ui.theModelFieldUsesYourEditedValueOrTheCurrent') }}
           </div>
         </div>
       </div>
@@ -219,7 +219,7 @@
         :disabled="startDisabled"
         @click="emit('start')"
       >
-        开始测试
+        {{ t('ui.startTest') }}
       </Button>
     </div>
 
@@ -231,7 +231,7 @@
         <Loader2 class="h-8 w-8 animate-spin text-primary" />
         <div class="space-y-1">
           <p class="text-sm font-medium">
-            正在测试模型
+            {{ t('ui.testingModel') }}
           </p>
           <p class="text-xs text-muted-foreground">
             {{ selectingModelName || '-' }}
@@ -240,7 +240,7 @@
             v-if="selectedEndpoint"
             class="text-xs text-muted-foreground"
           >
-            端点：{{ formatApiFormat(selectedEndpoint.api_format) }} · {{ selectedEndpoint.base_url }}
+            {{ t('ui.endpoint') }}{{ formatApiFormat(selectedEndpoint.api_format) }} · {{ selectedEndpoint.base_url }}
           </p>
         </div>
       </div>
@@ -248,7 +248,7 @@
       <div class="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-4">
         <div class="space-y-2">
           <div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-            <span>实时进度</span>
+            <span>{{ t('ui.liveProgress') }}</span>
             <span>{{ liveProgressText }}</span>
           </div>
           <div class="h-2 overflow-hidden rounded-full bg-muted">
@@ -274,7 +274,7 @@
             v-else
             class="text-xs text-muted-foreground"
           >
-            正在准备测试请求
+            {{ t('ui.preparingTestRequest') }}
           </div>
         </div>
 
@@ -295,7 +295,7 @@
           </div>
           <div class="rounded-md border border-border/60 bg-background/80 p-3 space-y-1">
             <div class="text-xs text-muted-foreground">
-              状态
+              {{ t('ui.status6320b4a') }}
             </div>
             <div class="text-sm font-medium">
               {{ liveStatusTitle }}
@@ -313,7 +313,7 @@
           v-if="requestId"
           class="break-all text-[11px] text-muted-foreground"
         >
-          请求 ID：<code class="rounded bg-muted px-1 py-0.5">{{ requestId }}</code>
+          {{ t('ui.requestId') }}<code class="rounded bg-muted px-1 py-0.5">{{ requestId }}</code>
         </div>
 
         <div
@@ -321,7 +321,7 @@
           class="space-y-2"
         >
           <div class="text-xs font-medium text-muted-foreground">
-            最近
+            {{ t('ui.recent') }}
           </div>
           <div class="space-y-2">
             <div
@@ -367,14 +367,14 @@
               :variant="result.success ? 'success' : 'destructive'"
               class="px-2 py-0.5"
             >
-              {{ result.success ? '测试成功' : '测试失败' }}
+              {{ result.success ? t('ui.testPassed') : t('ui.testFailed') }}
             </Badge>
           </div>
           <div
             v-if="hasEffectiveModel"
             class="text-xs text-muted-foreground"
           >
-            请求模型：{{ resultModelTitle }}
+            {{ t('ui.requestedModel') }}{{ resultModelTitle }}
           </div>
         </div>
 
@@ -389,7 +389,7 @@
           </div>
           <div class="rounded-md border border-border/60 bg-background/80 p-3 space-y-1">
             <div class="text-xs text-muted-foreground">
-              调度结果
+              {{ t('ui.schedulingResult') }}
             </div>
             <div class="text-sm font-medium">
               {{ resultDispatchTitle }}
@@ -397,7 +397,7 @@
           </div>
           <div class="rounded-md border border-border/60 bg-background/80 p-3 space-y-1">
             <div class="text-xs text-muted-foreground">
-              实际请求
+              {{ t('ui.actualRequest') }}
             </div>
             <div class="break-all text-sm font-medium">
               {{ resultModelTitle }}
@@ -424,13 +424,13 @@
         v-if="shouldCollapseAttempts"
         class="flex items-center justify-between gap-3 text-xs text-muted-foreground"
       >
-        <span>仅展示前 {{ visibleAttempts.length }} 条，共 {{ resultAttempts.length }} 条</span>
+        <span>{{ t('ui.showingTheFirst') }} {{ visibleAttempts.length }} {{ t('ui.of') }} {{ resultAttempts.length }} {{ t('ui.itemsf004f1d') }}</span>
         <Button
           variant="ghost"
           size="sm"
           @click="showAllAttempts = !showAllAttempts"
         >
-          {{ showAllAttempts ? '收起详情' : `展开全部 ${resultAttempts.length} 条` }}
+          {{ showAllAttempts ? t('ui.hideDetails') : t('ui.expandAllValueItems', { count: resultAttempts.length }) }}
         </Button>
       </div>
 
@@ -521,13 +521,13 @@
                 Key
               </th>
               <th class="px-3 py-2 text-left font-medium">
-                状态
+                {{ t('ui.status6320b4a') }}
               </th>
               <th class="px-3 py-2 text-right font-medium">
-                延迟
+                {{ t('ui.latency') }}
               </th>
               <th class="px-3 py-2 text-left font-medium">
-                详情
+                {{ t('ui.details') }}
               </th>
             </tr>
           </thead>
@@ -654,7 +654,7 @@
                 <div class="content-block rounded-md border overflow-hidden">
                   <div class="flex items-center justify-end gap-0.5 px-3 py-1 border-b bg-muted/40">
                     <button
-                      :title="inspectionExpandDepth === 0 ? '展开全部' : '收缩全部'"
+                      :title="inspectionExpandDepth === 0 ? t('ui.expandAll') : t('ui.collapseAll')"
                       class="p-1 rounded transition-colors text-muted-foreground hover:bg-muted"
                       @click="inspectionExpandDepth === 0 ? expandInspectionContent() : collapseInspectionContent()"
                     >
@@ -669,7 +669,7 @@
                     </button>
 
                     <button
-                      :title="inspectionCopiedStates[inspectionTab] ? '已复制' : '复制'"
+                      :title="inspectionCopiedStates[inspectionTab] ? t('common.copied') : t('common.copy')"
                       class="p-1 rounded transition-colors text-muted-foreground hover:bg-muted"
                       @click="copyInspectionContent(inspectionTab)"
                     >
@@ -690,7 +690,7 @@
                       view-mode="formatted"
                       :expand-depth="inspectionExpandDepth"
                       :is-dark="isDark"
-                      empty-message="无请求头数据"
+                      :empty-message="t('ui.noRequestHeaders')"
                     />
                   </TabsContent>
 
@@ -700,7 +700,7 @@
                       view-mode="formatted"
                       :expand-depth="inspectionExpandDepth"
                       :is-dark="isDark"
-                      empty-message="无请求体数据"
+                      :empty-message="t('ui.noRequestBody19667d3')"
                     />
                   </TabsContent>
 
@@ -710,7 +710,7 @@
                       view-mode="formatted"
                       :expand-depth="inspectionExpandDepth"
                       :is-dark="isDark"
-                      empty-message="无响应头数据"
+                      :empty-message="t('ui.noResponseHeaders')"
                     />
                   </TabsContent>
 
@@ -720,7 +720,7 @@
                       view-mode="formatted"
                       :expand-depth="inspectionExpandDepth"
                       :is-dark="isDark"
-                      empty-message="无响应体数据"
+                      :empty-message="t('ui.noResponseBody0f51f71')"
                     />
                   </TabsContent>
                 </div>
@@ -736,14 +736,14 @@
         variant="outline"
         @click="emit('close')"
       >
-        {{ showSetup ? '取消' : '关闭' }}
+        {{ showSetup ? t('common.cancel') : t('ui.close') }}
       </Button>
       <Button
         v-if="showResult"
         variant="outline"
         @click="emit('back')"
       >
-        返回
+        {{ t('ui.back') }}
       </Button>
     </template>
   </Dialog>
@@ -757,7 +757,7 @@
     <template #header>
       <div class="border-b border-border px-6 py-4">
         <div class="text-lg font-semibold text-foreground leading-tight">
-          {{ activeImagePreview?.label || '图片预览' }}
+          {{ activeImagePreview?.label || t('ui.imagePreview') }}
         </div>
       </div>
     </template>
@@ -776,13 +776,15 @@
         variant="outline"
         @click="activeImagePreview = null"
       >
-        关闭
+        {{ t('ui.close') }}
       </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, ref, watch } from 'vue'
 import { Check, Code2, Copy, Loader2, Maximize2, Minimize2, RotateCcw } from 'lucide-vue-next'
 import {
@@ -801,18 +803,38 @@ import Button from '@/components/ui/button.vue'
 import Textarea from '@/components/ui/textarea.vue'
 import MultiSelect from '@/components/common/MultiSelect.vue'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
-import type { TestAttemptDetail, TestCandidateSummary, TestModelFailoverResponse } from '@/api/endpoints/providers'
-import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
+import type { TestAttemptDetail, TestModelFailoverResponse } from '@/api/endpoints/providers'
+import type { RequestTrace } from '@/api/requestTrace'
 import type { MultiSelectOption } from '@/components/common/MultiSelect.vue'
 import JsonContent from '@/features/usage/components/RequestDetailDrawer/JsonContent.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { useDarkMode } from '@/composables/useDarkMode'
 import {
-  extractModelTestImagePreviews,
-  extractModelTestResponsePreview,
   formatModelTestDiagnostic,
 } from './model-test-request'
 import type { ModelTestImagePreview } from './model-test-request'
+import {
+  deriveSummaryFromAttempts,
+  detailTabs,
+  statusVariant,
+  statusLabel,
+  statusDisplay,
+  attemptRowClass,
+  maskKey,
+  formatAuthType,
+  formatAttemptIndex,
+  formatTraceCandidateIndex,
+  formatTraceCandidateAccount,
+  extractAttemptRequestModel,
+  traceCandidateDetail,
+  attemptDetail,
+  attemptImagePreviews,
+  inspectionKey,
+  hasDebugData,
+  getInspectionTabData,
+  formatJsonDraft,
+} from './model-test-display'
+import type { SummaryView, SummaryBadgeItem } from './model-test-display'
 
 type TestEndpointOption = {
   id: string
@@ -866,6 +888,8 @@ const emit = defineEmits<{
   'update:requestBodyDraft': [value: string]
 }>()
 
+const { t } = useI18n()
+
 const endpoints = computed(() => props.endpoints ?? [])
 const modelMappingOptions = computed(() => props.modelMappingOptions ?? [])
 const keyOptions = computed(() => props.keyOptions ?? [])
@@ -878,12 +902,12 @@ const showKeySelector = computed(() => (
   props.keyOptions !== undefined || keyOptionsLoading.value || selectedKeyIds.value.length > 0
 ))
 const keySelectorPlaceholder = computed(() => (
-  keyOptionsLoading.value && keyOptions.value.length === 0 ? '正在加载 Key' : '默认调度（不指定 Key）'
+  keyOptionsLoading.value && keyOptions.value.length === 0 ? t('ui.loadingKeys') : t('ui.defaultSchedulingNoSpecificKey')
 ))
 const keySelectionStatus = computed(() => {
-  if (selectedKeyIds.value.length > 0) return `已选 ${selectedKeyIds.value.length}`
-  if (keyOptionsLoading.value) return '加载中'
-  return '默认'
+  if (selectedKeyIds.value.length > 0) return t('providers.migration.selected7c3915', { value: String(selectedKeyIds.value.length) })
+  if (keyOptionsLoading.value) return t('ui.loading')
+  return t('ui.default844b8cc')
 })
 const requestedModelName = computed(() => props.requestedModelName?.trim() || '')
 const selectedModelMapping = computed(() => props.selectedModelMapping?.trim() || '')
@@ -911,16 +935,16 @@ function handleModelMappingValueChange(value: string) {
 }
 
 const dialogTitle = computed(() => {
-  if (props.result) return '模型测试结果'
-  return '模型测试'
+  if (props.result) return t('ui.modelTestResults')
+  return t('ui.modelTest')
 })
 
 const dialogDescription = computed(() => {
   if (showSetup.value && props.selectingModelName) {
-    return `为 ${props.selectingModelName} 选择端点并编辑测试请求头与请求体`
+    return t('providers.migration.selectAnEndpointAndEdite74516', { value: String(props.selectingModelName) })
   }
   if (props.testing && props.selectedEndpoint) {
-    return `正在通过 ${formatApiFormat(props.selectedEndpoint.api_format)} 测试 ${props.selectingModelName || '模型'}`
+    return t('providers.migration.testingViadfc444', { value: String(formatApiFormat(props.selectedEndpoint.api_format)), value_2: String(props.selectingModelName || t('ui.model')) })
   }
   return ''
 })
@@ -935,7 +959,7 @@ const hasEffectiveModel = computed(() => {
 })
 
 const resultEmptyMessage = computed(() => {
-  if (!props.result) return '没有可用的候选进行测试'
+  if (!props.result) return t('ui.noCandidatesAvailableForTesting')
   if (typeof props.result.error === 'string' && props.result.error.trim()) {
     return formatModelTestDiagnostic(props.result.error)
   }
@@ -943,7 +967,7 @@ const resultEmptyMessage = computed(() => {
   if (typeof rawResult.message === 'string' && rawResult.message.trim()) {
     return formatModelTestDiagnostic(rawResult.message)
   }
-  return '没有可用的候选进行测试'
+  return t('ui.noCandidatesAvailableForTesting')
 })
 const showAllAttempts = ref(false)
 const inspectionTab = ref<'request-headers' | 'request-body' | 'response-headers' | 'response-body'>('request-body')
@@ -975,122 +999,6 @@ const visibleAttempts = computed(() => {
   }
   return resultAttempts.value.slice(0, 20)
 })
-
-type SummaryView = {
-  total_candidates: number
-  attempted: number
-  success: number
-  failed: number
-  skipped: number
-  unused: number
-  pending: number
-  available: number
-  completed: number
-  stop_reason?: string | null
-  winning_candidate_index?: number | null
-  winning_key_name?: string | null
-  winning_key_id?: string | null
-  winning_auth_type?: string | null
-  winning_effective_model?: string | null
-  winning_endpoint_api_format?: string | null
-  winning_endpoint_base_url?: string | null
-  winning_latency_ms?: number | null
-  winning_status_code?: number | null
-}
-
-type SummaryBadgeItem = {
-  key: string
-  label: string
-  value: number
-  variant: 'default' | 'secondary' | 'outline' | 'success' | 'destructive'
-}
-
-function toCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
-}
-
-function normalizeCandidateSummary(summary: TestCandidateSummary | null | undefined): SummaryView | null {
-  if (!summary) return null
-  const success = toCount(summary.success)
-  const failed = toCount(summary.failed)
-  const skipped = toCount(summary.skipped)
-  const unused = toCount(summary.unused)
-  const pending = toCount(summary.pending)
-  const available = toCount(summary.available)
-  return {
-    total_candidates: toCount(summary.total_candidates),
-    attempted: toCount(summary.attempted),
-    success,
-    failed,
-    skipped,
-    unused,
-    pending,
-    available,
-    completed: toCount(summary.completed) || success + failed + skipped + unused,
-    stop_reason: summary.stop_reason ?? null,
-    winning_candidate_index: summary.winning_candidate_index ?? null,
-    winning_key_name: summary.winning_key_name ?? null,
-    winning_key_id: summary.winning_key_id ?? null,
-    winning_auth_type: summary.winning_auth_type ?? null,
-    winning_effective_model: summary.winning_effective_model ?? null,
-    winning_endpoint_api_format: summary.winning_endpoint_api_format ?? null,
-    winning_endpoint_base_url: summary.winning_endpoint_base_url ?? null,
-    winning_latency_ms: summary.winning_latency_ms ?? null,
-    winning_status_code: summary.winning_status_code ?? null,
-  }
-}
-
-function deriveSummaryFromAttempts(result: TestModelFailoverResponse | null): SummaryView {
-  const normalized = normalizeCandidateSummary(result?.candidate_summary)
-  if (normalized) return normalized
-
-  const attempts = result?.attempts ?? []
-  const success = attempts.filter(attempt => attempt.status === 'success').length
-  const failed = attempts.filter(attempt => ['failed', 'cancelled', 'stream_interrupted'].includes(attempt.status)).length
-  const skipped = attempts.filter(attempt => attempt.status === 'skipped').length
-  const pending = attempts.filter(attempt => ['pending', 'streaming'].includes(attempt.status)).length
-  const available = attempts.filter(attempt => attempt.status === 'available').length
-  const totalCandidates = Math.max(result?.total_candidates ?? 0, attempts.length)
-  const explicitUnused = attempts.filter(attempt => attempt.status === 'unused').length
-  const winningAttempt = attempts.find(attempt => attempt.status === 'success') ?? null
-  const unused = explicitUnused > 0
-    ? explicitUnused
-    : success > 0 && winningAttempt
-      ? Math.max(0, totalCandidates - winningAttempt.candidate_index - 1)
-      : 0
-  const attempted = result?.total_attempts ?? attempts.filter(attempt => !['skipped', 'available', 'unused'].includes(attempt.status)).length
-  const stopReason = totalCandidates === 0
-    ? 'no_candidate'
-    : success > 0
-      ? 'first_success'
-      : attempted === 0 && skipped > 0
-        ? 'all_skipped'
-        : failed > 0 || skipped > 0
-          ? 'exhausted'
-          : 'pending'
-
-  return {
-    total_candidates: totalCandidates,
-    attempted,
-    success,
-    failed,
-    skipped,
-    unused,
-    pending,
-    available,
-    completed: success + failed + skipped + unused,
-    stop_reason: stopReason,
-    winning_candidate_index: winningAttempt?.candidate_index ?? null,
-    winning_key_name: winningAttempt?.key_name ?? null,
-    winning_key_id: winningAttempt?.key_id ?? null,
-    winning_auth_type: winningAttempt?.auth_type ?? null,
-    winning_effective_model: winningAttempt?.effective_model ?? null,
-    winning_endpoint_api_format: winningAttempt?.endpoint_api_format ?? null,
-    winning_endpoint_base_url: winningAttempt?.endpoint_base_url ?? null,
-    winning_latency_ms: winningAttempt?.latency_ms ?? null,
-    winning_status_code: winningAttempt?.status_code ?? null,
-  }
-}
 
 const liveTraceSummary = computed(() => {
   const summary: SummaryView = {
@@ -1136,41 +1044,41 @@ const testScenario = computed<'pool' | 'custom' | 'direct' | 'provider'>(() => {
 })
 
 const candidateNoun = computed(() => {
-  if (testScenario.value === 'pool') return '账号'
+  if (testScenario.value === 'pool') return t('ui.account')
   if (testScenario.value === 'custom') return 'Key'
-  return '候选'
+  return t('ui.candidate')
 })
 
 const liveEntityLabel = computed(() => {
-  if (testScenario.value === 'pool') return '当前账号'
-  if (testScenario.value === 'custom') return '当前 Key'
-  return '当前候选'
+  if (testScenario.value === 'pool') return t('ui.currentAccount')
+  if (testScenario.value === 'custom') return t('ui.currentKey2126a46')
+  return t('ui.currentCandidate')
 })
 
 const resultEntityLabel = computed(() => {
-  if (testScenario.value === 'pool') return '命中账号'
-  if (testScenario.value === 'custom') return '命中 Key'
-  return '命中候选'
+  if (testScenario.value === 'pool') return t('ui.matchedAccount')
+  if (testScenario.value === 'custom') return t('ui.matchedKey')
+  return t('ui.matchedCandidate')
 })
 
 function buildSummaryItems(summary: SummaryView): SummaryBadgeItem[] {
   const totalLabel = testScenario.value === 'pool'
-    ? '候选账号'
+    ? t('ui.candidateAccount')
     : testScenario.value === 'custom'
-      ? '候选 Key'
-      : '候选'
+      ? t('ui.candidateKey')
+      : t('ui.candidate')
   const successLabel = testScenario.value === 'pool'
-    ? '命中账号'
+    ? t('ui.matchedAccount')
     : testScenario.value === 'custom'
-      ? '命中 Key'
-      : '成功'
-  const failedLabel = testScenario.value === 'pool' ? '失败切换' : '失败'
-  const skippedLabel = testScenario.value === 'pool' ? '调度跳过' : '跳过'
-  const unusedLabel = testScenario.value === 'pool' ? '成功后未执行' : '未执行'
+      ? t('ui.matchedKey')
+      : t('ui.success')
+  const failedLabel = testScenario.value === 'pool' ? t('ui.failover8cd0d36') : t('ui.failed28384d7')
+  const skippedLabel = testScenario.value === 'pool' ? t('ui.skippedByScheduler') : t('ui.skip')
+  const unusedLabel = testScenario.value === 'pool' ? t('ui.notRunAfterSuccess') : t('ui.notRun')
 
   return [
     { key: 'total', label: totalLabel, value: summary.total_candidates, variant: 'secondary' },
-    { key: 'attempted', label: '已尝试', value: summary.attempted, variant: 'outline' },
+    { key: 'attempted', label: t('ui.attempted'), value: summary.attempted, variant: 'outline' },
     { key: 'success', label: successLabel, value: summary.success, variant: 'success' },
     { key: 'failed', label: failedLabel, value: summary.failed, variant: 'destructive' },
     { key: 'skipped', label: skippedLabel, value: summary.skipped, variant: 'secondary' },
@@ -1182,7 +1090,7 @@ const liveSummaryItems = computed(() => buildSummaryItems(liveTraceSummary.value
 const resultSummaryItems = computed(() => buildSummaryItems(resultSummary.value))
 
 const liveProgressText = computed(() => {
-  if (liveTraceSummary.value.total_candidates <= 0) return '准备中'
+  if (liveTraceSummary.value.total_candidates <= 0) return t('ui.preparingb53be09')
   return `${liveTraceSummary.value.completed}/${liveTraceSummary.value.total_candidates}`
 })
 
@@ -1203,7 +1111,7 @@ const activeTraceCandidate = computed(() => {
 
 const liveAccountTitle = computed(() => {
   const candidate = activeTraceCandidate.value
-  if (!candidate) return '等待候选'
+  if (!candidate) return t('ui.waitingForCandidate')
   return candidate.key_account_label || candidate.key_name || candidate.key_preview || '-'
 })
 
@@ -1219,15 +1127,15 @@ const liveAccountMeta = computed(() => {
 
 const liveStatusTitle = computed(() => {
   const candidate = activeTraceCandidate.value
-  if (!candidate) return '正在准备测试请求'
+  if (!candidate) return t('ui.preparingTestRequest')
   if (candidate.status === 'pending' || candidate.status === 'streaming') {
-    return `正在请求 ${formatTraceCandidateIndex(candidate)}`
+    return t('providers.migration.requestinge6d7f8', { value: String(formatTraceCandidateIndex(candidate)) })
   }
   if (candidate.status === 'success') {
-    return `命中 ${formatTraceCandidateIndex(candidate)}`
+    return t('providers.migration.matched5ee71f', { value: String(formatTraceCandidateIndex(candidate)) })
   }
   if (candidate.status === 'unused') {
-    return '成功后未执行'
+    return t('ui.notRunAfterSuccess')
   }
   return statusLabel(candidate.status)
 })
@@ -1253,13 +1161,6 @@ const showDebugInspector = computed(() => {
   return inspectableAttempts.value.length > 0
 })
 
-const detailTabs = [
-  { name: 'request-headers', label: '请求头' },
-  { name: 'request-body', label: '请求体' },
-  { name: 'response-headers', label: '响应头' },
-  { name: 'response-body', label: '响应体' },
-] as const
-
 const selectedInspectionAttempt = computed(() => {
   const key = selectedInspectionKey.value
   if (key) {
@@ -1280,13 +1181,13 @@ const resultWinningTitle = computed(() => {
   const summary = resultSummary.value
   const keyName = summary.winning_key_name || summary.winning_key_id
   if (keyName) return keyName
-  if (props.result?.success) return `已命中 ${candidateNoun.value}`
-  return `无${resultEntityLabel.value}`
+  if (props.result?.success) return t('providers.migration.matched24a4ab', { value: String(candidateNoun.value) })
+  return t('providers.migration.no3230fd', { value: String(resultEntityLabel.value) })
 })
 
 const resultDispatchTitle = computed(() => {
   const summary = resultSummary.value
-  return `${summary.attempted}/${summary.total_candidates} 已尝试`
+  return t('providers.migration.attempted17ff8b', { value: String(summary.attempted), value_2: String(summary.total_candidates) })
 })
 
 const attemptedEffectiveModelTitle = computed(() => {
@@ -1330,162 +1231,13 @@ const resultModelTitle = computed(() => {
     || '-'
 })
 
-function statusVariant(status: string) {
-  if (status === 'success') return 'success' as const
-  if (status === 'failed' || status === 'stream_interrupted') return 'destructive' as const
-  return 'secondary' as const
-}
-
-function statusLabel(status: string) {
-  if (status === 'success') return '成功'
-  if (status === 'failed') return '失败'
-  if (status === 'skipped') return '跳过'
-  if (status === 'pending') return '等待中'
-  if (status === 'streaming') return '测试中'
-  if (status === 'cancelled') return '已取消'
-  if (status === 'stream_interrupted') return '流中断'
-  if (status === 'available') return '待请求'
-  if (status === 'unused') return '未执行'
-  return status
-}
-
-function statusDisplay(item: { status: string; status_code?: number | null }): string {
-  const code = item.status_code
-  const status = item.status
-  if (!code) return statusLabel(status)
-  if (status === 'failed' && code >= 200 && code < 300) {
-    return `${code} 体内错误`
-  }
-  return String(code)
-}
-
-function attemptRowClass(status: string, selected = false) {
-  const statusClass = (() => {
-    if (status === 'success') return 'bg-green-500/5'
-    if (status === 'failed') return 'bg-red-500/5'
-    if (status === 'cancelled') return 'bg-amber-500/5'
-    if (status === 'skipped') return 'bg-muted/20'
-    return ''
-  })()
-  const interactionClass = 'cursor-pointer transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/70'
-  const selectedClass = selected ? 'ring-1 ring-primary/70 bg-primary/5' : ''
-  return [statusClass, interactionClass, selectedClass].filter(Boolean).join(' ')
-}
-
-function maskKey(key: string): string {
-  if (key.length <= 8) return key
-  return `${key.slice(0, 4)}...${key.slice(-4)}`
-}
-
-function formatAuthType(authType: string): string {
-  const lowered = authType.toLowerCase()
-  if (lowered === 'api_key') return 'API Key'
-  if (lowered === 'service_account') return 'Service Account'
-  if (lowered === 'oauth') return 'OAuth'
-  if (lowered === 'codex') return 'Codex OAuth'
-  if (lowered === 'antigravity') return 'Antigravity OAuth'
-  if (lowered === 'kiro') return 'Kiro OAuth'
-  if (lowered === 'grok') return 'Grok OAuth'
-  if (lowered === 'xai') return 'xAI OAuth'
-  return authType
-}
-
-function formatAttemptIndex(attempt: TestAttemptDetail): string {
-  const retryIndex = attempt.retry_index ?? 0
-  return retryIndex > 0 ? `#${attempt.candidate_index}.${retryIndex}` : `#${attempt.candidate_index}`
-}
-
-function formatTraceCandidateIndex(candidate: CandidateRecord): string {
-  return candidate.retry_index > 0 ? `#${candidate.candidate_index}.${candidate.retry_index}` : `#${candidate.candidate_index}`
-}
-
-function formatTraceCandidateAccount(candidate: CandidateRecord): string {
-  return candidate.key_account_label || candidate.key_name || candidate.key_preview || '-'
-}
-
-function extractAttemptRequestModel(attempt: TestAttemptDetail): string | null {
-  const body = attempt.request_body
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
-
-  const model = (body as Record<string, unknown>).model
-  if (typeof model === 'string' && model.trim()) return model.trim()
-
-  const conversationState = (body as Record<string, unknown>).conversationState
-  if (!conversationState || typeof conversationState !== 'object' || Array.isArray(conversationState)) return null
-
-  const currentMessage = (conversationState as Record<string, unknown>).currentMessage
-  if (!currentMessage || typeof currentMessage !== 'object' || Array.isArray(currentMessage)) return null
-
-  const userInputMessage = (currentMessage as Record<string, unknown>).userInputMessage
-  if (!userInputMessage || typeof userInputMessage !== 'object' || Array.isArray(userInputMessage)) return null
-
-  const modelId = (userInputMessage as Record<string, unknown>).modelId
-  return typeof modelId === 'string' && modelId.trim() ? modelId.trim() : null
-}
-
-function traceCandidateDetail(candidate: CandidateRecord): string {
-  if (candidate.skip_reason) return formatModelTestDiagnostic(candidate.skip_reason)
-  if (candidate.error_message) return formatModelTestDiagnostic(candidate.error_message)
-  if (candidate.status === 'unused') return '成功后未请求'
-  if (candidate.status === 'available') return '待请求'
-  if (candidate.endpoint_name) return `端点：${formatApiFormat(candidate.endpoint_name)}`
-  return ''
-}
-
-function attemptDetail(attempt: TestAttemptDetail): string {
-  if (attempt.status === 'cancelled') return '测试已取消'
-  if (attempt.status === 'unused') return '成功后未请求'
-  if (attempt.skip_reason) return formatModelTestDiagnostic(attempt.skip_reason)
-  if (attempt.error_message) return formatModelTestDiagnostic(attempt.error_message)
-  if (attempt.status === 'success') {
-    return extractModelTestResponsePreview(attempt.response_body)
-      ?? (attempt.effective_model ? `请求模型：${attempt.effective_model}` : attempt.endpoint_base_url)
-  }
-  return '-'
-}
-
-function attemptImagePreviews(attempt: TestAttemptDetail): ModelTestImagePreview[] {
-  return extractModelTestImagePreviews(attempt.response_body)
-}
-
 function openImagePreview(preview: ModelTestImagePreview) {
   activeImagePreview.value = preview
-}
-
-function inspectionKey(attempt: TestAttemptDetail): string {
-  return `${attempt.candidate_index}:${attempt.retry_index ?? 0}:${attempt.key_id}`
 }
 
 function selectInspectionAttempt(attempt: TestAttemptDetail) {
   selectedInspectionKey.value = inspectionKey(attempt)
   inspectionTab.value = attemptImagePreviews(attempt).length > 0 ? 'response-body' : 'request-body'
-}
-
-function hasDebugData(attempt: TestAttemptDetail): boolean {
-  return Boolean(
-    attempt.request_url
-    || attempt.request_headers
-    || attempt.request_body != null
-    || attempt.response_headers
-    || attempt.response_body != null,
-  )
-}
-
-function getInspectionTabData(
-  tabName: typeof detailTabs[number]['name'],
-  attempt: TestAttemptDetail | null,
-): unknown {
-  if (!attempt) return null
-  switch (tabName) {
-    case 'request-headers':
-      return attempt.request_headers
-    case 'request-body':
-      return attempt.request_body
-    case 'response-headers':
-      return attempt.response_headers
-    case 'response-body':
-      return attempt.response_body
-  }
 }
 
 function copyInspectionContent(tabName: typeof detailTabs[number]['name']) {
@@ -1524,27 +1276,6 @@ function resetRequestBodyDraft() {
   emit('update:requestBodyDraft', props.requestBodyResetValue ?? '')
 }
 
-function formatJsonDraft(
-  draft: string,
-  onFormatted: (value: string) => void,
-  emptyFallback?: string,
-) {
-  const normalized = draft.trim()
-  if (!normalized) {
-    if (emptyFallback !== undefined) {
-      onFormatted(emptyFallback)
-    }
-    return
-  }
-
-  try {
-    const parsed = JSON.parse(normalized)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return
-    onFormatted(JSON.stringify(parsed, null, 2))
-  } catch {
-    // keep user input untouched when JSON is invalid
-  }
-}
 </script>
 
 <style scoped>

@@ -8,7 +8,7 @@
           :disabled="filteredUserCount === 0 || loading"
           @update:checked="handleToggleSelectFiltered"
         />
-        <span>{{ legacyT('全选筛选结果') }}</span>
+        <span>{{ t('ui.selectAllFilteredResults') }}</span>
       </label>
       <span>{{ selectionSummary }}</span>
     </div>
@@ -20,7 +20,7 @@
         :disabled="currentPageCount === 0 || selectAllFiltered || loading"
         @click="$emit('toggleSelectCurrentPage')"
       >
-        {{ legacyT(isCurrentPageFullySelected ? '取消本页全选' : '本页全选') }}
+        {{ isCurrentPageFullySelected ? t('ui.deselectPage') : t('ui.selectPage') }}
       </Button>
       <Button
         variant="ghost"
@@ -29,7 +29,7 @@
         :disabled="!canClearSelection || loading"
         @click="$emit('clearSelection')"
       >
-        {{ legacyT('清空选择') }}
+        {{ t('ui.clearSelection') }}
       </Button>
       <Button
         v-if="canOperateAdmin"
@@ -38,7 +38,7 @@
         :disabled="(selectedCount === 0 && groupCount === 0) || loading"
         @click="$emit('openBatchDialog')"
       >
-        {{ legacyT('批量操作') }}
+        {{ t('ui.batchActions') }}
       </Button>
     </div>
   </div>
@@ -71,10 +71,10 @@ const emit = defineEmits<{
   openBatchDialog: []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const selectionSummary = computed(() => {
-  return legacyT(`匹配 ${props.filteredUserCount} 个，当前页 ${props.currentPageCount} 个，已选 ${props.selectedCount} 个`)
+  return t('ui.matchedValueItemsCurrentPageValueItemsSelectedValueItems', { count: props.filteredUserCount, count2: props.currentPageCount, count3: props.selectedCount })
 })
 
 function handleToggleSelectFiltered(value: boolean | 'indeterminate') {

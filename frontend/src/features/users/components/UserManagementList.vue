@@ -13,13 +13,13 @@
               />
             </TableHead>
             <TableHead class="w-[260px] h-12 font-semibold">
-              {{ legacyT('用户信息') }}
+              {{ t('ui.userInformation') }}
             </TableHead>
             <TableHead class="w-[240px] h-12 font-semibold">
-              {{ legacyT('钱包') }}
+              {{ t('ui.wallet') }}
             </TableHead>
             <TableHead class="w-[170px] h-12 font-semibold">
-              {{ legacyT('统计/限速') }}
+              {{ t('ui.statsRateLimit') }}
             </TableHead>
             <SortableTableHead
               class="w-[110px] h-12 font-semibold"
@@ -27,16 +27,16 @@
               :active-key="sortBy"
               :direction="sortOrder"
               default-direction="desc"
-              :title="legacyT('按创建时间排序')"
+              :title="t('ui.sortByCreatedTime')"
               @sort="handleSort"
             >
-              {{ legacyT('创建时间') }}
+              {{ t('ui.createdAt') }}
             </SortableTableHead>
             <TableHead class="w-[180px] h-12 font-semibold">
-              {{ legacyT('状态') }}
+              {{ t('ui.status6320b4a') }}
             </TableHead>
             <TableHead class="w-[260px] h-12 font-semibold text-center">
-              {{ legacyT('操作') }}
+              {{ t('ui.actionsed31fbb') }}
             </TableHead>
           </TableRow>
         </TableHeader>
@@ -136,7 +136,7 @@ const emit = defineEmits<{
   sort: [payload: { key: string; direction: AdminUserSortOrder }]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const isHeaderCheckboxDisabled = computed(() => props.rows.length === 0 || props.selectAllFiltered || props.loading)
 

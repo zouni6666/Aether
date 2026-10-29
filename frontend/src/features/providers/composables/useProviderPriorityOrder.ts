@@ -24,7 +24,7 @@ export function useProviderPriorityOrder<Provider extends SortableProvider>(
     move: (providerId: string, targetId: string) => void
   },
 ) {
-  const { legacyT } = useI18n()
+  const { t } = useI18n()
   const draggingProviderId = ref<string | null>(null)
   const dropTargetId = ref<string | null>(null)
   const pointerPosition = ref({ clientX: 0, clientY: 0 })
@@ -43,7 +43,7 @@ export function useProviderPriorityOrder<Provider extends SortableProvider>(
   function moveProvider(providerId: string, targetId: string) {
     if (scheduling.disabled()) return
     scheduling.move(providerId, targetId)
-    announcement.value = legacyT('调度顺序已调整，保存后生效')
+    announcement.value = t('ui.schedulingOrderUpdatedChangesTakeEffectAfterSaving')
   }
 
   function updateDropTarget() {

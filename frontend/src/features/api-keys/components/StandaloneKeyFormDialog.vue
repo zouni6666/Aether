@@ -21,10 +21,10 @@
           </div>
           <div class="flex-1 min-w-0">
             <h3 class="text-lg font-semibold text-foreground leading-tight">
-              {{ isEditMode ? '编辑独立余额 API Key' : '创建独立余额 API Key' }}
+              {{ isEditMode ? t('ui.editStandaloneBalanceApiKey') : t('ui.createStandaloneBalanceApiKey') }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ isEditMode ? '修改密钥名称、有效期和访问限制' : '用于非注册用户调用接口，可设置初始余额或无限制额度' }}
+              {{ isEditMode ? t('ui.editTheKeyNameExpirationAndAccessRestrictions') : t('ui.provideApiAccessWithoutRegistrationWithAnInitialBalanceOr') }}
             </p>
           </div>
         </div>
@@ -35,7 +35,7 @@
       <div class="space-y-5">
         <section class="space-y-4">
           <div class="flex items-center gap-2 border-b border-border/60 pb-2">
-            <span class="text-sm font-medium">基础设置</span>
+            <span class="text-sm font-medium">{{ t('ui.basicSettings') }}</span>
           </div>
 
           <div class="grid gap-4 md:grid-cols-2">
@@ -43,18 +43,18 @@
               <Label
                 for="form-name"
                 class="text-sm font-medium"
-              >密钥名称</Label>
+              >{{ t('ui.keyName') }}</Label>
               <Input
                 id="form-name"
                 v-model="form.name"
                 type="text"
-                placeholder="例如: 用户A专用"
+                :placeholder="t('ui.eGDedicatedKeyForUserA')"
                 class="h-10"
               />
             </div>
 
             <div class="space-y-2">
-              <Label class="text-sm font-medium">额度</Label>
+              <Label class="text-sm font-medium">{{ t('poolQuota.claudeCode.unknownWindow') }}</Label>
               <div class="flex items-center gap-3">
                 <div class="min-w-0 flex-1">
                   <Input
@@ -64,7 +64,7 @@
                     type="number"
                     step="0.01"
                     min="0.01"
-                    placeholder="初始额度 (USD)"
+                    :placeholder="t('ui.initialQuotaUsd')"
                     class="h-10"
                     @update:model-value="(v) => form.initial_balance_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
                   />
@@ -83,7 +83,7 @@
                 v-if="isEditMode"
                 class="text-xs text-muted-foreground"
               >
-                {{ form.unlimited_balance ? '该 Key 当前使用独立无限额度。' : '该 Key 当前按独立钱包余额限制；增减金额请在列表页使用“资金”操作。' }}
+                {{ form.unlimited_balance ? t('ui.thisKeyCurrentlyHasUnlimitedStandaloneQuota') : t('ui.thisKeyIsLimitedByItsStandaloneWalletBalanceUse') }}
               </p>
             </div>
 
@@ -91,7 +91,7 @@
               <Label
                 for="form-expires-at"
                 class="text-sm font-medium"
-              >有效期</Label>
+              >{{ t('ui.validity') }}</Label>
               <div class="flex items-center gap-2">
                 <div class="relative min-w-0 flex-1">
                   <Input
@@ -100,14 +100,14 @@
                     type="date"
                     :min="minExpiryDate"
                     class="h-10 pr-8"
-                    :placeholder="form.expires_at ? '' : '永不过期'"
+                    :placeholder="form.expires_at ? '' : t('ui.neverExpires')"
                     @update:model-value="(v) => form.expires_at = v || undefined"
                   />
                   <button
                     v-if="form.expires_at"
                     type="button"
                     class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    title="清空（永不过期）"
+                    :title="t('ui.clearNeverExpires')"
                     @click="clearExpiryDate"
                   >
                     <X class="h-4 w-4" />
@@ -122,12 +122,10 @@
                     type="checkbox"
                     class="h-3.5 w-3.5 rounded border-gray-300 cursor-pointer"
                     :disabled="!form.expires_at"
-                  >
-                  到期删除
-                </label>
+                  > {{ t('ui.deleteOnExpiration') }} </label>
               </div>
               <p class="text-xs text-muted-foreground">
-                {{ form.expires_at ? '到期后' + (form.auto_delete_on_expiry ? '自动删除' : '仅禁用') + '（当天 23:59 失效）' : '留空表示永不过期' }}
+                {{ form.expires_at ? t('ui.afterExpirationa8ed195') + (form.auto_delete_on_expiry ? t('ui.deleteAutomatically') : t('ui.disableOnly')) + t('ui.expiresAt2359OnThatDay') : t('ui.leaveEmptyForNoExpiration') }}
               </p>
             </div>
           </div>
@@ -136,14 +134,14 @@
         <section>
           <div class="rounded-lg border border-border bg-muted/30 px-4 py-3">
             <div class="flex items-center justify-between gap-3">
-              <Label class="text-sm font-medium">敏感信息保护</Label>
+              <Label class="text-sm font-medium">{{ t('ui.sensitiveInformationProtection') }}</Label>
               <Switch v-model="form.chat_pii_redaction_enabled" />
             </div>
             <div
               v-if="form.chat_pii_redaction_enabled"
               class="mt-3 flex items-center justify-between gap-3 border-t border-border/60 pt-3"
             >
-              <Label class="text-sm font-medium">占位符说明</Label>
+              <Label class="text-sm font-medium">{{ t('ui.placeholderNotes') }}</Label>
               <Switch v-model="form.chat_pii_redaction_placeholder_notice" />
             </div>
           </div>
@@ -158,9 +156,9 @@
               type="button"
               class="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50"
             >
-              <span class="text-sm font-medium">访问限制</span>
+              <span class="text-sm font-medium">{{ t('guide.nav.strategy.rateLimit') }}</span>
               <span class="flex items-center gap-1.5 text-xs text-muted-foreground">
-                {{ accessRestrictionsExpanded ? '收起' : '展开' }}
+                {{ accessRestrictionsExpanded ? t('ui.collapse') : t('ui.expand') }}
                 <ChevronDown
                   class="h-4 w-4 transition-transform"
                   :class="accessRestrictionsExpanded ? 'rotate-180' : ''"
@@ -173,7 +171,7 @@
             <div class="grid gap-y-4 border-t border-border px-4 py-4">
               <!-- 提供商 -->
               <div class="space-y-2">
-                <Label class="text-sm font-medium">允许的提供商</Label>
+                <Label class="text-sm font-medium">{{ t('ui.allowedProviders') }}</Label>
                 <div class="flex items-center gap-3">
                   <div class="flex-1 min-w-0">
                     <MultiSelect
@@ -182,10 +180,10 @@
                       :search-threshold="0"
                       teleport
                       :disabled="form.provider_unrestricted"
-                      :placeholder="form.provider_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                      empty-text="暂无可用提供商"
-                      no-results-text="未找到匹配的提供商"
-                      search-placeholder="搜索提供商名称..."
+                      :placeholder="form.provider_unrestricted ? t('ui.noRestriction') : t('ui.noneSelectedAllDisabled')"
+                      :empty-text="t('ui.noProvidersAvailable')"
+                      :no-results-text="t('ui.noMatchingProviders')"
+                      :search-placeholder="t('ui.searchProviderNames')"
                     />
                   </div>
                   <Switch
@@ -197,7 +195,7 @@
 
               <!-- 端点 -->
               <div class="space-y-2">
-                <Label class="text-sm font-medium">允许的端点</Label>
+                <Label class="text-sm font-medium">{{ t('ui.allowedEndpoints') }}</Label>
                 <div class="flex items-center gap-3">
                   <div class="flex-1 min-w-0">
                     <MultiSelect
@@ -206,10 +204,10 @@
                       :search-threshold="0"
                       teleport
                       :disabled="form.api_format_unrestricted"
-                      :placeholder="form.api_format_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                      empty-text="暂无可用端点"
-                      no-results-text="未找到匹配的端点"
-                      search-placeholder="搜索端点..."
+                      :placeholder="form.api_format_unrestricted ? t('ui.noRestriction') : t('ui.noneSelectedAllDisabled')"
+                      :empty-text="t('ui.noEndpointsAvailable')"
+                      :no-results-text="t('ui.noMatchingEndpoints')"
+                      :search-placeholder="t('ui.searchEndpoints')"
                     />
                   </div>
                   <Switch
@@ -221,7 +219,7 @@
 
               <!-- 模型 -->
               <div class="space-y-2">
-                <Label class="text-sm font-medium">允许的模型</Label>
+                <Label class="text-sm font-medium">{{ t('ui.allowedModels879ffef') }}</Label>
                 <div class="flex items-center gap-3">
                   <div class="flex-1 min-w-0">
                     <MultiSelect
@@ -230,10 +228,10 @@
                       :search-threshold="0"
                       teleport
                       :disabled="form.model_unrestricted"
-                      :placeholder="form.model_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                      empty-text="暂无可用模型"
-                      no-results-text="未找到匹配的模型"
-                      search-placeholder="输入模型名搜索..."
+                      :placeholder="form.model_unrestricted ? t('ui.noRestriction') : t('ui.noneSelectedAllDisabled')"
+                      :empty-text="t('ui.noModelsAvailable')"
+                      :no-results-text="t('ui.noMatchingModels')"
+                      :search-placeholder="t('ui.searchModelNames')"
                     />
                   </div>
                   <Switch
@@ -247,7 +245,7 @@
                 <Label
                   for="form-rate-limit"
                   class="text-sm font-medium"
-                >速率限制 (请求/分钟)</Label>
+                >{{ t('ui.rateLimitRequestsMin') }}</Label>
                 <div class="flex items-center gap-3">
                   <div class="flex-1 min-w-0">
                     <Input
@@ -257,14 +255,14 @@
                       type="number"
                       min="0"
                       max="10000"
-                      placeholder="0 = 不限速"
+                      :placeholder="t('ui.0NoRateLimit')"
                       class="h-10"
                       @update:model-value="(v) => form.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
                     />
                     <span
                       v-else
                       class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-                    >跟随系统</span>
+                    >{{ t('theme.system') }}</span>
                   </div>
                   <Switch
                     v-model="form.rate_limit_inherited"
@@ -277,7 +275,7 @@
                 <Label
                   for="form-concurrent-limit"
                   class="text-sm font-medium"
-                >并发限制</Label>
+                >{{ t('ui.concurrencyLimit') }}</Label>
                 <div class="flex items-center gap-3">
                   <div class="flex-1 min-w-0">
                     <Input
@@ -287,14 +285,14 @@
                       type="number"
                       min="0"
                       max="10000"
-                      placeholder="0 = 不限制"
+                      :placeholder="t('ui.0Unlimited')"
                       class="h-10"
                       @update:model-value="(v) => form.concurrent_limit = parseNumberInput(v, { min: 0, max: 10000 })"
                     />
                     <span
                       v-else
                       class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-                    >不限制</span>
+                    >{{ t('ui.noRestriction') }}</span>
                   </div>
                   <Switch
                     v-model="form.concurrent_limit_inherited"
@@ -302,7 +300,7 @@
                   />
                 </div>
                 <p class="text-xs text-muted-foreground">
-                  留空表示不限制，填 0 也表示不限制并发
+                  {{ t('ui.leaveEmptyOrEnter0ForUnlimitedConcurrency') }}
                 </p>
               </div>
 
@@ -310,15 +308,15 @@
                 <Label
                   for="form-ip-rules"
                   class="text-sm font-medium"
-                >IP 限制</Label>
+                >{{ t('ui.ipRestrictions477036d') }}</Label>
                 <Input
                   id="form-ip-rules"
                   v-model="form.ip_rules_text"
                   class="h-10"
-                  placeholder="例如：203.0.113.10, 10.0.0.0/24"
+                  :placeholder="t('ui.eG203011310100009507553')"
                 />
                 <p class="text-xs text-muted-foreground">
-                  留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝
+                  {{ t('ui.leaveEmptyForNoRestrictionSupportsIpCidrIpv4Wildcards') }}
                 </p>
               </div>
             </div>
@@ -334,20 +332,22 @@
         class="h-10 px-5"
         @click="handleCancel"
       >
-        取消
+        {{ t('common.cancel') }}
       </Button>
       <Button
         :disabled="saving"
         class="h-10 px-5"
         @click="handleSubmit"
       >
-        {{ saving ? (isEditMode ? '更新中...' : '创建中...') : (isEditMode ? '更新' : '创建') }}
+        {{ saving ? (isEditMode ? t('ui.updating') : t('ui.creating')) : (isEditMode ? t('ui.update') : t('ui.create')) }}
       </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch } from 'vue'
 import {
   Dialog,
@@ -423,6 +423,8 @@ const emit = defineEmits<{
   submit: [data: StandaloneKeyFormData]
 }>()
 
+const { t } = useI18n()
+
 const isOpen = computed(() => props.open)
 const saving = ref(false)
 const accessRestrictionsExpanded = ref(false)
@@ -491,13 +493,13 @@ const minExpiryDate = computed(() => {
 
 const balanceDisplayText = computed(() => {
   if (form.value.unlimited_balance) {
-    return '独立无限额度'
+    return t('ui.unlimitedStandaloneQuota')
   }
   if (isEditMode.value) {
     const currentBalance = form.value.current_balance_usd ?? form.value.initial_balance_usd ?? 0
     return `当前独立钱包余额 $${currentBalance.toFixed(2)}`
   }
-  return '按独立钱包余额限制'
+  return t('ui.limitedByStandaloneWalletBalance')
 })
 
 function resetForm() {
@@ -648,4 +650,5 @@ watch(
 defineExpose({
   setSaving
 })
+
 </script>

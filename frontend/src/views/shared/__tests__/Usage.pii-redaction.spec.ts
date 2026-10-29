@@ -28,24 +28,30 @@ vi.mock('@/api/me', () => ({
   },
 }))
 vi.mock('@/api/users', () => ({ usersApi: { getAllUsers: vi.fn().mockResolvedValue([]) } }))
-vi.mock('@/features/usage/composables', () => ({
-  useUsageData: mocks.useUsageData,
-  getDateRangeFromPeriod: () => ({ preset: 'today' }),
-}))
-vi.mock('@/features/usage/components', async () => {
+vi.mock('@/features/usage/composables/useUsageData', () => ({ useUsageData: mocks.useUsageData }))
+vi.mock('@/features/usage/composables/useDateRange', () => ({ getDateRangeFromPeriod: () => ({ preset: 'today' }) }))
+const emptyComponent = vi.hoisted(() => async () => {
+  const { defineComponent } = await import('vue')
+  return { default: defineComponent({ setup: () => () => null }) }
+})
+vi.mock('@/features/usage/components/UsageModelTable.vue', emptyComponent)
+vi.mock('@/features/usage/components/UsageProviderTable.vue', emptyComponent)
+vi.mock('@/features/usage/components/UsageApiFormatTable.vue', emptyComponent)
+vi.mock('@/features/usage/components/ActivityHeatmapCard.vue', emptyComponent)
+vi.mock('@/features/usage/components/IntervalTimelineCard.vue', emptyComponent)
+vi.mock('@/features/usage/components/UsageRecordsTable.vue', async () => {
   const { defineComponent, h } = await import('vue')
-  const Empty = defineComponent({ setup: () => () => null })
   return {
-    UsageModelTable: Empty,
-    UsageProviderTable: Empty,
-    UsageApiFormatTable: Empty,
-    ActivityHeatmapCard: Empty,
-    IntervalTimelineCard: Empty,
-    UsageRecordsTable: defineComponent({
+    default: defineComponent({
       props: { records: { type: Array as PropType<UsageRecord[]>, required: true } },
       setup: props => () => h('div', { 'data-pii-record': '' }, String(props.records[0]?.chat_pii_redaction)),
     }),
-    RequestDetailDrawer: defineComponent({
+  }
+})
+vi.mock('@/features/usage/components/RequestDetailDrawer.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    default: defineComponent({
       emits: ['requestState'],
       setup: (_, { emit }) => () => h('button', {
         'data-detail-update': '',

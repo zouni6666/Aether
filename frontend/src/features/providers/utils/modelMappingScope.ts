@@ -1,3 +1,5 @@
+
+import { translate as t } from '@/i18n'
 import {
   API_FORMATS,
   formatApiFormat,
@@ -35,9 +37,9 @@ export interface ModelMappingEndpoint {
 }
 
 const DEFAULT_REQUEST_SCOPE_LABELS: ModelMappingRequestScopeLabels = {
-  allRequests: '所有请求',
-  sessionCompactionOnly: '仅会话压缩',
-  customOperations: operations => `仅匹配：${operations.join(', ')}`,
+  get allRequests() { return t('providers.modelMapping.scope.allRequests') },
+  get sessionCompactionOnly() { return t('providers.modelMapping.scope.sessionCompactionOnly') },
+  customOperations: operations => t('providers.modelMapping.scope.customOperations', { operations: String(operations.join(', ')) }),
 }
 
 export function normalizeModelMappingOperations(
@@ -148,7 +150,7 @@ export function formatModelMappingEndpointLabel(
   const discriminator = sameFormatCount > 1
     ? formatModelMappingEndpointDiscriminator(endpoint)
     : ''
-  const status = endpoint.is_active ? '' : '（停用）'
+  const status = endpoint.is_active ? '' : t('providers.migration.disabled69ee44')
   return `${format}${discriminator ? ` · ${discriminator}` : ''}${status}`
 }
 

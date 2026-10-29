@@ -5,7 +5,7 @@
       <div class="flex items-center justify-between gap-3">
         <div class="flex items-center gap-2 min-w-0">
           <h3 class="text-sm font-semibold flex items-center gap-2">
-            模型列表
+            {{ t('ui.modelList') }}
           </h3>
         </div>
         <div class="flex items-center gap-2 shrink-0">
@@ -15,8 +15,7 @@
             class="h-8"
             @click="openBatchAssignDialog"
           >
-            <Layers class="w-3.5 h-3.5 mr-1.5" />
-            关联模型
+            <Layers class="w-3.5 h-3.5 mr-1.5" /> {{ t('guide.nav.concepts.linkModel') }}
           </Button>
         </div>
       </div>
@@ -69,7 +68,7 @@
                     <span class="font-mono truncate">{{ model.provider_model_name }}</span>
                     <button
                       class="p-0.5 hover:bg-muted rounded transition-colors shrink-0"
-                      title="复制模型 ID"
+                      :title="t('ui.copyModelId')"
                       @click.stop="copyModelId(model.provider_model_name)"
                     >
                       <Copy class="w-3 h-3" />
@@ -85,34 +84,33 @@
               >
                 <!-- 按 Token 计费 -->
                 <template v-if="hasTokenPricing(model)">
-                  <span class="text-muted-foreground text-right">入/出:</span>
+                  <span class="text-muted-foreground text-right">{{ t('ui.inOut') }}</span>
                   <span class="font-mono font-semibold">
                     ${{ formatPrice(model.effective_input_price) }}/${{ formatPrice(model.effective_output_price) }}
                   </span>
                 </template>
                 <template v-if="getEffectiveCachePrice(model, 'creation') > 0 || getEffectiveCachePrice(model, 'read') > 0">
-                  <span class="text-muted-foreground text-right">{{ get1hCachePrice(model) > 0 ? '5min 缓存:' : '缓存:' }}</span>
+                  <span class="text-muted-foreground text-right">{{ get1hCachePrice(model) > 0 ? t('ui.5MinuteCache') : t('ui.cache0df2353') }}</span>
                   <span class="font-mono font-semibold">
                     ${{ formatPrice(getEffectiveCachePrice(model, 'creation')) }}/${{ formatPrice(getEffectiveCachePrice(model, 'read')) }}
                   </span>
                 </template>
                 <!-- 1h 缓存价格 -->
                 <template v-if="get1hCachePrice(model) > 0">
-                  <span class="text-muted-foreground text-right">1h 缓存创建:</span>
+                  <span class="text-muted-foreground text-right">{{ t('ui.1HourCacheWrited3ac130') }}</span>
                   <span class="font-mono font-semibold">
                     ${{ formatPrice(get1hCachePrice(model)) }}
                   </span>
                 </template>
                 <!-- 按次计费 -->
                 <template v-if="hasRequestPricing(model)">
-                  <span class="text-muted-foreground text-right">按次:</span>
+                  <span class="text-muted-foreground text-right">{{ t('ui.perRequest5b310fa') }}</span>
                   <span class="font-mono font-semibold">
-                    ${{ formatPrice(model.effective_price_per_request ?? model.price_per_request) }}/次
-                  </span>
+                    ${{ formatPrice(model.effective_price_per_request ?? model.price_per_request) }}{{ t('ui.requestad9c0d7') }} </span>
                 </template>
                 <!-- 视频费用计费 -->
                 <template v-if="hasVideoPricing(model)">
-                  <span class="text-muted-foreground text-right">视频:</span>
+                  <span class="text-muted-foreground text-right">{{ t('ui.video61a56bb') }}</span>
                   <span
                     class="font-mono font-semibold"
                     :title="getVideoPricingTooltip(model)"
@@ -133,7 +131,7 @@
                   variant="ghost"
                   size="icon"
                   class="h-8 w-8"
-                  title="测试模型"
+                  :title="t('ui.testModel')"
                   :disabled="modelTest.testing.value && pendingTestModel?.id === model.id"
                   @click="testModelConnection(model)"
                 >
@@ -150,7 +148,7 @@
                   variant="ghost"
                   size="icon"
                   class="h-8 w-8"
-                  title="编辑"
+                  :title="t('ui.edit0518365')"
                   @click="editModel(model)"
                 >
                   <Edit class="w-3.5 h-3.5" />
@@ -160,7 +158,7 @@
                   size="icon"
                   class="h-8 w-8"
                   :disabled="togglingModelId === model.id"
-                  :title="model.is_active ? '点击停用' : '点击启用'"
+                  :title="model.is_active ? t('ui.clickToDisable') : t('ui.clickToEnable')"
                   @click="toggleModelActive(model)"
                 >
                   <Power class="w-3.5 h-3.5" />
@@ -175,9 +173,7 @@
         v-if="shouldPaginateModels"
         class="px-4 py-2 border-t border-border/40 flex items-center justify-between text-xs text-muted-foreground"
       >
-        <span>
-          共 {{ sortedModels.length }} 个模型
-        </span>
+        <span> {{ t('ui.total76e547a') }} {{ sortedModels.length }} {{ t('ui.models') }} </span>
         <div class="flex items-center gap-1.5">
           <Button
             variant="ghost"
@@ -209,10 +205,10 @@
     >
       <Box class="w-12 h-12 mx-auto mb-3 opacity-50" />
       <p class="text-sm">
-        暂无模型
+        {{ t('ui.noModels') }}
       </p>
       <p class="text-xs mt-1">
-        请前往"模型目录"页面添加模型
+        {{ t('ui.addModelsFromTheModelCatalog') }}
       </p>
     </div>
   </Card>
@@ -254,6 +250,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch } from 'vue'
 import { useSmartPagination } from '@/composables/useSmartPagination'
 import { useModelTest } from '@/composables/useModelTest'
@@ -299,6 +297,8 @@ const emit = defineEmits<{
   'batchAssign': []
   'refresh': []
 }>()
+
+const { t } = useI18n()
 
 const { error: showError, success: showSuccess } = useToast()
 const { copyToClipboard } = useClipboard()
@@ -465,9 +465,9 @@ function getVideoPricingDisplay(model: Model): string {
   if (entries.length === 0) return ''
   // 获取最低分辨率和价格
   const [firstRes, firstPrice] = entries[0]
-  const priceStr = `${firstRes} $${(firstPrice as number).toFixed(2)}/s`
+  const priceStr = `${firstRes} ${(firstPrice as number).toFixed(2)}/s`
   if (entries.length > 1) {
-    return `${priceStr} [${entries.length}种]`
+    return t('providers.migration.typesd5779c', { value: String(priceStr), value_2: String(entries.length) })
   }
   return priceStr
 }
@@ -478,7 +478,7 @@ function getVideoPricingTooltip(model: Model): string {
     || model.config?.billing?.video?.price_per_second_by_resolution
   if (!priceByResolution || typeof priceByResolution !== 'object') return ''
   const entries = sortResolutionEntries(Object.entries(priceByResolution))
-  return entries.map(([res, price]) => `${res}: $${(price as number).toFixed(4)}/s`).join('\n')
+  return entries.map(([res, price]) => `${res}: ${(price as number).toFixed(4)}/s`).join('\n')
 }
 
 // 获取状态指示灯样式
@@ -498,12 +498,12 @@ function getStatusIndicatorClass(model: Model): string {
 // 获取状态提示文本
 function getStatusTitle(model: Model): string {
   if (!model.is_active) {
-    return '停用'
+    return t('ui.disable4e6fd0e')
   }
   if (model.is_available) {
-    return '活跃且可用'
+    return t('ui.activeAndAvailable')
   }
-  return '活跃但不可用'
+  return t('ui.activeButUnavailable')
 }
 
 // 编辑模型
@@ -525,9 +525,9 @@ async function toggleModelActive(model: Model) {
     const newStatus = !model.is_active
     await updateModel(props.provider.id, model.id, { is_active: newStatus })
     model.is_active = newStatus
-    showSuccess(newStatus ? '模型已启用' : '模型已停用')
+    showSuccess(newStatus ? t('ui.modelEnabled') : t('ui.modelDisabledda3c032'))
   } catch (err: unknown) {
-    showError(parseApiError(err, '操作失败'), '错误')
+    showError(parseApiError(err, t('ui.operationFailed')), t('ui.error'))
   } finally {
     togglingModelId.value = null
   }
@@ -578,19 +578,19 @@ async function handleStartPendingTest() {
 
   const endpoint = selectedTestEndpoint.value || testableEndpoints.value[0]
   if (!endpoint) {
-    showError('请选择要测试的端点')
+    showError(t('ui.selectAnEndpointToTest'))
     return
   }
 
   const { value: requestHeaders, error: requestHeadersError } = parsedTestRequestHeaders.value
   if (!requestHeaders || requestHeadersError) {
-    showError(`测试请求头无效: ${requestHeadersError || '无效 JSON'}`)
+    showError(t('providers.migration.invalidTestRequestHeaders73f57d', { value: String(requestHeadersError || t('ui.invalidJson')) }))
     return
   }
 
   const { value: requestBody, error } = parsedTestRequestBody.value
   if (!requestBody || error) {
-    showError(`测试请求体无效: ${error || '无效 JSON'}`)
+    showError(t('providers.migration.invalidTestRequestBody4d0d50', { value: String(error || t('ui.invalidJson')) }))
     return
   }
 
@@ -623,7 +623,7 @@ async function testModelConnection(model: Model) {
   if (modelTest.testing.value) return
 
   if (testableEndpoints.value.length === 0) {
-    showError('暂无可用于测试的端点')
+    showError(t('providers.migration.noEndpointsAvailableForTesting9ec423'))
     return
   }
 
@@ -669,7 +669,7 @@ async function ensureModelTestKeysLoaded() {
     modelTestKeysLoadedProviderId.value = props.provider.id
     pruneSelectedTestKeyIds()
   } catch (err: unknown) {
-    showError(parseApiError(err, '加载测试 Key 失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToLoadTestKeys')), t('ui.error'))
   } finally {
     loadingModelTestKeys.value = false
   }
@@ -760,4 +760,5 @@ watch(
 defineExpose({
   reload: refresh
 })
+
 </script>

@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import { ref, onUnmounted } from 'vue'
 
 /**
@@ -34,7 +35,7 @@ export function useCountdownTimer() {
  */
 export function formatCountdown(diffMs: number): string {
   const totalSeconds = Math.ceil(diffMs / 1000)
-  if (totalSeconds <= 0) return '探测中'
+  if (totalSeconds <= 0) return translate('ui.probing')
 
   const hours = Math.floor(totalSeconds / 3600)
   const minutes = Math.floor((totalSeconds % 3600) / 60)
@@ -65,7 +66,7 @@ export function getProbeCountdown(nextProbeAt: string | null | undefined, _tick:
   if (diffMs > 0) {
     return formatCountdown(diffMs)
   }
-  return '探测中'
+  return translate('ui.probing')
 }
 
 /**
@@ -121,7 +122,7 @@ export function getCodexResetCountdown(
   }
 
   if (remaining <= 0) {
-    return { text: '已重置', isUrgent: false, isCritical: false, isExpired: true }
+    return { get text() { return translate('ui.resetd2cd2e2') }, isUrgent: false, isCritical: false, isExpired: true }
   }
 
   const total = Math.floor(remaining)
@@ -133,7 +134,7 @@ export function getCodexResetCountdown(
 
   let text: string
   if (days > 0) {
-    text = `${days}天 ${hours}:${pad(minutes)}:${pad(seconds)}`
+    text = translate('time.countdownDays', { days, time: `${hours}:${pad(minutes)}:${pad(seconds)}` })
   } else if (hours > 0) {
     text = `${hours}:${pad(minutes)}:${pad(seconds)}`
   } else {
@@ -152,6 +153,7 @@ export function getCodexResetCountdown(
  * OAuth Token 状态信息
  */
 export interface OAuthStatusInfo {
+  kind?: 'missing_refresh_token' | 'unknown_expiration'
   text: string
   isExpired: boolean
   isExpiringSoon: boolean
@@ -183,7 +185,7 @@ export function getOAuthExpiresCountdown(
   // 优先检查失效状态（失效比过期更严重）
   if (invalidAt != null || normalizedInvalidReason) {
     return {
-      text: '已失效',
+      get text() { return translate('ui.invalid') },
       isExpired: false,
       isExpiringSoon: false,
       isInvalid: true,
@@ -197,7 +199,7 @@ export function getOAuthExpiresCountdown(
   const diffSeconds = expiresAt - now
 
   if (diffSeconds <= 0) {
-    return { text: '已过期', isExpired: true, isExpiringSoon: false, isInvalid: false }
+    return { get text() { return translate('ui.expired') }, isExpired: true, isExpiringSoon: false, isInvalid: false }
   }
 
   // 24 小时内过期视为即将过期
@@ -210,11 +212,11 @@ export function getOAuthExpiresCountdown(
 
   let text: string
   if (days > 0) {
-    text = `${days}天${hours}时`
+    text = translate('time.oauthDaysHours', { days, hours })
   } else if (hours > 0) {
-    text = `${hours}时${minutes}分`
+    text = translate('time.oauthHoursMinutes', { hours, minutes })
   } else {
-    text = `${minutes}分钟`
+    text = translate('time.oauthMinutes', { minutes })
   }
 
   return { text, isExpired: false, isExpiringSoon, isInvalid: false }

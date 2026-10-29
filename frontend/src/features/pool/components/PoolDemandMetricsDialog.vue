@@ -10,17 +10,17 @@
         <div class="flex items-start gap-3">
           <div class="flex-1 min-w-0">
             <h3 class="text-lg font-semibold text-foreground leading-tight">
-              自适应热池指标
+              {{ t('ui.adaptiveWarmPoolMetrics') }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ providerName || '当前 Provider' }}
+              {{ providerName || t('ui.currentProvider') }}
             </p>
           </div>
           <Button
             variant="ghost"
             size="icon"
             class="h-8 w-8 shrink-0"
-            title="关闭"
+            :title="t('ui.close')"
             @click="emit('update:modelValue', false)"
           >
             <X class="h-4 w-4" />
@@ -52,7 +52,7 @@
         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 class="text-sm font-semibold">
-              最近采样
+              {{ t('ui.latestSample') }}
             </h3>
             <p class="text-xs text-muted-foreground">
               {{ sampleWindowText }}
@@ -77,7 +77,7 @@
           v-if="samples.length === 0"
           class="mt-4 flex h-56 items-center justify-center rounded-lg border border-dashed border-border/70 bg-muted/20 text-sm text-muted-foreground"
         >
-          暂无采样
+          {{ t('ui.noSamples') }}
         </div>
 
         <div
@@ -89,7 +89,7 @@
             :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
             preserveAspectRatio="none"
             role="img"
-            aria-label="自适应热池趋势"
+            :aria-label="t('ui.adaptiveWarmPoolTrends')"
           >
             <line
               v-for="tick in yTicks"
@@ -155,7 +155,7 @@
 
         <div class="mt-3 flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
           <span>{{ firstSampleTime }}</span>
-          <span>峰值 {{ maxChartValueText }}</span>
+          <span>{{ t('ui.peak') }} {{ maxChartValueText }}</span>
           <span>{{ lastSampleTime }}</span>
         </div>
       </section>
@@ -164,6 +164,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed } from 'vue'
 import { Button, Dialog } from '@/components/ui'
 import { X } from 'lucide-vue-next'
@@ -187,6 +189,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
 }>()
+
+const { t } = useI18n()
 
 const chartWidth = 640
 const chartHeight = 220
@@ -269,31 +273,31 @@ const summaryCards = computed(() => {
   const sample = latest.value
   return [
     {
-      label: '热池',
+      get label() { return t('ui.warmPool') },
       value: sample ? `${sample.hotCount} / ${sample.desiredHot}` : '0 / 0',
-      hint: '当前 / 目标',
+      get hint() { return t('ui.currentTarget') },
     },
     {
       label: 'in-flight',
       value: sample ? formatMetric(sample.inFlight) : '0',
-      hint: '正在执行',
+      get hint() { return t('ui.running8f38fd9') },
     },
     {
       label: 'EMA',
       value: sample ? formatMetric(sample.emaInFlight, 1) : '0.0',
-      hint: '平滑热度',
+      get hint() { return t('ui.smoothedDemand') },
     },
     {
       label: 'Burst',
-      value: sample?.burstPending ? '补热中' : '空闲',
-      hint: '异步补位',
+      value: sample?.burstPending ? t('ui.warmingUp') : t('ui.idle'),
+      get hint() { return t('ui.asynchronousReplenishment') },
     },
   ]
 })
 
 const legendItems = [
-  { label: '目标', dotClass: 'bg-indigo-500' },
-  { label: '热池', dotClass: 'bg-emerald-500' },
+  { get label() { return t('ui.target') }, dotClass: 'bg-indigo-500' },
+  { get label() { return t('ui.warmPool') }, dotClass: 'bg-emerald-500' },
   { label: 'in-flight', dotClass: 'bg-amber-500' },
   { label: 'EMA', dotClass: 'bg-sky-500' },
   { label: 'Burst', dotClass: 'bg-red-500' },
@@ -301,11 +305,12 @@ const legendItems = [
 
 const sampleWindowText = computed(() => {
   const count = props.samples.length
-  if (count === 0) return '等待下一次采样'
-  return `最近 ${count} 个采样点`
+  if (count === 0) return t('ui.waitingForTheNextSample')
+  return t('feedback.pool.recentSamples', { count })
 })
 
 const firstSampleTime = computed(() => formatSampleTime(props.samples[0]?.sampledAt))
 const lastSampleTime = computed(() => formatSampleTime(latest.value?.sampledAt))
 const maxChartValueText = computed(() => formatMetric(maxChartValue.value))
+
 </script>

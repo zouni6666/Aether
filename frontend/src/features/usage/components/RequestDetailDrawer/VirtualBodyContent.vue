@@ -27,7 +27,7 @@
         class="p-4 text-sm text-muted-foreground"
         role="status"
       >
-        {{ failed ? '正文视图加载失败' : '正在后台准备正文视图…' }}
+        {{ failed ? t('ui.failedToLoadBodyView') : t('ui.preparingBodyViewInTheBackground') }}
       </div>
     </div>
     <div
@@ -38,6 +38,8 @@
 </template>
 
 <script setup lang="ts" generic="Chunk extends { hasNext: boolean }">
+import { useI18n } from '@/i18n'
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type ComponentPublicInstance } from 'vue'
 
 const props = withDefaults(defineProps<{
@@ -45,6 +47,8 @@ const props = withDefaults(defineProps<{
   estimatedHeight?: number
 }>(), { estimatedHeight: 1000 })
 const emit = defineEmits<{ 'load-error': [error: unknown] }>()
+
+const { t } = useI18n()
 
 const viewport = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
@@ -199,6 +203,7 @@ onBeforeUnmount(() => {
 })
 
 defineExpose({ refresh })
+
 </script>
 
 <style scoped>

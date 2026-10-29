@@ -11,27 +11,27 @@
       <div class="space-y-2 rounded-lg border bg-muted/20 px-3 py-3">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <div class="text-xs font-medium text-foreground">
-            操作范围
+            {{ t('ui.actionScope') }}
           </div>
           <Badge
             variant="outline"
             class="text-[11px]"
           >
-            {{ selectAllFiltered ? '全选筛选结果' : '表格手动多选' }}
+            {{ selectAllFiltered ? t('ui.selectAllFilteredResults') : t('ui.selectedTableRows') }}
           </Badge>
         </div>
         <div class="text-sm text-foreground">
-          已选择 <span class="font-semibold tabular-nums">{{ selectedCount }}</span> 个账号
+          {{ t('ui.selected3f4ebc4') }} <span class="font-semibold tabular-nums">{{ selectedCount }}</span> {{ t('ui.accounts') }}
         </div>
         <div class="text-[11px] text-muted-foreground">
-          选择范围来自号池管理表格当前筛选条件
+          {{ t('ui.theScopeUsesTheCurrentFiltersInThePoolManagement') }}
         </div>
       </div>
 
       <div class="space-y-2 rounded-lg border bg-background px-3 py-3">
         <div>
           <div class="text-xs font-medium text-muted-foreground">
-            执行动作
+            {{ t('ui.action') }}
           </div>
           <div class="mt-1 text-sm font-semibold text-foreground">
             {{ selectedActionOption.label }}
@@ -46,7 +46,7 @@
           class="space-y-2 border-t border-border/60 pt-3"
         >
           <div class="text-[11px] text-muted-foreground">
-            选择要绑定的代理节点
+            {{ t('ui.selectAProxyNodeToAssign') }}
           </div>
           <ProxyNodeSelect
             :model-value="proxyNodeIdForAction"
@@ -63,17 +63,17 @@
         <div class="flex flex-wrap items-start justify-between gap-2">
           <div>
             <h3 class="text-sm font-semibold">
-              更多设置
+              {{ t('ui.moreSettings') }}
             </h3>
             <p class="text-[11px] text-muted-foreground">
-              仅更新已勾选字段，未勾选配置保持不变
+              {{ t('ui.updateOnlyCheckedFieldsOtherSettingsRemainUnchanged') }}
             </p>
           </div>
           <Badge
             variant="outline"
             class="tabular-nums"
           >
-            已选 {{ selectedSettingsCount }} 项
+            {{ t('ui.selected') }} {{ selectedSettingsCount }} {{ t('ui.items') }}
           </Badge>
         </div>
 
@@ -84,7 +84,7 @@
                 :checked="settingsSelection.internal_priority"
                 @update:checked="settingsSelection.internal_priority = $event === true"
               />
-              <Label class="text-xs">优先级</Label>
+              <Label class="text-xs">{{ t('ui.priority565d646') }}</Label>
             </div>
             <Input
               v-model.number="settingsDraft.internal_priority"
@@ -101,7 +101,7 @@
                 :checked="settingsSelection.rpm_limit"
                 @update:checked="settingsSelection.rpm_limit = $event === true"
               />
-              <Label class="text-xs">RPM 限制</Label>
+              <Label class="text-xs">{{ t('ui.rpmLimit50b7143') }}</Label>
             </div>
             <Input
               :model-value="settingsDraft.rpm_limit ?? ''"
@@ -109,7 +109,7 @@
               min="1"
               max="10000"
               class="h-9"
-              placeholder="留空为自适应"
+              :placeholder="t('ui.leaveEmptyForAdaptiveMode')"
               :disabled="!settingsSelection.rpm_limit"
               @update:model-value="settingsDraft.rpm_limit = parseNullableNumberInput($event, { min: 1, max: 10000 })"
             />
@@ -121,14 +121,14 @@
                 :checked="settingsSelection.concurrent_limit"
                 @update:checked="settingsSelection.concurrent_limit = $event === true"
               />
-              <Label class="text-xs">并发请求上限</Label>
+              <Label class="text-xs">{{ t('ui.concurrentRequestLimit') }}</Label>
             </div>
             <Input
               :model-value="settingsDraft.concurrent_limit ?? ''"
               type="number"
               min="0"
               class="h-9"
-              placeholder="留空为不限制"
+              :placeholder="t('ui.leaveEmptyForNoLimit')"
               :disabled="!settingsSelection.concurrent_limit"
               @update:model-value="settingsDraft.concurrent_limit = parseNullableNumberInput($event, { min: 0 })"
             />
@@ -140,7 +140,7 @@
                 :checked="settingsSelection.cache_ttl_minutes"
                 @update:checked="settingsSelection.cache_ttl_minutes = $event === true"
               />
-              <Label class="text-xs">缓存 TTL（分钟）</Label>
+              <Label class="text-xs">{{ t('ui.cacheTtlMinutes') }}</Label>
             </div>
             <Input
               :model-value="settingsDraft.cache_ttl_minutes"
@@ -159,7 +159,7 @@
                 :checked="settingsSelection.max_probe_interval_minutes"
                 @update:checked="settingsSelection.max_probe_interval_minutes = $event === true"
               />
-              <Label class="text-xs">熔断探测（分钟）</Label>
+              <Label class="text-xs">{{ t('ui.circuitBreakerProbeIntervalMinutes') }}</Label>
             </div>
             <Input
               :model-value="settingsDraft.max_probe_interval_minutes"
@@ -178,7 +178,7 @@
                 :checked="settingsSelection.is_active"
                 @update:checked="settingsSelection.is_active = $event === true"
               />
-              <Label class="text-xs">启用状态</Label>
+              <Label class="text-xs">{{ t('ui.enablementStatus') }}</Label>
             </div>
             <Select
               v-model="settingsStatus"
@@ -189,10 +189,10 @@
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="enabled">
-                  启用
+                  {{ t('ui.enablef4f0ead') }}
                 </SelectItem>
                 <SelectItem value="disabled">
-                  停用
+                  {{ t('ui.disable4e6fd0e') }}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -204,7 +204,7 @@
                 :checked="settingsSelection.proxy_node_id"
                 @update:checked="settingsSelection.proxy_node_id = $event === true"
               />
-              <Label class="text-xs">账号代理</Label>
+              <Label class="text-xs">{{ t('ui.accountProxy') }}</Label>
             </div>
             <div class="grid gap-2 sm:grid-cols-[9rem_minmax(0,1fr)]">
               <Select
@@ -216,10 +216,10 @@
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="set">
-                    设置节点
+                    {{ t('ui.setNode') }}
                   </SelectItem>
                   <SelectItem value="clear">
-                    清除代理
+                    {{ t('ui.clearProxy') }}
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -234,7 +234,7 @@
                 v-else
                 class="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-xs text-muted-foreground"
               >
-                回退到 Provider 默认代理
+                {{ t('ui.fallBackToTheProviderDefaultProxy') }}
               </div>
             </div>
           </div>
@@ -245,12 +245,12 @@
                 :checked="settingsSelection.note"
                 @update:checked="settingsSelection.note = $event === true"
               />
-              <Label class="text-xs">备注</Label>
+              <Label class="text-xs">{{ t('ui.notes') }}</Label>
             </div>
             <Input
               v-model="settingsDraft.note"
               class="h-9"
-              placeholder="留空清除备注"
+              :placeholder="t('ui.leaveEmptyToClearNotes')"
               :disabled="!settingsSelection.note"
             />
           </div>
@@ -290,7 +290,7 @@
         :disabled="executing"
         @click="emit('update:modelValue', false)"
       >
-        关闭
+        {{ t('ui.close') }}
       </Button>
       <Button
         :variant="selectedActionOption.destructive ? 'destructive' : 'default'"
@@ -304,6 +304,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import {
   Badge,
@@ -337,7 +339,7 @@ import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
   canExportOAuthCredential,
   canRefreshOAuthCredential,
-} from '@/utils/providerKeyAuth'
+} from '@/features/providers/utils/providerKeyAuth'
 import { runChunkedBatchAction } from '@/utils/batchAction'
 import { parseNullableNumberInput, parseNumberInput } from '@/utils/form'
 import {
@@ -370,6 +372,8 @@ const emit = defineEmits<{
   'edit-config': [keyIds: string[]]
 }>()
 
+const { t } = useI18n()
+
 const ACTION_OPTIONS = POOL_BATCH_ACTION_OPTIONS
 
 const { success, warning, error: showError } = useToast()
@@ -392,7 +396,7 @@ const progressLabel = ref('')
 
 const dialogDescription = computed(() => {
   const name = (props.providerName || '').trim()
-  return name ? `${name} - 对表格选择批量执行动作` : '对表格选择批量执行动作'
+  return name ? t('feedback.pool.batchDescriptionNamed', { name }) : t('feedback.pool.batchDescription')
 })
 
 const selectedCount = computed(() => Math.max(0, Number(props.selectedCount || 0)))
@@ -403,17 +407,18 @@ const selectedActionOption = computed(() => (
   ACTION_OPTIONS.find(option => option.value === selectedAction.value)
   || {
     value: 'refresh_quota' as const,
-    label: '刷新额度',
-    hint: '调用额度刷新接口，适合核对最新配额状态。',
+    destructive: false,
+    get label() { return t('ui.refreshQuota') },
+    get hint() { return t('ui.refreshQuotaInformationToCheckTheLatestStatus') },
   }
 ))
-const dialogTitle = computed(() => `执行动作 · ${selectedActionOption.value.label}`)
+const dialogTitle = computed(() => t('feedback.pool.actionTitle', { action: selectedActionOption.value.label }))
 const executeActionButtonLabel = computed(() => {
-  if (executing.value) return '执行中...'
-  if (selectedAction.value === 'edit_config') return '编辑配置'
-  if (selectedAction.value === 'set_proxy') return '应用代理设置'
-  if (selectedAction.value === 'update_settings') return '应用更多设置'
-  return `执行${selectedActionOption.value.label}`
+  if (executing.value) return t('ui.runningfeed25e')
+  if (selectedAction.value === 'edit_config') return t('ui.editConfiguration')
+  if (selectedAction.value === 'set_proxy') return t('ui.applyProxySettings')
+  if (selectedAction.value === 'update_settings') return t('ui.applyAdditionalSettings')
+  return t('feedback.pool.runAction', { action: selectedActionOption.value.label })
 })
 
 function sanitizeFileNamePart(value: unknown, fallback: string): string {
@@ -466,11 +471,11 @@ function handleActionButtonClick(action: PoolBatchActionValue): void {
 async function confirmAndExecuteAction(action: PoolBatchActionValue): Promise<void> {
   selectedAction.value = action
   if (selectedCount.value === 0) {
-    warning('请先选择账号')
+    warning(t('ui.selectAnAccountFirst'))
     return
   }
   if (action === 'set_proxy' && !proxyNodeIdForAction.value) {
-    warning('请先选择代理节点')
+    warning(t('ui.selectAProxyNodeFirst'))
     return
   }
   if (action === 'update_settings' && settingsErrors.value.length > 0) {
@@ -485,12 +490,12 @@ async function confirmAndExecuteAction(action: PoolBatchActionValue): Promise<vo
   }
 
   const actionOption = ACTION_OPTIONS.find((item) => item.value === action)
-  const actionLabel = actionOption?.label || '执行动作'
-  const scopeLabel = selectAllFiltered.value ? '筛选结果' : '已选账号'
+  const actionLabel = actionOption?.label || t('ui.action')
+  const scopeLabel = selectAllFiltered.value ? t('ui.filteredResults') : t('ui.selectedAccounts')
   const confirmed = await confirm({
     title: actionLabel,
-    message: `将对${scopeLabel}（${selectedCount.value} 个）执行：${actionLabel}，是否继续？`,
-    confirmText: actionOption?.destructive ? '确认删除' : '确认执行',
+    message: t('feedback.pool.confirmAction', { scope: scopeLabel, count: selectedCount.value, action: actionLabel }),
+    confirmText: actionOption?.destructive ? t('ui.confirmDeletion') : t('ui.confirmAction'),
     ...(actionOption?.destructive ? { variant: 'destructive' as const } : {}),
   })
   if (!confirmed) return
@@ -502,18 +507,18 @@ async function openBatchEditor(): Promise<void> {
   executing.value = true
   progressDone.value = 0
   progressTotal.value = 0
-  progressLabel.value = selectAllFiltered.value ? '正在解析筛选结果...' : '正在准备批量编辑...'
+  progressLabel.value = selectAllFiltered.value ? t('ui.resolvingFilteredResults') : t('ui.preparingBulkEdit')
   try {
     const selectedKeys = await resolveSelectedItems()
     const keyIds = selectedKeys.map(key => key.key_id)
     if (keyIds.length === 0) {
-      warning('未找到可编辑账号，请刷新列表重试')
+      warning(t('ui.noEditableAccountsFoundRefreshTheListAndTryAgain'))
       return
     }
     emit('update:modelValue', false)
     emit('edit-config', keyIds)
   } catch (err) {
-    showError(parseApiError(err, '准备批量编辑失败'))
+    showError(parseApiError(err, t('ui.failedToPrepareBulkEdit')))
   } finally {
     executing.value = false
     progressDone.value = 0
@@ -556,7 +561,7 @@ async function resolveSelectedItems(): Promise<PoolKeySelectionItem[]> {
   if (!props.providerId) return []
 
   if (selectAllFiltered.value) {
-    progressLabel.value = '正在解析筛选结果...'
+    progressLabel.value = t('ui.resolvingFilteredResults')
     const result = await resolvePoolKeySelection(props.providerId, { ...props.selectionFilters })
     return Array.isArray(result.items) ? result.items : []
   }
@@ -591,13 +596,13 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
     selectedAction.value = actionOverride
   }
   if (selectedCount.value === 0) {
-    warning('请先选择账号')
+    warning(t('ui.selectAnAccountFirst'))
     return
   }
 
   const requestedCount = selectedCount.value
   if (selectedAction.value === 'set_proxy' && !proxyNodeIdForAction.value) {
-    warning('请先选择代理节点')
+    warning(t('ui.selectAProxyNodeFirst'))
     return
   }
   if (selectedAction.value === 'update_settings' && settingsErrors.value.length > 0) {
@@ -613,23 +618,23 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
   const actionStartedAt = performance.now()
   let actionPhaseMs = 0
 
-  const actionLabel = ACTION_OPTIONS.find((item) => item.value === selectedAction.value)?.label || '执行'
+  const actionLabel = ACTION_OPTIONS.find((item) => item.value === selectedAction.value)?.label || t('ui.run')
   progressDone.value = 0
   progressTotal.value = 0
-  progressLabel.value = selectAllFiltered.value ? '正在解析筛选结果...' : `正在${actionLabel}...`
+  progressLabel.value = selectAllFiltered.value ? t('ui.resolvingFilteredResults') : t('feedback.pool.runningAction', { action: actionLabel })
   lastResultMessage.value = ''
 
   try {
     const selectedKeys = await resolveSelectedItems()
     resolvedCount = selectedKeys.length
     if (selectedKeys.length === 0) {
-      warning('未找到可执行账号，请刷新列表重试')
+      warning(t('ui.noEligibleAccountsFoundRefreshTheListAndTryAgain'))
       return
     }
 
     progressDone.value = 0
     progressTotal.value = selectedKeys.length
-    progressLabel.value = `正在${actionLabel}...`
+    progressLabel.value = t('feedback.pool.runningAction', { action: actionLabel })
 
     if (selectedAction.value === 'refresh_quota') {
       const targetIds = selectedKeys.map((key) => key.key_id)
@@ -639,7 +644,7 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
         chunkSize: BATCH_SIZE,
         runChunk: (batch) => refreshProviderQuota(props.providerId, batch),
         onChunkStart: ({ batchIndex, totalBatches }) => {
-          progressLabel.value = `正在${actionLabel}...（第 ${batchIndex}/${totalBatches} 批）`
+          progressLabel.value = t('feedback.pool.runningBatch', { action: actionLabel, index: batchIndex, total: totalBatches })
         },
         onChunkDone: ({ processed }) => {
           progressDone.value = processed
@@ -656,7 +661,7 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
       progressDone.value = 0
       progressTotal.value = exportableKeys.length
       if (skippedCount > 0) {
-        progressLabel.value = `正在${actionLabel}...（跳过 ${skippedCount} 个非 OAuth 账号）`
+        progressLabel.value = t('feedback.pool.runningSkipping', { action: actionLabel, count: skippedCount })
       }
 
       let cursor = 0
@@ -696,7 +701,7 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
         const batchIndex = Math.floor(i / BATCH_SIZE) + 1
         const batch = targetIds.slice(i, i + BATCH_SIZE)
         if (totalBatches > 1) {
-          progressLabel.value = `正在${actionLabel}...（第 ${batchIndex}/${totalBatches} 批）`
+          progressLabel.value = t('feedback.pool.runningBatch', { action: actionLabel, index: batchIndex, total: totalBatches })
         }
 
         try {
@@ -706,7 +711,7 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
           })
 
           if (result.task_id) {
-            progressLabel.value = `正在${actionLabel}...（后台执行中）`
+            progressLabel.value = t('feedback.pool.runningBackground', { action: actionLabel })
             const taskResult = await pollDeleteTask(props.providerId, result.task_id, i)
             successCount += taskResult.deleted
             if (taskResult.status === 'failed') {
@@ -731,7 +736,7 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
         const batchIndex = Math.floor(i / BATCH_SIZE) + 1
         const batch = targetIds.slice(i, i + BATCH_SIZE)
         if (totalBatches > 1) {
-          progressLabel.value = `正在${actionLabel}...（第 ${batchIndex}/${totalBatches} 批）`
+          progressLabel.value = t('feedback.pool.runningBatch', { action: actionLabel, index: batchIndex, total: totalBatches })
         }
 
         const payload = selectedAction.value === 'set_proxy'
@@ -784,7 +789,7 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
       await Promise.all(workers)
     }
 
-    lastResultMessage.value = `执行完成：成功 ${successCount}，失败 ${failedCount}，跳过 ${skippedCount}`
+    lastResultMessage.value = t('feedback.pool.actionCompleted', { success: successCount, failed: failedCount, skipped: skippedCount })
     if (failedCount > 0 || (selectedAction.value === 'export' && successCount === 0)) warning(lastResultMessage.value)
     else success(lastResultMessage.value)
 
@@ -793,7 +798,7 @@ async function executeAction(actionOverride?: PoolBatchActionValue): Promise<voi
       emit('changed')
     }
   } catch (err) {
-    showError(parseApiError(err, '批量操作失败'))
+    showError(parseApiError(err, t('ui.batchActionFailed')))
   } finally {
     log.info('Pool account batch action timing', {
       providerId: props.providerId,
@@ -833,4 +838,5 @@ watch(
   },
   { immediate: true },
 )
+
 </script>

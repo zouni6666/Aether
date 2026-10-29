@@ -72,7 +72,7 @@ vi.mock('@/components/ui/switch.vue', async () => {
   }) }
 })
 
-vi.mock('@/views/admin/module-management/ModelDirectivesPanel.vue', async () => {
+vi.mock('@/features/model-directives/ModelDirectivesPanel.vue', async () => {
   const { defineComponent, h } = await import('vue')
   return { default: defineComponent({
     props: { config: { type: Object, required: true }, loading: Boolean },

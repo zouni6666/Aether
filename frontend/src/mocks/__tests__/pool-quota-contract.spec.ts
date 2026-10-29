@@ -9,7 +9,7 @@ vi.mock('@/config/demo', () => ({
 }))
 
 import type { QuotaWindowSnapshot } from '@/api/endpoints/types'
-import { getCodexQuotaWindowPresentation } from '@/utils/codexQuotaWindow'
+import { getCodexQuotaWindowPresentation } from '@/features/providers/utils/codexQuotaWindow'
 import { handleMockRequest, setMockUserToken } from '../handler'
 
 interface MockPoolKey {

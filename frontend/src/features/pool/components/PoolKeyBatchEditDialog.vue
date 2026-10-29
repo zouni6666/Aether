@@ -1,7 +1,7 @@
 <template>
   <Dialog
     :model-value="open"
-    title="批量编辑密钥"
+    :title="t('ui.editKeysInBulk')"
     :description="dialogDescription"
     :icon="SquarePen"
     size="3xl"
@@ -11,10 +11,10 @@
     <Tabs v-model="activeTab">
       <TabsList class="grid w-full grid-cols-2">
         <TabsTrigger value="configuration">
-          密钥配置
+          {{ t('ui.keyConfiguration84ddec8') }}
         </TabsTrigger>
         <TabsTrigger value="models">
-          可用模型范围
+          {{ t('ui.allowedModels') }}
         </TabsTrigger>
       </TabsList>
 
@@ -26,7 +26,7 @@
           <section class="space-y-3 py-4 first:pt-2">
             <label class="flex items-center gap-2 text-sm font-medium">
               <Checkbox v-model="form.applyApiFormats" />
-              <span>支持的 API</span>
+              <span>{{ t('ui.supportedApis') }}</span>
             </label>
             <div
               class="grid gap-2 sm:grid-cols-2"
@@ -49,7 +49,7 @@
                 v-if="visibleApiFormats.length === 0"
                 class="text-xs text-muted-foreground sm:col-span-2"
               >
-                当前提供商没有可配置的 API 格式
+                {{ t('ui.thisProviderHasNoConfigurableApiFormats') }}
               </p>
             </div>
           </section>
@@ -58,7 +58,7 @@
             <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <BatchFieldToggle
                 v-model="form.applyActive"
-                label="启用状态"
+                :label="t('ui.enablementStatus')"
               >
                 <Select
                   v-model="activeValue"
@@ -69,10 +69,10 @@
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="enabled">
-                      启用
+                      {{ t('ui.enablef4f0ead') }}
                     </SelectItem>
                     <SelectItem value="disabled">
-                      禁用
+                      {{ t('ui.disable') }}
                     </SelectItem>
                   </SelectContent>
                 </Select>
@@ -80,7 +80,7 @@
 
               <BatchFieldToggle
                 v-model="form.applyInternalPriority"
-                label="优先级"
+                :label="t('ui.priority565d646')"
               >
                 <Input
                   v-model="form.internalPriority"
@@ -93,14 +93,14 @@
 
               <BatchFieldToggle
                 v-model="form.applyRpmLimit"
-                label="RPM 限制"
+                :label="t('ui.rpmLimit50b7143')"
               >
                 <Input
                   v-model="form.rpmLimit"
                   type="number"
                   min="1"
                   max="10000"
-                  placeholder="自适应"
+                  :placeholder="t('ui.adaptive')"
                   class="h-9"
                   :disabled="!form.applyRpmLimit"
                 />
@@ -108,13 +108,13 @@
 
               <BatchFieldToggle
                 v-model="form.applyConcurrentLimit"
-                label="并发请求上限"
+                :label="t('ui.concurrentRequestLimit')"
               >
                 <Input
                   v-model="form.concurrentLimit"
                   type="number"
                   min="0"
-                  placeholder="不限制"
+                  :placeholder="t('ui.noRestriction')"
                   class="h-9"
                   :disabled="!form.applyConcurrentLimit"
                 />
@@ -122,7 +122,7 @@
 
               <BatchFieldToggle
                 v-model="form.applyCacheTtl"
-                label="缓存 TTL"
+                :label="t('ui.cacheTtld8a1617')"
               >
                 <div class="relative">
                   <Input
@@ -133,13 +133,13 @@
                     class="h-9 pr-12"
                     :disabled="!form.applyCacheTtl"
                   />
-                  <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">分钟</span>
+                  <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{{ t('ui.minutesbd957bc') }}</span>
                 </div>
               </BatchFieldToggle>
 
               <BatchFieldToggle
                 v-model="form.applyProbeInterval"
-                label="熔断探测"
+                :label="t('ui.circuitProbe')"
               >
                 <div class="relative">
                   <Input
@@ -150,7 +150,7 @@
                     class="h-9 pr-12"
                     :disabled="!form.applyProbeInterval"
                   />
-                  <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">分钟</span>
+                  <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{{ t('ui.minutesbd957bc') }}</span>
                 </div>
               </BatchFieldToggle>
             </div>
@@ -159,14 +159,14 @@
           <section class="space-y-3 py-4">
             <BatchFieldToggle
               v-model="form.applyAutoFetchModels"
-              label="应用自动获取设置"
+              :label="t('ui.applyAutomaticFetchSettings')"
             >
               <div class="space-y-3 rounded-md border border-border/60 bg-muted/30 px-3 py-3">
                 <div class="flex items-center justify-between gap-4">
                   <div class="space-y-0.5">
-                    <Label class="text-sm font-medium">自动获取上游可用模型</Label>
+                    <Label class="text-sm font-medium">{{ t('ui.autoFetchUpstreamModels') }}</Label>
                     <p class="text-xs text-muted-foreground">
-                      定时更新上游模型，配合模型映射使用
+                      {{ t('ui.periodicallyUpdateUpstreamModelsForModelMappings') }}
                     </p>
                   </div>
                   <Switch
@@ -181,16 +181,16 @@
                 >
                   <div class="grid gap-3 sm:grid-cols-2">
                     <div class="space-y-1.5">
-                      <Label class="text-xs">包含规则</Label>
+                      <Label class="text-xs">{{ t('ui.includeRules') }}</Label>
                       <Input
                         v-model="form.includePatterns"
-                        placeholder="gpt-*, claude-*, 留空包含全部"
+                        :placeholder="t('ui.gptClaudeLeaveEmptyToIncludeAll')"
                         class="h-9"
                         :disabled="!form.applyAutoFetchModels"
                       />
                     </div>
                     <div class="space-y-1.5">
-                      <Label class="text-xs">排除规则</Label>
+                      <Label class="text-xs">{{ t('ui.excludeRules') }}</Label>
                       <Input
                         v-model="form.excludePatterns"
                         placeholder="*-preview, *-beta"
@@ -200,7 +200,7 @@
                     </div>
                   </div>
                   <p class="text-xs text-muted-foreground">
-                    逗号分隔，支持 * ? 通配符，不区分大小写
+                    {{ t('ui.commaSeparatedSupportsAndWildcardsCaseInsensitive') }}
                   </p>
                 </div>
               </div>
@@ -210,12 +210,12 @@
           <section class="space-y-3 py-4">
             <label class="flex items-center gap-2 text-sm font-medium">
               <Checkbox v-model="form.applyNote" />
-              <span>备注</span>
+              <span>{{ t('ui.notes') }}</span>
             </label>
             <Textarea
               v-model="form.note"
               rows="3"
-              placeholder="留空可清除备注"
+              :placeholder="t('ui.leaveEmptyToClearNotes69d1993')"
               :disabled="!form.applyNote"
             />
           </section>
@@ -230,10 +230,10 @@
           <div class="space-y-1 border-b border-border/70 pb-4">
             <label class="flex items-center gap-2 text-sm font-medium">
               <Checkbox v-model="form.applyAllowedModels" />
-              <span>应用可用模型范围</span>
+              <span>{{ t('ui.applyAllowedModels') }}</span>
             </label>
             <p class="pl-6 text-xs text-muted-foreground">
-              限制所选账号能够承接的模型；不限制时允许全部模型
+              {{ t('ui.restrictModelsForSelectedAccountsNoRestrictionAllowsAllModels') }}
             </p>
           </div>
 
@@ -244,10 +244,10 @@
             <div class="flex items-center justify-between gap-4 border-b border-border/70 pb-4">
               <div class="min-w-0">
                 <p class="text-sm font-medium">
-                  允许全部模型
+                  {{ t('ui.allowAllModels') }}
                 </p>
                 <p class="text-xs text-muted-foreground">
-                  关闭后仅允许下方选中的模型
+                  {{ t('ui.whenDisabledOnlyTheSelectedModelsBelowAreAllowed') }}
                 </p>
               </div>
               <Switch
@@ -265,7 +265,7 @@
                   <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     v-model="modelSearch"
-                    placeholder="搜索或输入自定义模型"
+                    :placeholder="t('ui.searchOrEnterACustomModel')"
                     class="h-9 pl-8"
                     :disabled="modelSelectionDisabled"
                   />
@@ -279,13 +279,12 @@
                   <RefreshCw
                     class="mr-2 h-4 w-4"
                     :class="fetchingUpstreamModels ? 'animate-spin' : ''"
-                  />
-                  获取上游模型
+                  /> {{ t('ui.fetchUpstreamModels') }}
                 </Button>
               </div>
 
               <div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                <span>已选择 {{ form.selectedModels.length }} 个模型</span>
+                <span>{{ t('ui.selected3f4ebc4') }} {{ form.selectedModels.length }} {{ t('ui.models') }}</span>
                 <button
                   v-if="filteredModels.length > 0"
                   type="button"
@@ -293,7 +292,7 @@
                   :disabled="modelSelectionDisabled"
                   @click="toggleFilteredModels"
                 >
-                  {{ areFilteredModelsSelected ? '取消当前结果' : '选择当前结果' }}
+                  {{ areFilteredModelsSelected ? t('ui.deselectCurrentResults') : t('ui.selectCurrentResults') }}
                 </button>
               </div>
 
@@ -307,7 +306,7 @@
                 >
                   <Plus class="h-4 w-4 text-muted-foreground" />
                   <span class="min-w-0 flex-1 truncate font-mono">{{ normalizedModelSearch }}</span>
-                  <span class="text-xs text-muted-foreground">添加</span>
+                  <span class="text-xs text-muted-foreground">{{ t('ui.add') }}</span>
                 </button>
                 <div class="max-h-72 overflow-y-auto">
                   <label
@@ -338,7 +337,7 @@
                     v-else-if="filteredModels.length === 0"
                     class="py-10 text-center text-sm text-muted-foreground"
                   >
-                    暂无匹配模型
+                    {{ t('ui.noMatchingModels6f8d507') }}
                   </div>
                 </div>
               </div>
@@ -346,10 +345,10 @@
               <div class="flex items-center justify-between gap-4 rounded-md border border-border/60 bg-muted/30 px-3 py-2.5">
                 <div class="min-w-0">
                   <p class="text-sm font-medium">
-                    锁定已选模型
+                    {{ t('ui.lockSelectedModels') }}
                   </p>
                   <p class="text-xs text-muted-foreground">
-                    自动获取开启时，锁定的模型不会被同步移除
+                    {{ t('ui.lockedModelsAreRetainedWhenAutomaticModelSyncIsEnabled') }}
                   </p>
                 </div>
                 <Switch
@@ -369,7 +368,7 @@
         :disabled="saving"
         @click="closeDialog"
       >
-        取消
+        {{ t('common.cancel') }}
       </Button>
       <Button
         :disabled="saving"
@@ -379,13 +378,15 @@
           v-if="saving"
           class="mr-2 h-4 w-4 animate-spin"
         />
-        {{ saving ? '保存中...' : `应用到 ${keyIds.length} 个密钥` }}
+        {{ saving ? t('ui.saving') : t('ui.applyToValueKeys', { count: keyIds.length }) }}
       </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, reactive, ref, watch } from 'vue'
 import {
   Badge,
@@ -422,7 +423,7 @@ import {
 
 interface ModelOption {
   id: string
-  source: '提供商' | '上游' | '自定义'
+  source: string
 }
 
 const props = defineProps<{
@@ -437,6 +438,8 @@ const emit = defineEmits<{
   close: []
   saved: []
 }>()
+
+const { t } = useI18n()
 
 const { success, warning, error: showError } = useToast()
 const { confirm } = useConfirm()
@@ -484,7 +487,7 @@ const form = reactive<PoolKeyBatchEditState>(createInitialForm())
 const dialogDescription = computed(() => {
   const providerName = props.providerName?.trim()
   const prefix = providerName ? `${providerName} · ` : ''
-  return `${prefix}已选 ${props.keyIds.length} 个密钥`
+  return `${prefix}${t('feedback.pool.selectedKeys', { count: props.keyIds.length })}`
 })
 const visibleApiFormats = computed(() => sortApiFormats(props.availableApiFormats || []))
 const loadingModels = computed(() => loadingProviderModels.value || fetchingUpstreamModels.value)
@@ -501,18 +504,18 @@ const allModels = computed<ModelOption[]>(() => {
   const byId = new Map<string, ModelOption>()
   for (const id of providerModelIds.value) {
     const normalized = id.trim()
-    if (normalized) byId.set(normalized, { id: normalized, source: '提供商' })
+    if (normalized) byId.set(normalized, { id: normalized, source: t('nav.providers') })
   }
   for (const model of upstreamModels.value) {
     const normalized = model.id?.trim()
     if (normalized && !byId.has(normalized)) {
-      byId.set(normalized, { id: normalized, source: '上游' })
+      byId.set(normalized, { id: normalized, source: t('ui.upstream') })
     }
   }
   for (const id of form.selectedModels) {
     const normalized = id.trim()
     if (normalized && !byId.has(normalized)) {
-      byId.set(normalized, { id: normalized, source: '自定义' })
+      byId.set(normalized, { id: normalized, source: t('ui.custom4eafa9e') })
     }
   }
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id))
@@ -580,7 +583,7 @@ async function loadProviderModels(): Promise<void> {
       .map(model => model.provider_model_name?.trim())
       .filter((model): model is string => Boolean(model))
   } catch (err) {
-    showError(parseApiError(err, '加载提供商模型失败'))
+    showError(parseApiError(err, t('ui.failedToLoadProviderModels')))
   } finally {
     loadingProviderModels.value = false
   }
@@ -597,7 +600,7 @@ async function fetchUpstreamModels(forceRefresh = false): Promise<void> {
     }
     upstreamModels.value = result.models
     if (result.warning) warning(result.warning)
-    else success(`已获取 ${result.models.length} 个上游模型`)
+    else success(t('feedback.pool.upstreamModelCount', { count: result.models.length }))
   } finally {
     fetchingUpstreamModels.value = false
   }
@@ -615,20 +618,20 @@ function closeDialog(): void {
 async function saveChanges(): Promise<void> {
   if (saving.value) return
   if (props.keyIds.length === 0) {
-    warning('请选择要编辑的密钥')
+    warning(t('ui.selectKeysToEdit'))
     return
   }
   const build = buildPoolKeyBatchUpdatePatch(form)
   if (!build.patch || build.error) {
-    warning(build.error || '批量配置无效')
-    if (form.applyAllowedModels && build.error?.includes('模型')) activeTab.value = 'models'
+    warning(build.error || t('ui.invalidBulkConfiguration'))
+    if (form.applyAllowedModels && build.errorField === 'allowed_models') activeTab.value = 'models'
     return
   }
 
   const confirmed = await confirm({
-    title: '应用批量配置',
-    message: `将对 ${props.keyIds.length} 个密钥修改：${build.fieldLabels.join('、')}。是否继续？`,
-    confirmText: '确认应用',
+    get title() { return t('ui.applyBulkConfiguration') },
+    message: t('feedback.pool.editKeysConfirm', { count: props.keyIds.length, fields: build.fieldLabels.join(t('feedback.password.separator')) }),
+    get confirmText() { return t('ui.confirmChanges') },
   })
   if (!confirmed) return
 
@@ -640,16 +643,16 @@ async function saveChanges(): Promise<void> {
     })
     const modelSync = result.model_sync
     if (modelSync?.failed) {
-      warning(`已更新 ${result.affected} 个密钥，${modelSync.failed} 个账号的模型同步失败`)
+      warning(t('feedback.pool.modelSyncFailed', { count: result.affected, failed: modelSync.failed }))
     } else if (modelSync && modelSync.attempted < modelSync.requested) {
-      warning(`已更新 ${result.affected} 个密钥，部分账号未执行即时模型同步`)
+      warning(t('feedback.pool.modelSyncSkipped', { count: result.affected }))
     } else {
       success(result.message)
     }
     emit('saved')
     emit('close')
   } catch (err) {
-    showError(parseApiError(err, '批量更新密钥失败'))
+    showError(parseApiError(err, t('ui.failedToUpdateKeysInBulk')))
   } finally {
     saving.value = false
   }
@@ -663,4 +666,5 @@ watch(
     void loadProviderModels()
   },
 )
+
 </script>

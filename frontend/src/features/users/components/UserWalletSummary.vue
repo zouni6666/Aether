@@ -3,13 +3,13 @@
     <div :class="mobile ? 'flex items-start justify-between gap-3' : ''">
       <div class="space-y-1">
         <p :class="mobile ? 'text-[11px] text-muted-foreground' : 'flex items-center gap-1 text-[11px] text-muted-foreground'">
-          <span>{{ legacyT('总可用：') }}</span>
+          <span>{{ t('ui.totalAvailable5b44200') }}</span>
           <Badge
             v-if="row.isUnlimited"
             variant="secondary"
             class="h-5 px-1.5 py-0 text-[10px] font-medium"
           >
-            {{ legacyT('无限额度') }}
+            {{ t('ui.unlimitedQuota') }}
           </Badge>
           <span
             v-else
@@ -26,13 +26,13 @@
           v-if="!row.isUnlimited && row.hasWallet"
           class="text-[11px] text-muted-foreground"
         >
-          {{ legacyT('套餐') }} {{ row.packageBalanceLabel }}
-          · {{ legacyT('钱包') }} {{ row.walletBalanceLabel }}
+          {{ t('ui.plan') }} {{ row.packageBalanceLabel }}
+          · {{ t('ui.wallet') }} {{ row.walletBalanceLabel }}
         </p>
       </div>
       <div :class="mobile ? 'text-right' : 'flex items-center gap-2 text-[11px] text-muted-foreground flex-wrap'">
         <p :class="mobile ? 'text-[11px] text-muted-foreground' : ''">
-          {{ legacyT('已消费：') }}
+          {{ t('ui.consumed7e0201d') }}
         </p>
         <p :class="mobile ? 'text-sm font-medium tabular-nums text-foreground' : 'font-medium tabular-nums text-foreground'">
           {{ row.consumedLabel }}
@@ -54,5 +54,5 @@ withDefaults(defineProps<{
   mobile: false,
 })
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

@@ -16,7 +16,7 @@
     <TableCell class="py-4">
       <div class="space-y-1 text-xs">
         <div class="flex items-center text-muted-foreground">
-          <span class="w-14">{{ legacyT('请求:') }}</span>
+          <span class="w-14">{{ t('ui.requests82c54b3') }}</span>
           <span class="font-medium text-foreground">{{ row.requestCountLabel }}</span>
         </div>
         <div class="flex items-center text-muted-foreground">
@@ -24,19 +24,19 @@
           <span class="font-medium text-foreground">{{ row.tokensLabel }}</span>
         </div>
         <div class="flex items-center text-muted-foreground">
-          <span class="w-14">{{ legacyT('限速:') }}</span>
+          <span class="w-14">{{ t('ui.rateLimit') }}</span>
           <Badge
             v-if="row.rateLimitAsBadge"
             variant="secondary"
             class="h-5 px-1.5 py-0 text-[10px] font-medium"
           >
-            {{ legacyT(row.rateLimitLabel) }}
+            {{ row.rateLimitLabel }}
           </Badge>
           <span
             v-else
             class="font-medium text-foreground"
           >
-            {{ legacyT(row.rateLimitLabel) }}
+            {{ row.rateLimitLabel }}
           </span>
         </div>
       </div>
@@ -93,5 +93,5 @@ defineEmits<{
   delete: []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

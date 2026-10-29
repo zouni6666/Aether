@@ -4,33 +4,33 @@
       v-if="loadingInitial"
       class="py-16"
     >
-      <LoadingState message="正在加载钱包数据..." />
+      <LoadingState :message="t('ui.loadingWallet')" />
     </div>
 
     <template v-else>
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <Card class="p-5 space-y-2">
           <div class="text-xs uppercase tracking-wider text-muted-foreground">
-            总可用额度
+            {{ t('ui.totalAvailableBalance') }}
           </div>
           <div class="text-3xl font-bold tabular-nums">
-            {{ walletBalance?.unlimited ? '无限制' : formatCurrency(totalAvailableBalance) }}
+            {{ walletBalance?.unlimited ? t('ui.unlimited9ee3c07') : formatCurrency(totalAvailableBalance) }}
           </div>
           <div class="text-xs text-muted-foreground">
-            套餐额度: {{ formatCurrency(packageBalance) }} · 钱包余额: {{ formatCurrency(walletOnlyBalance) }}
+            {{ t('ui.planCredit') }} {{ formatCurrency(packageBalance) }} {{ t('ui.walletBalance0970059') }} {{ formatCurrency(walletOnlyBalance) }}
           </div>
         </Card>
 
         <Card class="p-5 space-y-3">
           <div class="text-xs uppercase tracking-wider text-muted-foreground">
-            套餐今日额度
+            {{ t('ui.planQuotaToday') }}
           </div>
           <div class="text-2xl font-bold tabular-nums">
             <template v-if="hasActiveDailyQuota">
               {{ formatCurrency(packageBalance) }}
             </template>
             <template v-else>
-              未开通
+              {{ t('ui.notActivated') }}
             </template>
           </div>
           <div
@@ -44,35 +44,35 @@
               />
             </div>
             <div class="text-xs text-muted-foreground">
-              已用 {{ formatCurrency(dailyQuotaUsed) }} / 每日 {{ formatCurrency(dailyQuotaTotal) }}
+              {{ t('ui.used') }} {{ formatCurrency(dailyQuotaUsed) }} {{ t('ui.day') }} {{ formatCurrency(dailyQuotaTotal) }}
             </div>
             <div class="text-xs text-muted-foreground">
-              {{ dailyQuota?.allow_wallet_overage ? '已开启套餐不足时使用钱包余额' : '套餐额度不足时会拒绝请求，可在个人设置中开启使用余额' }}
+              {{ dailyQuota?.allow_wallet_overage ? t('ui.walletBalanceIsEnabledWhenThePlanQuotaIsInsufficient') : t('ui.requestsAreRejectedWhenThePlanQuotaIsInsufficientEnable') }}
             </div>
           </div>
           <div
             v-else
             class="text-xs text-muted-foreground"
           >
-            开通每日额度套餐后会优先消耗这里的额度。
+            {{ t('ui.afterActivatingADailyQuotaPlanRequestsConsumeThisQuota') }}
           </div>
         </Card>
 
         <Card class="p-5 space-y-2">
           <div class="text-xs uppercase tracking-wider text-muted-foreground">
-            钱包余额
+            {{ t('ui.walletBalance') }}
           </div>
           <div class="text-2xl font-semibold tabular-nums">
             {{ formatCurrency(walletOnlyBalance) }}
           </div>
           <div class="text-xs text-muted-foreground">
-            充值余额: {{ formatCurrency(walletBalance?.wallet?.recharge_balance) }} · 赠款余额: {{ formatCurrency(walletBalance?.wallet?.gift_balance) }}
+            {{ t('ui.topUpBalancec3896d4') }} {{ formatCurrency(walletBalance?.wallet?.recharge_balance) }} {{ t('ui.grantBalanceeb1a851') }} {{ formatCurrency(walletBalance?.wallet?.gift_balance) }}
           </div>
         </Card>
 
         <Card class="p-5 space-y-2">
           <div class="text-xs uppercase tracking-wider text-muted-foreground">
-            钱包状态
+            {{ t('ui.walletStatus') }}
           </div>
           <div class="flex items-center gap-2">
             <Badge :variant="walletStatusBadge(walletBalance?.wallet?.status)">
@@ -80,22 +80,21 @@
             </Badge>
           </div>
           <div class="text-xs text-muted-foreground">
-            累计充值 / 消费:
-            {{ formatCurrency(walletBalance?.wallet?.total_recharged) }}
+            {{ t('ui.cumulativeTopUpSpending') }} {{ formatCurrency(walletBalance?.wallet?.total_recharged) }}
             <span class="text-muted-foreground font-normal mx-1">/</span>
             {{ formatCurrency(walletBalance?.wallet?.total_consumed) }}
           </div>
           <div class="text-xs text-muted-foreground">
-            累计退款: {{ formatCurrency(walletBalance?.wallet?.total_refunded) }} · 可退款余额: {{ formatCurrency(walletBalance?.wallet?.refundable_balance) }}
+            {{ t('ui.totalRefunded') }} {{ formatCurrency(walletBalance?.wallet?.total_refunded) }} {{ t('ui.refundableBalancea3bea10') }} {{ formatCurrency(walletBalance?.wallet?.refundable_balance) }}
           </div>
           <div
             v-if="walletBalance?.unlimited"
             class="text-xs text-amber-600 dark:text-amber-400"
           >
-            当前账号处于无限制模式，余额仅用于账务统计。
+            {{ t('ui.thisAccountHasUnlimitedUsageTheBalanceIsTrackedFor') }}
           </div>
           <div class="text-xs text-muted-foreground">
-            待处理退款: {{ walletBalance?.pending_refund_count || 0 }}
+            {{ t('ui.pendingRefunds') }} {{ walletBalance?.pending_refund_count || 0 }}
           </div>
         </Card>
       </div>
@@ -104,10 +103,10 @@
         <div class="flex items-center justify-between">
           <div>
             <h3 class="text-base font-semibold">
-              兑换码充值
+              {{ t('ui.redeemCodeTopUp') }}
             </h3>
             <p class="text-xs text-muted-foreground mt-1">
-              输入卡密后会直接充值到钱包的充值余额
+              {{ t('ui.enterARedeemCodeToTopUpDirectlyIntoWallet') }}
             </p>
           </div>
           <RefreshButton
@@ -119,14 +118,14 @@
         <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3">
           <Input
             v-model="redeemForm.code"
-            placeholder="输入兑换码，例如 ABCD-EFGH-IJKL-MNOP"
+            :placeholder="t('ui.enterARedemptionCodeEGAbcdEfghIjklMnop')"
             autocomplete="off"
           />
           <Button
             :disabled="submittingRedeem"
             @click="submitRedeem"
           >
-            {{ submittingRedeem ? '兑换中...' : '立即兑换' }}
+            {{ submittingRedeem ? t('ui.redeeming') : t('ui.redeem1f52a1f') }}
           </Button>
         </div>
 
@@ -135,13 +134,13 @@
           class="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground space-y-1.5"
         >
           <div>
-            已兑换批次: <span class="font-medium text-foreground">{{ latestRedeem.batch_name }}</span>
+            {{ t('ui.redeemedBatch') }} <span class="font-medium text-foreground">{{ latestRedeem.batch_name }}</span>
           </div>
           <div>
-            充值金额: <span class="font-medium text-foreground">{{ formatCurrency(latestRedeem.amount_usd) }}</span>
+            {{ t('ui.topUpAmount') }} <span class="font-medium text-foreground">{{ formatCurrency(latestRedeem.amount_usd) }}</span>
           </div>
           <div>
-            关联订单: <span class="font-mono text-foreground">{{ latestRedeem.order.order_no }}</span>
+            {{ t('ui.linkedOrder') }} <span class="font-mono text-foreground">{{ latestRedeem.order.order_no }}</span>
           </div>
         </div>
       </Card>
@@ -154,7 +153,7 @@
         <Card class="p-5 space-y-4">
           <div class="flex items-center justify-between">
             <h3 class="text-base font-semibold">
-              发起充值
+              {{ t('ui.startTopUp') }}
             </h3>
             <RefreshButton
               :loading="loadingOrders"
@@ -164,7 +163,7 @@
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="space-y-1.5">
-              <Label>充值金额 (USD)</Label>
+              <Label>{{ t('ui.topUpAmountUsd') }}</Label>
               <Input
                 v-model.number="rechargeForm.amount_usd"
                 type="number"
@@ -175,11 +174,11 @@
             </div>
 
             <div class="space-y-1.5">
-              <Label>支付方式</Label>
+              <Label>{{ t('ui.paymentMethod') }}</Label>
               <Select v-model="rechargeForm.payment_option_key">
                 <SelectTrigger>
                   <SelectValue
-                    :placeholder="rechargeOptionsWithKey.length ? '选择支付方式' : '暂无可用支付方式'"
+                    :placeholder="rechargeOptionsWithKey.length ? t('ui.selectPaymentMethod') : t('ui.noPaymentMethodsAvailable')"
                   />
                 </SelectTrigger>
                 <SelectContent>
@@ -198,8 +197,7 @@
                     <span
                       v-if="Number(option.fee_rate || 0) > 0"
                       class="text-xs text-muted-foreground"
-                    >
-                      · 手续费 {{ Number(option.fee_rate || 0).toFixed(2) }}%
+                    > {{ t('ui.fee89d05b4') }} {{ Number(option.fee_rate || 0).toFixed(2) }}%
                     </span>
                   </SelectItem>
                 </SelectContent>
@@ -211,15 +209,14 @@
             v-if="selectedRechargeOption?.usd_exchange_rate"
             class="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground"
           >
-            预计支付:
-            <span class="font-medium text-foreground">
+            {{ t('ui.estimatedPayment') }} <span class="font-medium text-foreground">
               {{ estimatedRechargePayAmount }}
               {{ rechargePayCurrency }}
             </span>
             · 1 USD = {{ Number(selectedRechargeOption.usd_exchange_rate).toFixed(4) }}
             {{ rechargePayCurrency }}
             <template v-if="estimatedRechargeFeeAmount > 0">
-              · 手续费 {{ estimatedRechargeFeeAmount.toFixed(2) }} {{ rechargePayCurrency }}
+              {{ t('ui.fee89d05b4') }} {{ estimatedRechargeFeeAmount.toFixed(2) }} {{ rechargePayCurrency }}
               ({{ estimatedRechargeFeeRate.toFixed(2) }}%)
             </template>
           </div>
@@ -229,7 +226,7 @@
             :disabled="submittingRecharge || rechargeOptionsWithKey.length === 0"
             @click="submitRecharge"
           >
-            {{ submittingRecharge ? '创建订单中...' : '创建充值订单' }}
+            {{ submittingRecharge ? t('ui.creatingOrder') : t('ui.createTopUpOrder') }}
           </Button>
 
           <div
@@ -237,11 +234,10 @@
             class="rounded-xl border border-border/60 bg-muted/30 p-3 space-y-1.5"
           >
             <div class="text-xs text-muted-foreground">
-              最新订单: <span class="font-medium text-foreground">{{ latestRecharge.order.order_no }}</span>
+              {{ t('ui.latestOrder8e30e64') }} <span class="font-medium text-foreground">{{ latestRecharge.order.order_no }}</span>
             </div>
             <div class="text-xs text-muted-foreground">
-              状态:
-              <Badge
+              {{ t('ui.status') }} <Badge
                 :variant="paymentStatusBadge(latestRecharge.order.status)"
                 class="ml-1"
               >
@@ -255,22 +251,20 @@
               target="_blank"
               rel="noopener noreferrer"
               @click.prevent="submitPaymentInstructions(latestRecharge.payment_instructions)"
-            >
-              打开支付链接
-            </a>
+            > {{ t('ui.openPaymentLink') }} </a>
             <button
               v-if="latestRechargeStripeInstructions"
               type="button"
               class="inline-flex text-xs text-primary hover:underline"
               @click="submitPaymentInstructions(latestRecharge?.payment_instructions)"
             >
-              打开 Stripe 支付
+              {{ t('ui.openStripeCheckout') }}
             </button>
             <div
               v-if="latestRecharge.payment_instructions?.qr_code"
               class="text-xs text-muted-foreground break-all"
             >
-              二维码标识: {{ latestRecharge.payment_instructions.qr_code }}
+              {{ t('ui.qrCodeReference') }} {{ latestRecharge.payment_instructions.qr_code }}
             </div>
           </div>
         </Card>
@@ -278,7 +272,7 @@
         <Card class="p-5 space-y-4">
           <div class="flex items-center justify-between">
             <h3 class="text-base font-semibold">
-              申请退款
+              {{ t('ui.requestRefund') }}
             </h3>
             <RefreshButton
               :loading="loadingRefunds || loadingRefundEligibility"
@@ -290,12 +284,12 @@
             v-if="!loadingRefundEligibility && refundableOrders.length === 0"
             class="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground"
           >
-            当前没有开启用户自助退款的可退充值订单。
+            {{ t('ui.thereAreCurrentlyNoRefundableTopUpOrdersWithUser') }}
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="space-y-1.5">
-              <Label>退款金额 (USD)</Label>
+              <Label>{{ t('ui.refundAmountUsd') }}</Label>
               <Input
                 v-model.number="refundForm.amount_usd"
                 type="number"
@@ -306,17 +300,17 @@
             </div>
 
             <div class="space-y-1.5">
-              <Label>退款模式</Label>
+              <Label>{{ t('ui.refundMode') }}</Label>
               <Select v-model="refundForm.refund_mode">
                 <SelectTrigger>
-                  <SelectValue placeholder="选择退款模式" />
+                  <SelectValue :placeholder="t('ui.selectRefundMethod')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="original_channel">
-                    原路退回
+                    {{ t('ui.originalRouteRefund') }}
                   </SelectItem>
                   <SelectItem value="offline_payout">
-                    线下打款
+                    {{ t('ui.offlineTransfer') }}
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -324,10 +318,10 @@
           </div>
 
           <div class="space-y-1.5">
-            <Label>关联充值订单</Label>
+            <Label>{{ t('ui.linkedTopUpOrder') }}</Label>
             <Select v-model="refundForm.payment_order_id">
               <SelectTrigger>
-                <SelectValue placeholder="选择允许用户退款的订单" />
+                <SelectValue :placeholder="t('ui.selectAnOrderEligibleForUserRefunds')" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem
@@ -335,23 +329,23 @@
                   :key="order.id"
                   :value="order.id"
                 >
-                  {{ order.order_no }} (可退 {{ formatCurrency(order.refundable_amount_usd) }})
+                  {{ order.order_no }} {{ t('ui.refundable') }} {{ formatCurrency(order.refundable_amount_usd) }})
                 </SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div class="space-y-1.5">
-            <Label>退款原因（可选）</Label>
+            <Label>{{ t('ui.refundReasonOptional') }}</Label>
             <Textarea
               v-model="refundForm.reason"
-              placeholder="填写退款原因，便于审核"
+              :placeholder="t('ui.describeTheReasonForYourRefundRequest')"
               rows="3"
             />
           </div>
 
           <div class="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground">
-            仅开启“允许用户退款”的支付方式可由用户自助提交退款申请。
+            {{ t('ui.onlyPaymentMethodsWithAllowUserRefundsEnabledCanBe') }}
           </div>
 
           <Button
@@ -360,7 +354,7 @@
             :disabled="submittingRefund || refundableOrders.length === 0"
             @click="submitRefund"
           >
-            {{ submittingRefund ? '提交中...' : '提交退款申请' }}
+            {{ submittingRefund ? t('ui.submitting') : t('ui.submitRefundRequest') }}
           </Button>
         </Card>
       </div>
@@ -370,13 +364,13 @@
           <Tabs v-model="activeTab">
             <TabsList class="tabs-button-list grid grid-cols-3 w-full max-w-xl">
               <TabsTrigger value="transactions">
-                资金流水
+                {{ t('ui.walletLedger') }}
               </TabsTrigger>
               <TabsTrigger value="orders">
-                充值订单
+                {{ t('ui.topUpOrder') }}
               </TabsTrigger>
               <TabsTrigger value="refunds">
-                退款记录
+                {{ t('ui.refundHistory') }}
               </TabsTrigger>
             </TabsList>
 
@@ -386,7 +380,7 @@
             >
               <div class="px-5 flex items-center justify-between">
                 <div class="text-sm text-muted-foreground">
-                  共 {{ txTotal }} 条
+                  {{ t('ui.total76e547a') }} {{ txTotal }} {{ t('ui.itemsf004f1d') }}
                 </div>
                 <RefreshButton
                   :loading="loadingTransactions"
@@ -397,11 +391,11 @@
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>时间</TableHead>
-                      <TableHead>类型</TableHead>
-                      <TableHead>变动</TableHead>
-                      <TableHead>余额变化</TableHead>
-                      <TableHead>说明</TableHead>
+                      <TableHead>{{ t('ui.time') }}</TableHead>
+                      <TableHead>{{ t('ui.typeba40014') }}</TableHead>
+                      <TableHead>{{ t('ui.change') }}</TableHead>
+                      <TableHead>{{ t('ui.balanceChanges') }}</TableHead>
+                      <TableHead>{{ t('ui.description') }}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -432,10 +426,10 @@
                         -{{ todayUsage.total_cost.toFixed(4) }}
                       </TableCell>
                       <TableCell class="text-xs text-muted-foreground">
-                        按日汇总
+                        {{ t('ui.dailySummary') }}
                       </TableCell>
                       <TableCell class="text-xs text-muted-foreground">
-                        {{ todayUsage.total_requests }} 次请求 · {{ formatTokenCount(todayUsage.input_tokens) }} / {{ formatTokenCount(todayUsage.output_tokens) }} tokens
+                        {{ todayUsage.total_requests }} {{ t('ui.requests0de6ce2') }} {{ formatTokenCount(todayUsage.input_tokens) }} / {{ formatTokenCount(todayUsage.output_tokens) }} tokens
                       </TableCell>
                     </TableRow>
                     <template
@@ -492,10 +486,10 @@
                           -{{ item.data.total_cost.toFixed(4) }}
                         </TableCell>
                         <TableCell class="text-xs text-muted-foreground">
-                          按日汇总
+                          {{ t('ui.dailySummary') }}
                         </TableCell>
                         <TableCell class="text-xs text-muted-foreground">
-                          {{ item.data.total_requests }} 次请求 · {{ formatTokenCount(item.data.input_tokens) }} / {{ formatTokenCount(item.data.output_tokens) }} tokens
+                          {{ item.data.total_requests }} {{ t('ui.requests0de6ce2') }} {{ formatTokenCount(item.data.input_tokens) }} / {{ formatTokenCount(item.data.output_tokens) }} tokens
                         </TableCell>
                       </TableRow>
                     </template>
@@ -505,8 +499,8 @@
                         class="py-10"
                       >
                         <EmptyState
-                          title="暂无资金流水"
-                          description="充值、退款或消费后会在这里显示"
+                          :title="t('ui.noWalletLedgerEntries')"
+                          :description="t('ui.topUpsRefundsAndChargesWillAppearHere')"
                         />
                       </TableCell>
                     </TableRow>
@@ -528,7 +522,7 @@
             >
               <div class="px-5 flex items-center justify-between">
                 <div class="text-sm text-muted-foreground">
-                  共 {{ orderTotal }} 条
+                  {{ t('ui.total76e547a') }} {{ orderTotal }} {{ t('ui.itemsf004f1d') }}
                 </div>
                 <RefreshButton
                   :loading="loadingOrders"
@@ -539,12 +533,12 @@
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>订单号</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>支付方式</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>可退金额</TableHead>
-                      <TableHead>创建时间</TableHead>
+                      <TableHead>{{ t('ui.orderNumber') }}</TableHead>
+                      <TableHead>{{ t('ui.amount') }}</TableHead>
+                      <TableHead>{{ t('ui.paymentMethod') }}</TableHead>
+                      <TableHead>{{ t('ui.status6320b4a') }}</TableHead>
+                      <TableHead>{{ t('ui.refundableAmount') }}</TableHead>
+                      <TableHead>{{ t('ui.createdAt') }}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -577,8 +571,8 @@
                         class="py-10"
                       >
                         <EmptyState
-                          title="暂无充值订单"
-                          description="发起充值后会在这里显示"
+                          :title="t('ui.noTopUpOrders')"
+                          :description="t('ui.yourTopUpOrdersWillAppearHere')"
                         />
                       </TableCell>
                     </TableRow>
@@ -600,7 +594,7 @@
             >
               <div class="px-5 flex items-center justify-between">
                 <div class="text-sm text-muted-foreground">
-                  共 {{ refundTotal }} 条
+                  {{ t('ui.total76e547a') }} {{ refundTotal }} {{ t('ui.itemsf004f1d') }}
                 </div>
                 <RefreshButton
                   :loading="loadingRefunds"
@@ -611,12 +605,12 @@
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>退款单号</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>模式</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>原因</TableHead>
-                      <TableHead>申请时间</TableHead>
+                      <TableHead>{{ t('ui.refundId') }}</TableHead>
+                      <TableHead>{{ t('ui.amount') }}</TableHead>
+                      <TableHead>{{ t('ui.mode') }}</TableHead>
+                      <TableHead>{{ t('ui.status6320b4a') }}</TableHead>
+                      <TableHead>{{ t('ui.reasonf029d9c') }}</TableHead>
+                      <TableHead>{{ t('ui.requestedAt') }}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -649,8 +643,8 @@
                         class="py-10"
                       >
                         <EmptyState
-                          title="暂无退款记录"
-                          description="提交退款申请后会在这里显示"
+                          :title="t('ui.noRefunds')"
+                          :description="t('ui.yourRefundRequestsWillAppearHere')"
                         />
                       </TableCell>
                     </TableRow>
@@ -673,15 +667,18 @@
     <StripePaymentDialog
       v-model:open="stripeDialogOpen"
       :instructions="stripePaymentInstructions"
-      title="钱包 Stripe 支付"
-      description="完成支付后，钱包余额会由 Stripe Webhook 自动入账。"
-      confirm-text="支付充值"
+      :title="t('ui.walletTopUpViaStripe')"
+      :description="t('ui.yourWalletWillBeCreditedAutomaticallyAfterStripeConfirmsPayment')"
+      :confirm-text="t('ui.paymentTopUp')"
       @success="handleStripePaymentSuccess"
     />
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { getI18nLocale } from '@/i18n'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
@@ -709,7 +706,8 @@ import {
   TabsTrigger,
   Textarea,
 } from '@/components/ui'
-import { EmptyState, LoadingState, StripePaymentDialog } from '@/components/common'
+import { EmptyState, LoadingState } from '@/components/common'
+import StripePaymentDialog from '@/features/wallet/components/StripePaymentDialog.vue'
 import {
   walletApi,
   type DailyUsageRecord,
@@ -723,12 +721,12 @@ import {
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
-import { safePaymentTargetUrl } from '@/utils/paymentUrl'
+import { safePaymentTargetUrl } from '@/features/wallet/utils/paymentUrl'
 import {
   getPaymentInstructionString,
   getStripePaymentInstructions,
   type PaymentInstructionMap,
-} from '@/utils/paymentInstructions'
+} from '@/features/wallet/utils/paymentInstructions'
 import {
   dailyUsageCategoryLabel,
   formatTokenCount,
@@ -743,7 +741,7 @@ import {
   walletStatusLabel,
   walletTransactionCategoryLabel,
   walletTransactionReasonLabel,
-} from '@/utils/walletDisplay'
+} from '@/features/wallet/utils/walletDisplay'
 
 const { success, info, error: showError } = useToast()
 
@@ -971,7 +969,7 @@ async function loadRechargeOptions() {
     }
   } catch (error) {
     log.error('加载充值方式失败:', error)
-    showError(parseApiError(error, '加载充值方式失败'))
+    showError(parseApiError(error, t('ui.failedToLoadTopUpMethods')))
   }
 }
 
@@ -986,7 +984,7 @@ async function loadTransactions() {
     loadedTabs.add('transactions')
   } catch (error) {
     log.error('加载钱包流水失败:', error)
-    showError(parseApiError(error, '加载钱包流水失败'))
+    showError(parseApiError(error, t('ui.failedToLoadWalletTransactions')))
   } finally {
     loadingTransactions.value = false
   }
@@ -1107,7 +1105,7 @@ async function reloadOrders(silent: boolean) {
   } catch (error) {
     if (unmounted || version !== orderLoadVersion) return
     log.error('加载充值订单失败:', error)
-    if (!silent) showError(parseApiError(error, '加载充值订单失败'))
+    if (!silent) showError(parseApiError(error, t('ui.failedToLoadTopUpOrders')))
   } finally {
     if (!unmounted && version === orderLoadVersion) {
       loadingOrders.value = false
@@ -1145,7 +1143,7 @@ async function loadRefunds() {
     loadedTabs.add('refunds')
   } catch (error) {
     log.error('加载退款记录失败:', error)
-    showError(parseApiError(error, '加载退款记录失败'))
+    showError(parseApiError(error, t('ui.failedToLoadRefunds')))
   } finally {
     loadingRefunds.value = false
   }
@@ -1182,7 +1180,7 @@ async function refreshRefundPanel() {
 
 async function submitRedeem() {
   if (!redeemForm.code.trim()) {
-    showError('请输入兑换码')
+    showError(t('ui.enterARedemptionCode'))
     return
   }
 
@@ -1192,12 +1190,12 @@ async function submitRedeem() {
       code: redeemForm.code.trim(),
     })
     redeemForm.code = ''
-    success('兑换成功')
+    success(t('ui.codeRedeemed'))
     await Promise.all([loadBalance(), loadOrders(), loadTransactions(), loadTodayCost()])
     activeTab.value = 'orders'
   } catch (error) {
     log.error('兑换码充值失败:', error)
-    showError(parseApiError(error, '兑换码充值失败'))
+    showError(parseApiError(error, t('ui.failedToRedeemCode')))
   } finally {
     submittingRedeem.value = false
   }
@@ -1205,12 +1203,12 @@ async function submitRedeem() {
 
 async function submitRecharge() {
   if (!rechargeForm.amount_usd || rechargeForm.amount_usd <= 0) {
-    showError('请输入有效的充值金额')
+    showError(t('ui.enterAValidTopUpAmount'))
     return
   }
   const option = selectedRechargeOption.value
   if (!option) {
-    showError('请选择支付方式')
+    showError(t('ui.selectAPaymentMethod'))
     return
   }
   if (option.min_recharge_usd && rechargeForm.amount_usd < option.min_recharge_usd) {
@@ -1251,7 +1249,7 @@ async function submitRecharge() {
     if (isAwaitingCredit(latestRecharge.value.order)) {
       pendingOrders.set(latestRecharge.value.order.id, latestRecharge.value.order)
     }
-    success('充值订单创建成功')
+    success(t('ui.topUpOrderCreated'))
     await loadOrders()
     activeTab.value = 'orders'
     submitPaymentInstructions(latestRecharge.value.payment_instructions)
@@ -1259,7 +1257,7 @@ async function submitRecharge() {
     rechargeIdempotencyFingerprint = ''
   } catch (error) {
     log.error('创建充值订单失败:', error)
-    showError(parseApiError(error, '创建充值订单失败'))
+    showError(parseApiError(error, t('ui.failedToCreateTopUpOrder')))
   } finally {
     submittingRecharge.value = false
   }
@@ -1277,7 +1275,7 @@ function submitPaymentInstructions(instructions: Record<string, unknown> | null 
   if (!paymentUrl) return
   const safePaymentUrl = safePaymentTargetUrl(paymentUrl)
   if (!safePaymentUrl) {
-    showError('支付网关返回了不安全的支付地址')
+    showError(t('ui.thePaymentGatewayReturnedAnUnsafePaymentUrl'))
     return
   }
   const paymentParams = instructions.payment_params
@@ -1294,7 +1292,7 @@ function submitPaymentInstructions(instructions: Record<string, unknown> | null 
 function submitPaymentForm(url: string, params: Record<string, unknown>) {
   const safeUrl = safePaymentTargetUrl(url)
   if (!safeUrl) {
-    showError('支付网关返回了不安全的支付地址')
+    showError(t('ui.thePaymentGatewayReturnedAnUnsafePaymentUrl'))
     return
   }
   const form = document.createElement('form')
@@ -1328,12 +1326,12 @@ async function handleStripePaymentSuccess() {
 
 async function submitRefund() {
   if (!refundForm.amount_usd || refundForm.amount_usd <= 0) {
-    showError('请输入有效的退款金额')
+    showError(t('ui.enterAValidRefundAmount'))
     return
   }
   const selectedOrder = refundableOrders.value.find(order => order.id === refundForm.payment_order_id)
   if (!selectedOrder) {
-    showError('请选择允许用户退款的充值订单')
+    showError(t('ui.selectATopUpOrderEligibleForUserRefunds'))
     return
   }
   if (refundForm.amount_usd > (selectedOrder.refundable_amount_usd || 0)) {
@@ -1355,14 +1353,14 @@ async function submitRefund() {
       reason: refundForm.reason || undefined,
       idempotency_key: `web_refund_${buildRefundIdempotencyKey()}`,
     })
-    success('退款申请已提交')
+    success(t('ui.refundRequestSubmitted'))
     refundForm.amount_usd = 0
     refundForm.reason = ''
     await Promise.all([loadRefunds(), loadBalance(), loadOrders(), loadRefundEligibility(), loadTransactions(), loadTodayCost()])
     activeTab.value = 'refunds'
   } catch (error) {
     log.error('提交退款申请失败:', error)
-    showError(parseApiError(error, '提交退款申请失败'))
+    showError(parseApiError(error, t('ui.failedToSubmitRefundRequest')))
   } finally {
     submittingRefund.value = false
   }
@@ -1427,4 +1425,5 @@ function formatDateTime(value: string | null | undefined): string {
     minute: '2-digit',
   })
 }
+
 </script>

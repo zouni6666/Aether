@@ -3,28 +3,28 @@
     <header class="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
       <div>
         <h1 class="text-xl font-semibold">
-          {{ publicPage ? '服务状态' : '健康监控' }}
+          {{ publicPage ? t('ui.serviceStatus') : t('nav.healthMonitor') }}
         </h1>
         <p
           v-if="meta"
           class="mt-2 text-xs text-muted-foreground"
         >
-          更新于 {{ dateTime(meta.generated_at) }}
+          {{ t('ui.updatedAt7153f09') }} {{ dateTime(meta.generated_at) }}
           <span
             v-if="meta.freshness === 'stale'"
             class="ml-2 text-amber-600"
-          >数据已过期</span>
+          >{{ t('ui.dataIsOutdated') }}</span>
           <span
             v-else-if="meta.freshness === 'unknown'"
             class="ml-2"
-          >采集进度未知</span>
+          >{{ t('ui.collectionProgressUnknown') }}</span>
         </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <label
           class="sr-only"
           for="health-window"
-        >时间范围</label>
+        >{{ t('ui.timeRange') }}</label>
         <select
           id="health-window"
           :value="window"
@@ -32,13 +32,13 @@
           @change="changeWindow"
         >
           <option value="1h">
-            近 1 小时
+            {{ t('ui.lastHourcf9f068') }}
           </option><option value="6h">
-            近 6 小时
+            {{ t('ui.last6Hours') }}
           </option><option value="24h">
-            近 24 小时
+            {{ t('ui.last24Hours7f4bb32') }}
           </option><option value="72h">
-            近 72 小时
+            {{ t('ui.last72Hours') }}
           </option>
         </select>
         <button
@@ -47,12 +47,12 @@
           class="flex h-9 items-center gap-2 rounded-md border border-input px-3 text-sm hover:bg-muted"
           @click="openPublication"
         >
-          <Globe class="h-4 w-4" />状态页发布
+          <Globe class="h-4 w-4" />{{ t('ui.statusPagePublishing') }}
         </button>
         <button
           type="button"
-          title="刷新"
-          aria-label="刷新健康数据"
+          :title="t('ui.refresh')"
+          :aria-label="t('ui.refreshHealthData')"
           class="flex h-9 w-9 items-center justify-center rounded-md border border-input hover:bg-muted disabled:opacity-50"
           :disabled="loading"
           @click="load"
@@ -66,7 +66,7 @@
     </header>
     <nav
       class="flex gap-5 overflow-x-auto border-b border-border"
-      aria-label="健康对象"
+      :aria-label="t('ui.healthTargets')"
     >
       <button
         v-for="tab in tabs"
@@ -90,45 +90,45 @@
     <section
       v-if="summary"
       class="grid grid-cols-2 gap-y-5 border-b border-border pb-5 md:grid-cols-4"
-      aria-label="健康摘要"
+      :aria-label="t('ui.healthSummary')"
     >
       <div>
         <div class="text-xs text-muted-foreground">
-          总体状态
+          {{ t('ui.overallStatus') }}
         </div><div class="mt-2 flex items-center gap-2 text-lg font-semibold">
           <span
             class="h-2.5 w-2.5 rounded-full"
             :class="statusColor(summary.status)"
           />{{ statusLabel(summary.status) }}
         </div><div class="mt-1 text-xs text-muted-foreground">
-          {{ summary.object_count }} 个对象
+          {{ summary.object_count }} {{ t('ui.targets') }}
         </div>
       </div>
       <div>
         <div class="text-xs text-muted-foreground">
-          服务可用率
+          {{ t('ui.serviceAvailability') }}
         </div><div class="mt-2 text-lg font-semibold tabular-nums">
           {{ percentage(summary.requests.service_availability.value) }}
         </div><div class="mt-1 text-xs text-muted-foreground">
-          {{ summary.requests.service_availability.denominator.toLocaleString() }} 个有效样本
+          {{ summary.requests.service_availability.denominator.toLocaleString() }} {{ t('ui.validSamples') }}
         </div>
       </div>
       <div>
         <div class="text-xs text-muted-foreground">
-          异常对象
+          {{ t('ui.unhealthyTargets') }}
         </div><div class="mt-2 text-lg font-semibold tabular-nums">
           {{ summary.degraded_count + summary.unavailable_count }}
         </div><div class="mt-1 text-xs text-muted-foreground">
-          {{ summary.unknown_count }} 个状态未知
+          {{ summary.unknown_count }} {{ t('ui.withUnknownStatus') }}
         </div>
       </div>
       <div>
         <div class="text-xs text-muted-foreground">
-          最终请求成功率
+          {{ t('ui.finalRequestSuccessRate') }}
         </div><div class="mt-2 text-lg font-semibold tabular-nums">
           {{ percentage(summary.requests.request_success.value) }}
         </div><div class="mt-1 text-xs text-muted-foreground">
-          {{ summary.requests.request_count.toLocaleString() }} 次请求
+          {{ summary.requests.request_count.toLocaleString() }} {{ t('ui.requests') }}
         </div>
       </div>
     </section>
@@ -137,14 +137,14 @@
       role="status"
       class="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground"
     >
-      <LoaderCircle class="h-4 w-4 animate-spin" />加载中
+      <LoaderCircle class="h-4 w-4 animate-spin" />{{ t('ui.loading') }}
     </div>
     <template v-else-if="page">
       <div
         v-if="page.items.length === 0"
         class="border-y border-dashed border-border py-16 text-center text-sm text-muted-foreground"
       >
-        {{ publicPage ? '此视角暂无公开服务' : '此视角暂无监控对象' }}
+        {{ publicPage ? t('ui.noPublicServicesInThisView') : t('ui.noMonitoredTargetsInThisView') }}
       </div>
       <div
         v-else
@@ -156,17 +156,17 @@
               <th class="py-3 pr-4 font-medium">
                 {{ activeLabel }}
               </th><th class="px-3 py-3 font-medium">
-                状态
+                {{ t('ui.status6320b4a') }}
               </th><th class="px-3 py-3 text-right font-medium">
-                服务可用率
+                {{ t('ui.serviceAvailability') }}
               </th><th class="px-3 py-3 text-right font-medium">
-                请求数
+                {{ t('stats.metric.requests') }}
               </th><th class="px-3 py-3 text-right font-medium">
-                平均耗时
+                {{ t('ui.averageDuration') }}
               </th><th class="px-3 py-3 font-medium">
-                窗口状态
+                {{ t('ui.windowStatus') }}
               </th><th class="w-10">
-                <span class="sr-only">详情</span>
+                <span class="sr-only">{{ t('ui.details') }}</span>
               </th>
             </tr>
           </thead>
@@ -193,12 +193,12 @@
                   v-if="object.coverage.sample_status !== 'sufficient'"
                   class="mt-1 text-xs text-muted-foreground"
                 >
-                  {{ object.coverage.sample_status === 'empty' ? '暂无样本' : '样本不足' }}
+                  {{ object.coverage.sample_status === 'empty' ? t('ui.noSample') : t('ui.insufficientSamples') }}
                 </div><div
                   v-else-if="object.coverage.status === 'partial'"
                   class="mt-1 text-xs text-amber-600"
                 >
-                  分类不完整
+                  {{ t('ui.incompleteClassification') }}
                 </div>
               </td>
               <td class="px-3 py-4 text-right tabular-nums">
@@ -206,7 +206,7 @@
               </td><td class="px-3 py-4 text-right tabular-nums">
                 {{ object.request_count.toLocaleString() }}
               </td><td class="whitespace-nowrap px-3 py-4 text-right tabular-nums">
-                {{ object.average_latency_ms == null ? '未知' : `${Math.round(object.average_latency_ms).toLocaleString()} ms` }}
+                {{ object.average_latency_ms == null ? t('chart.unknown') : `${Math.round(object.average_latency_ms).toLocaleString()} ms` }}
               </td>
               <td class="px-3 py-4">
                 <div class="flex h-7 min-w-36 gap-0.5">
@@ -215,11 +215,11 @@
                     :key="index"
                     class="min-w-1 flex-1 rounded-sm"
                     :class="statusColor(bucket.status)"
-                    :title="`${dateTime(bucket.from)} - ${dateTime(bucket.to)}: ${statusLabel(bucket.status)} (${bucket.service_availability.denominator} 个样本)`"
+                    :title="t('ui.valueValueValueValueSamples', { value: dateTime(bucket.from), value2: dateTime(bucket.to), value3: statusLabel(bucket.status), value4: bucket.service_availability.denominator })"
                   /><span
                     v-if="object.timeline.length === 0"
                     class="flex-1 rounded-sm bg-muted"
-                    title="暂无样本"
+                    :title="t('ui.noSample')"
                   />
                 </div>
               </td>
@@ -227,8 +227,8 @@
                 <button
                   type="button"
                   class="flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
-                  :aria-label="`查看 ${object.name}`"
-                  title="查看详情"
+                  :aria-label="t('ui.viewValue', { name: object.name })"
+                  :title="t('ui.viewDetails')"
                   @click="selectObject(object.id)"
                 >
                   <ChevronRight class="h-4 w-4" />
@@ -239,11 +239,11 @@
         </table>
       </div>
       <div class="flex items-center justify-between gap-3 border-t border-border pt-4 text-xs text-muted-foreground">
-        <span>共 {{ page.total }} 个对象</span><div class="flex items-center gap-3">
+        <span>{{ t('ui.total76e547a') }} {{ page.total }} {{ t('ui.targets') }}</span><div class="flex items-center gap-3">
           <button
             type="button"
-            title="上一页"
-            aria-label="上一页"
+            :title="t('userStats.pagination.previous')"
+            :aria-label="t('userStats.pagination.previous')"
             class="flex h-8 w-8 items-center justify-center rounded-md border border-input disabled:opacity-30"
             :disabled="offset === 0 || loading"
             @click="setQuery({ offset: String(Math.max(0, offset - 25)) })"
@@ -251,8 +251,8 @@
             <ChevronLeft class="h-4 w-4" />
           </button><span>{{ Math.floor(offset / 25) + 1 }} / {{ Math.max(1, Math.ceil(page.total / 25)) }}</span><button
             type="button"
-            title="下一页"
-            aria-label="下一页"
+            :title="t('userStats.pagination.next')"
+            :aria-label="t('userStats.pagination.next')"
             class="flex h-8 w-8 items-center justify-center rounded-md border border-input disabled:opacity-30"
             :disabled="offset + 25 >= page.total || loading"
             @click="setQuery({ offset: String(offset + 25) })"
@@ -264,7 +264,7 @@
     </template>
     <Dialog
       :open="Boolean(selectedId)"
-      :title="detail?.name || '健康详情'"
+      :title="detail?.name || t('ui.healthDetails')"
       max-width="2xl"
       @update:open="closeDetail"
     >
@@ -273,7 +273,7 @@
         role="status"
         class="py-8 text-center text-sm text-muted-foreground"
       >
-        加载中
+        {{ t('ui.loading') }}
       </div>
       <div
         v-else-if="detailError"
@@ -295,50 +295,50 @@
         <dl class="grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
           <div>
             <dt class="text-muted-foreground">
-              服务可用率
+              {{ t('ui.serviceAvailability') }}
             </dt><dd class="mt-1 font-medium">
               {{ percentage(detail.service_availability.value) }}
             </dd>
           </div><div>
             <dt class="text-muted-foreground">
-              最终请求成功率
+              {{ t('ui.finalRequestSuccessRate') }}
             </dt><dd class="mt-1 font-medium">
               {{ percentage(detail.request_success.value) }}
             </dd>
           </div><div>
             <dt class="text-muted-foreground">
-              有效服务样本
+              {{ t('ui.validServiceSamples') }}
             </dt><dd class="mt-1">
               {{ detail.service_availability.denominator.toLocaleString() }}
             </dd>
           </div><div>
             <dt class="text-muted-foreground">
-              已排除请求
+              {{ t('ui.excludedRequests') }}
             </dt><dd class="mt-1">
               {{ detail.coverage.excluded_count.toLocaleString() }}
             </dd>
           </div><div>
             <dt class="text-muted-foreground">
-              未分类失败
+              {{ t('ui.unclassifiedFailures') }}
             </dt><dd class="mt-1">
               {{ detail.coverage.unknown_failure_count.toLocaleString() }}
             </dd>
           </div><div>
             <dt class="text-muted-foreground">
-              最后请求
+              {{ t('ui.lastRequest') }}
             </dt><dd class="mt-1">
-              {{ detail.last_request_at ? dateTime(detail.last_request_at) : '无流量' }}
+              {{ detail.last_request_at ? dateTime(detail.last_request_at) : t('ui.noTraffic') }}
             </dd>
           </div><template v-if="adminDetail">
             <div>
               <dt class="text-muted-foreground">
-                渠道尝试成功率
+                {{ t('ui.channelAttemptSuccessRate') }}
               </dt><dd class="mt-1">
                 {{ percentage(adminDetail.attempts.success.value) }}
               </dd>
             </div><div>
               <dt class="text-muted-foreground">
-                执行中渠道尝试
+                {{ t('ui.channelAttemptsInProgress') }}
               </dt><dd class="mt-1">
                 {{ adminDetail.attempts.in_progress_count }}
               </dd>
@@ -359,20 +359,20 @@
           :to="usageLink"
           class="inline-flex items-center gap-2 text-sm font-medium text-primary"
         >
-          使用记录<ArrowUpRight class="h-4 w-4" />
+          {{ t('nav.usageRecords') }}<ArrowUpRight class="h-4 w-4" />
         </RouterLink>
       </div>
     </Dialog>
     <Dialog
       v-model:open="publicationOpen"
-      title="状态页发布（/status）"
+      :title="t('ui.statusPagePublishingStatus')"
       max-width="3xl"
     >
       <div
         v-if="publicationLoading"
         class="py-8 text-center text-sm text-muted-foreground"
       >
-        加载中
+        {{ t('ui.loading') }}
       </div>
       <div
         v-else-if="publication"
@@ -382,19 +382,19 @@
           v-model="publication.enabled"
           type="checkbox"
           class="h-4 w-4 accent-primary"
-        >启用 /status 状态页</label>
+        >{{ t('ui.enableTheStatusPage') }}</label>
         <div class="overflow-x-auto">
           <table class="w-full min-w-[560px] text-left text-xs">
             <thead>
               <tr class="border-b border-border text-muted-foreground">
                 <th class="pb-2 font-medium">
-                  类型
+                  {{ t('ui.typeba40014') }}
                 </th><th class="pb-2 font-medium">
-                  监控对象
+                  {{ t('ui.monitoredTargets') }}
                 </th><th class="pb-2 font-medium">
-                  公开 ID
+                  {{ t('ui.publicId') }}
                 </th><th class="pb-2 font-medium">
-                  公开名称
+                  {{ t('ui.publicName') }}
                 </th><th />
               </tr>
             </thead><tbody>
@@ -408,37 +408,37 @@
                     class="h-8 w-24 rounded-md border border-input bg-background px-2"
                   >
                     <option value="api_format">
-                      API 格式
+                      {{ t('ui.apiFormat') }}
                     </option><option value="model">
-                      模型
+                      {{ t('ui.model') }}
                     </option>
                   </select>
                 </td><td class="pr-2">
                   <input
                     v-model="object.value"
-                    aria-label="监控对象"
+                    :aria-label="t('ui.monitoredTargets')"
                     class="h-8 w-full rounded-md border border-input bg-background px-2"
                     maxlength="256"
                   >
                 </td><td class="pr-2">
                   <input
                     v-model="object.public_id"
-                    aria-label="公开 ID"
+                    :aria-label="t('ui.publicId')"
                     class="h-8 w-full rounded-md border border-input bg-background px-2"
                     maxlength="80"
                   >
                 </td><td class="pr-2">
                   <input
                     v-model="object.display_name"
-                    aria-label="公开名称"
+                    :aria-label="t('ui.publicName')"
                     class="h-8 w-full rounded-md border border-input bg-background px-2"
                     maxlength="120"
                   >
                 </td><td>
                   <button
                     type="button"
-                    title="移除公开对象"
-                    aria-label="移除公开对象"
+                    :title="t('ui.removePublicTarget')"
+                    :aria-label="t('ui.removePublicTarget')"
                     class="flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
                     @click="publication.objects.splice(index, 1)"
                   >
@@ -454,7 +454,7 @@
           class="inline-flex items-center gap-2 text-sm text-primary"
           @click="publication.objects.push({ public_id: '', kind: 'api_format', value: '', display_name: '' })"
         >
-          <Plus class="h-4 w-4" />添加对象
+          <Plus class="h-4 w-4" />{{ t('ui.addTarget') }}
         </button>
         <div
           v-if="publicationError"
@@ -469,14 +469,14 @@
             target="_blank"
             class="inline-flex items-center gap-2 text-sm text-muted-foreground"
           >
-            公开状态页<ArrowUpRight class="h-4 w-4" />
+            {{ t('ui.publicStatusPage') }}<ArrowUpRight class="h-4 w-4" />
           </RouterLink><button
             type="button"
             class="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-4 text-sm text-primary-foreground disabled:opacity-50"
             :disabled="savingPublication"
             @click="savePublication"
           >
-            <Save class="h-4 w-4" />保存
+            <Save class="h-4 w-4" />{{ t('ui.save') }}
           </button>
         </div>
       </div>
@@ -492,6 +492,11 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const props = withDefaults(defineProps<{ isAdmin?: boolean; publicPage?: boolean }>(), { isAdmin: false, publicPage: false })
+
+const { t, locale } = useI18n()
+
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { AlertTriangle, ArrowUpRight, ChevronLeft, ChevronRight, Globe, LoaderCircle, Plus, RefreshCw, Save, Trash2 } from 'lucide-vue-next'
@@ -505,13 +510,12 @@ import {
   type PublicHealthObject, type PublicHealthQuery, type ServiceHealthStatus,
 } from '@/api/endpoints/health-v2'
 
-const props = withDefaults(defineProps<{ isAdmin?: boolean; publicPage?: boolean }>(), { isAdmin: false, publicPage: false })
 const route = useRoute()
 const router = useRouter()
 const tabs = computed(() => [
-  { kind: 'api_format' as const, label: 'API 格式' },
-  { kind: 'model' as const, label: '模型' },
-  ...(props.isAdmin ? [{ kind: 'provider' as const, label: '提供商' }] : []),
+  { kind: 'api_format' as const, get label() { return t('ui.apiFormat') } },
+  { kind: 'model' as const, get label() { return t('ui.model') } },
+  ...(props.isAdmin ? [{ kind: 'provider' as const, get label() { return t('nav.providers') } }] : []),
 ])
 const kind = computed<HealthObjectKind>(() => tabs.value.find(tab => tab.kind === route.query.kind)?.kind ?? 'api_format')
 const window = computed<HealthWindow>(() => ['1h', '6h', '24h', '72h'].includes(String(route.query.window)) ? route.query.window as HealthWindow : '6h')
@@ -537,9 +541,9 @@ function setQuery(patch: Record<string, string | undefined>, push = false) { voi
 function changeWindow(event: Event) { setQuery({ window: (event.target as HTMLSelectElement).value, offset: undefined, object: undefined }) }
 function selectObject(id: string) { setQuery({ object: id }, true) }
 function closeDetail(open: boolean) { if (!open) setQuery({ object: undefined }) }
-function percentage(value: number | null) { return value == null ? '未知' : `${(value * 100).toFixed(2)}%` }
-function dateTime(value: string) { return new Date(value).toLocaleString(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
-function statusLabel(status: ServiceHealthStatus) { return { healthy: '正常', degraded: '波动', unavailable: '异常', unknown: '未知' }[status] }
+function percentage(value: number | null) { return value == null ? t('chart.unknown') : `${(value * 100).toFixed(2)}%` }
+function dateTime(value: string) { return new Date(value).toLocaleString(locale.value, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
+function statusLabel(status: ServiceHealthStatus) { return { healthy: t('health.status.healthy'), degraded: t('health.status.degraded'), unavailable: t('health.status.unavailable'), unknown: t('chart.unknown') }[status] }
 function statusColor(status: ServiceHealthStatus) { return { healthy: 'bg-emerald-500', degraded: 'bg-amber-500', unavailable: 'bg-red-500', unknown: 'bg-muted-foreground/25' }[status] }
 async function load() {
   const version = ++loadVersion
@@ -561,7 +565,7 @@ async function load() {
   } catch (cause) {
     if (version !== loadVersion || controller.signal.aborted) return
     const status = (cause as { response?: { status?: number } }).response?.status
-    error.value = status === 404 && props.publicPage ? '公开状态页尚未启用' : '健康数据暂时不可用，请稍后刷新。'
+    error.value = status === 404 && props.publicPage ? t('health.publicDisabled') : t('health.dataUnavailable')
   } finally { if (version === loadVersion) { loading.value = false; refreshTimer = setTimeout(load, 60_000) } }
 }
 async function loadDetail() {
@@ -579,7 +583,7 @@ async function loadDetail() {
         ? await getPublicHealthObject(selectedId.value, query.value as PublicHealthQuery, detailController.signal)
         : await getUserHealthObject(selectedId.value, query.value as PublicHealthQuery, detailController.signal)
     if (version === detailVersion) detail.value = result.data
-  } catch { if (version === detailVersion && !detailController.signal.aborted) detailError.value = '对象详情暂时不可用' }
+  } catch { if (version === detailVersion && !detailController.signal.aborted) detailError.value = t('health.detailUnavailable') }
   finally { if (version === detailVersion) detailLoading.value = false }
 }
 const usageLink = computed(() => ({ path: '/admin/usage', query: {
@@ -594,19 +598,20 @@ const savingPublication = ref(false)
 async function openPublication() {
   publicationOpen.value = true; publicationLoading.value = true; publicationError.value = ''
   try { publication.value = await getHealthPublication() }
-  catch { publicationError.value = '状态页发布配置暂时不可用' }
+  catch { publicationError.value = t('health.publicationUnavailable') }
   finally { publicationLoading.value = false }
 }
 async function savePublication() {
   if (!publication.value) return
   savingPublication.value = true; publicationError.value = ''
   try { publication.value = await saveHealthPublication(publication.value); publicationOpen.value = false }
-  catch (cause) { publicationError.value = (cause as { response?: { data?: { detail?: string } } }).response?.data?.detail || '保存失败，请稍后重试' }
+  catch (cause) { publicationError.value = (cause as { response?: { data?: { detail?: string } } }).response?.data?.detail || t('health.saveFailed') }
   finally { savingPublication.value = false }
 }
 watch([kind, window, offset, () => props.isAdmin, () => props.publicPage], () => { summary.value = null; page.value = null; void load() }, { immediate: true })
 watch([selectedId, kind, window], loadDetail, { immediate: true })
 onBeforeUnmount(() => { ++loadVersion; ++detailVersion; controller?.abort(); detailController?.abort(); clearTimeout(refreshTimer) })
+
 </script>
 
 <style scoped>

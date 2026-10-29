@@ -4,13 +4,13 @@
     class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground"
     role="status"
   >
-    {{ legacyT('正在加载用户套餐...') }}
+    {{ t('ui.loadingUserPlans') }}
   </div>
   <div
     v-else-if="!entitlements.length"
     class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground"
   >
-    {{ emptyText || text('暂无套餐记录', 'No plan records') }}
+    {{ emptyText || t('users.plans.empty') }}
   </div>
   <div
     v-else
@@ -45,10 +45,10 @@
         </div>
         <div class="flex shrink-0 items-start gap-2">
           <div class="text-left text-[11px] text-muted-foreground sm:text-right">
-            <div>{{ legacyT('开始：') }}{{ dateTime(item.starts_at) }}</div>
-            <div>{{ legacyT('到期：') }}{{ dateTime(item.expires_at) }}</div>
+            <div>{{ t('ui.starts') }}{{ dateTime(item.starts_at) }}</div>
+            <div>{{ t('ui.expirescd41276') }}{{ dateTime(item.expires_at) }}</div>
             <div v-if="showUpdatedAt">
-              {{ text('更新：', 'Updated: ') }}{{ dateTime(item.updated_at || item.created_at) }}
+              {{ t('users.plans.updated') }}{{ dateTime(item.updated_at || item.created_at) }}
             </div>
           </div>
           <slot
@@ -77,9 +77,8 @@ const props = defineProps<{
   formatDateTime?: (value?: string | null) => string
   entitlementLabels?: (items: BillingEntitlement[] | undefined) => string[]
 }>()
-const { locale, legacyT } = useI18n()
-const text = (zh: string, en: string) => locale.value === 'zh-CN' ? zh : en
-const labels = (items: BillingEntitlement[]) => props.entitlementLabels?.(items) ?? billingEntitlementLabels(items, legacyT)
+const { locale, t } = useI18n()
+const labels = (items: BillingEntitlement[]) => props.entitlementLabels?.(items) ?? billingEntitlementLabels(items, t)
 function dateTime(value?: string | null) {
   if (props.formatDateTime) return props.formatDateTime(value)
   return value ? new Date(value).toLocaleString(locale.value, {
@@ -87,11 +86,11 @@ function dateTime(value?: string | null) {
   }) : '-'
 }
 function statusLabel(item: AdminUserPlanEntitlement) {
-  if (item.active) return text('生效中', 'Active')
-  if (item.status === 'revoked') return text('已撤销', 'Revoked')
-  if (item.status === 'replaced') return text('已替换', 'Replaced')
-  if (item.status === 'expired' || (item.status === 'active' && item.expires_at && Date.parse(item.expires_at) <= Date.now())) return text('已到期', 'Expired')
-  if (item.status === 'active' && item.starts_at && Date.parse(item.starts_at) > Date.now()) return text('待生效', 'Scheduled')
+  if (item.active) return t('ui.active')
+  if (item.status === 'revoked') return t('users.plans.revoked')
+  if (item.status === 'replaced') return t('users.plans.replaced')
+  if (item.status === 'expired' || (item.status === 'active' && item.expires_at && Date.parse(item.expires_at) <= Date.now())) return t('users.plans.expired')
+  if (item.status === 'active' && item.starts_at && Date.parse(item.starts_at) > Date.now()) return t('users.plans.scheduled')
   return item.status
 }
 </script>

@@ -35,6 +35,9 @@ export { default as SelectItem } from './select-item.vue'
 export { default as Badge } from './badge.vue'
 export { default as Skeleton } from './skeleton.vue'
 
+// Drawer 抽屉
+export { default as Drawer } from './drawer/Drawer.vue'
+
 // Dialog 对话框系列
 export { default as Dialog } from './dialog/Dialog.vue'
 export { default as DialogContent } from './dialog/DialogContent.vue'

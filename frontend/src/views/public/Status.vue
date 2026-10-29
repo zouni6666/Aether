@@ -12,7 +12,7 @@
           to="/"
           class="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
         >
-          <ArrowLeft class="h-4 w-4" />首页
+          <ArrowLeft class="h-4 w-4" />{{ t('site.home.section.home') }}
         </RouterLink>
       </div>
     </header>
@@ -23,10 +23,14 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { ArrowLeft } from 'lucide-vue-next'
-import HeaderLogo from '@/components/HeaderLogo.vue'
+import HeaderLogo from '@/components/brand/HeaderLogo.vue'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import HealthMonitorView from '@/features/health-monitor/HealthMonitorView.vue'
 
 const { siteName } = useSiteInfo()
+
 </script>

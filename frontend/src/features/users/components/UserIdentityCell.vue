@@ -17,7 +17,7 @@
           :variant="row.roleBadgeVariant"
           class="h-5 flex-shrink-0 px-1.5 py-0 text-[10px] font-medium"
         >
-          {{ legacyT(row.roleLabel) }}
+          {{ row.roleLabel }}
         </Badge>
       </div>
       <div
@@ -47,7 +47,6 @@
 import Badge from '@/components/ui/badge.vue'
 import Avatar from '@/components/ui/avatar.vue'
 import AvatarFallback from '@/components/ui/avatar-fallback.vue'
-import { useI18n } from '@/i18n'
 import type { UserManagementRow } from './user-management-types'
 
 withDefaults(defineProps<{
@@ -57,5 +56,4 @@ withDefaults(defineProps<{
   showGroups: true,
 })
 
-const { legacyT } = useI18n()
 </script>

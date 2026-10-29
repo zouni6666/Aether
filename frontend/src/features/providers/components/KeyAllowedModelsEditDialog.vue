@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="isOpen"
-    :title="props.apiKey?.name ? `模型权限 - ${props.apiKey.name}` : '模型权限'"
-    :description="isAutoFetchMode ? '自动获取模式：只允许已选择的模型，锁定的模型刷新时不会被删除' : '选中的模型将被允许访问，不选择则允许全部'"
+    :title="props.apiKey?.name ? t('ui.modelPermissionsValue', { name: props.apiKey.name }) : t('guide.nav.concepts.modelPermission')"
+    :description="isAutoFetchMode ? t('ui.automaticModeAllowsOnlySelectedModelsLockedModelsAreRetained') : t('ui.allowAccessToSelectedModelsSelectNoneToAllowAll')"
     :icon="Shield"
     size="2xl"
     @update:model-value="handleDialogUpdate"
@@ -15,7 +15,7 @@
             <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               v-model="searchQuery"
-              placeholder="搜索模型或添加自定义模型..."
+              :placeholder="t('ui.searchModelsOrAddACustomModel')"
               class="pl-8 h-9"
             />
           </div>
@@ -23,28 +23,22 @@
           <span
             v-if="selectedModels.length === 0 && !isAutoFetchMode"
             class="h-7 px-2.5 text-xs rounded-md flex items-center bg-muted text-muted-foreground shrink-0"
-          >
-            全部模型
-          </span>
+          > {{ t('ui.allModels') }} </span>
           <span
             v-else-if="selectedModels.length === 0 && isAutoFetchMode"
             class="h-7 px-2.5 text-xs rounded-md flex items-center bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0"
-          >
-            未选择模型
-          </span>
+          > {{ t('ui.noModelsSelected') }} </span>
           <span
             v-else
             class="h-7 px-2.5 text-xs rounded-md flex items-center bg-primary/10 text-primary shrink-0"
-          >
-            已选 {{ selectedModels.length }} 个
-          </span>
+          > {{ t('ui.selected') }} {{ selectedModels.length }} {{ t('ui.items3a11681') }} </span>
           <!-- 刷新上游模型按钮 -->
           <button
             v-if="upstreamModelsLoaded"
             type="button"
             class="p-2 hover:bg-muted rounded-md transition-colors shrink-0"
             :disabled="fetchingUpstreamModels"
-            title="刷新上游模型"
+            :title="t('ui.refreshUpstreamModels')"
             @click="refreshUpstreamModels"
           >
             <RefreshCw
@@ -56,7 +50,7 @@
             v-else-if="!fetchingUpstreamModels"
             type="button"
             class="p-2 hover:bg-muted rounded-md transition-colors shrink-0"
-            title="从提供商获取模型"
+            :title="t('ui.fetchModelsFromProvider')"
             @click="refreshUpstreamModels"
           >
             <Zap class="w-4 h-4" />
@@ -92,7 +86,7 @@
                     <Plus class="w-4 h-4 text-muted-foreground" />
                     <span class="text-sm font-mono">{{ searchQuery }}</span>
                   </div>
-                  <span class="text-xs text-muted-foreground">添加自定义模型</span>
+                  <span class="text-xs text-muted-foreground">{{ t('ui.addCustomModel') }}</span>
                 </div>
               </div>
 
@@ -107,7 +101,7 @@
                       class="w-4 h-4 transition-transform shrink-0"
                       :class="collapsedGroups.has('custom') ? '-rotate-90' : ''"
                     />
-                    <span class="text-xs font-medium">自定义模型</span>
+                    <span class="text-xs font-medium">{{ t('ui.customModel') }}</span>
                     <span class="text-xs text-muted-foreground">({{ customModels.length }})</span>
                   </div>
                 </div>
@@ -135,7 +129,7 @@
                       v-if="selectedModels.includes(model)"
                       type="button"
                       class="p-1 rounded hover:bg-muted-foreground/10 transition-colors shrink-0 text-muted-foreground"
-                      :title="isLocked(model) ? '已锁定 - 点击解锁' : '点击锁定（刷新时不会被删除）'"
+                      :title="isLocked(model) ? t('ui.lockedClickToUnlock') : t('ui.lockToRetainDuringRefresh')"
                       @click="toggleLock(model, $event)"
                     >
                       <Lock
@@ -163,7 +157,7 @@
                       class="w-4 h-4 transition-transform shrink-0"
                       :class="collapsedGroups.has('global') ? '-rotate-90' : ''"
                     />
-                    <span class="text-xs font-medium">提供商模型</span>
+                    <span class="text-xs font-medium">{{ t('ui.providerModel') }}</span>
                     <span class="text-xs text-muted-foreground">({{ filteredProviderModels.length }})</span>
                   </div>
                   <button
@@ -171,7 +165,7 @@
                     class="text-xs text-primary hover:underline"
                     @click.stop="toggleAllProviderModels"
                   >
-                    {{ isAllProviderModelsSelected ? '取消全选' : '全选' }}
+                    {{ isAllProviderModelsSelected ? t('ui.deselectAll') : t('ui.selectAll') }}
                   </button>
                 </div>
                 <!-- 内容 -->
@@ -209,7 +203,7 @@
                       v-if="selectedModels.includes(model.name)"
                       type="button"
                       class="p-1 rounded hover:bg-muted-foreground/10 transition-colors shrink-0 text-muted-foreground"
-                      :title="isLocked(model.name) ? '已锁定 - 点击解锁' : '点击锁定（刷新时不会被删除）'"
+                      :title="isLocked(model.name) ? t('ui.lockedClickToUnlock') : t('ui.lockToRetainDuringRefresh')"
                       @click="toggleLock(model.name, $event)"
                     >
                       <Lock
@@ -237,14 +231,12 @@
                       class="w-4 h-4 transition-transform shrink-0"
                       :class="collapsedGroups.has('upstream') ? '-rotate-90' : ''"
                     />
-                    <span class="text-xs font-medium">上游模型</span>
+                    <span class="text-xs font-medium">{{ t('ui.upstreamModels') }}</span>
                     <span class="text-xs text-muted-foreground">({{ upstreamModelNames.length }})</span>
                     <span
                       v-if="isAutoFetchMode"
                       class="text-xs text-muted-foreground"
-                    >
-                      (自动同步)
-                    </span>
+                    > {{ t('ui.automaticSync') }} </span>
                   </div>
                   <button
                     v-if="!isAutoFetchMode"
@@ -252,7 +244,7 @@
                     class="text-xs text-primary hover:underline"
                     @click.stop="toggleAllUpstreamModels"
                   >
-                    {{ isAllUpstreamModelsSelected ? '取消全选' : '全选' }}
+                    {{ isAllUpstreamModelsSelected ? t('ui.deselectAll') : t('ui.selectAll') }}
                   </button>
                 </div>
                 <!-- 内容 -->
@@ -294,7 +286,7 @@
                       v-if="selectedModels.includes(model.id)"
                       type="button"
                       class="p-1 rounded hover:bg-muted-foreground/10 transition-colors shrink-0 text-muted-foreground"
-                      :title="isLocked(model.id) ? '已锁定 - 点击解锁' : '点击锁定（刷新时不会被删除）'"
+                      :title="isLocked(model.id) ? t('ui.lockedClickToUnlock') : t('ui.lockToRetainDuringRefresh')"
                       @click="toggleLock(model.id, $event)"
                     >
                       <Lock
@@ -317,7 +309,7 @@
               >
                 <Shield class="w-10 h-10 mb-2 opacity-30" />
                 <p class="text-sm">
-                  {{ searchQuery ? '无匹配结果' : '暂无可选模型' }}
+                  {{ searchQuery ? t('ui.noMatchingResults') : t('ui.noModelsAvailableToSelect') }}
                 </p>
               </div>
             </template>
@@ -329,20 +321,20 @@
     <template #footer>
       <div class="flex items-center justify-between w-full">
         <p class="text-xs text-muted-foreground">
-          {{ hasChanges ? '有未保存的更改' : '' }}
+          {{ hasChanges ? t('ui.unsavedChanges') : '' }}
         </p>
         <div class="flex items-center gap-2">
           <Button
             :disabled="saving || !hasChanges"
             @click="handleSave"
           >
-            {{ saving ? '保存中...' : '保存' }}
+            {{ saving ? t('ui.saving') : t('ui.save') }}
           </Button>
           <Button
             variant="outline"
             @click="handleCancel"
           >
-            取消
+            {{ t('common.cancel') }}
           </Button>
         </div>
       </div>
@@ -351,6 +343,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch, onUnmounted } from 'vue'
 import {
   Shield,
@@ -366,7 +360,7 @@ import {
 } from 'lucide-vue-next'
 import { Dialog, Button, Input } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
-import { useConfirm } from '@/composables/useConfirm'
+import { useDiscardConfirm } from '@/composables/useDiscardConfirm'
 import { parseApiError } from '@/utils/errorParser'
 import {
   getProviderModels,
@@ -395,8 +389,10 @@ const emit = defineEmits<{
   saved: []
 }>()
 
+const { t } = useI18n()
+
 const { success, error: showError, warning: showWarning } = useToast()
-const { confirmWarning } = useConfirm()
+const { confirmDiscard } = useDiscardConfirm(() => hasChanges.value)
 const { fetchModels: fetchCachedModels } = useUpstreamModelsCache()
 
 const isOpen = computed(() => props.open)
@@ -671,7 +667,7 @@ async function loadProviderModels() {
     }))
   } catch {
     if (loadingCancelled) return
-    showError('加载提供商模型失败', '错误')
+    showError(t('ui.failedToLoadProviderModels'), t('ui.error'))
   } finally {
     loadingProviderModels.value = false
   }
@@ -692,10 +688,10 @@ async function fetchUpstreamModels(forceRefresh = false) {
       const upstreamIds = new Set(result.models.map((m: UpstreamModel) => m.id))
       allCustomModels.value = allCustomModels.value.filter(m => !upstreamIds.has(m))
       if (result.warning) {
-        showWarning(result.warning, '部分格式获取失败')
+        showWarning(result.warning, t('ui.failedToFetchSomeFormats'))
       }
     } else if (result.error) {
-      showError(result.error, '获取上游模型失败')
+      showError(result.error, t('ui.failedToFetchUpstreamModels'))
     }
   } finally {
     fetchingUpstreamModels.value = false
@@ -706,7 +702,7 @@ async function fetchUpstreamModels(forceRefresh = false) {
 async function refreshUpstreamModels() {
   await fetchUpstreamModels(true)
   if (upstreamModels.value.length > 0) {
-    success('上游模型已刷新')
+    success(t('ui.upstreamModelsRefreshed'))
     // 获取成功后收缩所有分组
     collapsedGroups.value = new Set(['global', 'upstream', 'custom'])
   }
@@ -769,18 +765,12 @@ onUnmounted(() => {
 })
 
 async function handleDialogUpdate(value: boolean) {
-  if (!value && hasChanges.value) {
-    const confirmed = await confirmWarning('有未保存的更改，确定要关闭吗？', '放弃更改')
-    if (!confirmed) return
-  }
+  if (!value && !(await confirmDiscard())) return
   if (!value) emit('close')
 }
 
 async function handleCancel() {
-  if (hasChanges.value) {
-    const confirmed = await confirmWarning('有未保存的更改，确定要关闭吗？', '放弃更改')
-    if (!confirmed) return
-  }
+  if (!(await confirmDiscard())) return
   emit('close')
 }
 
@@ -800,13 +790,14 @@ async function handleSave() {
       allowed_models: newAllowed,
       locked_models: newLocked
     })
-    success('模型权限已更新', '成功')
+    success(t('ui.modelPermissionsUpdated'), t('ui.success'))
     emit('saved')
     emit('close')
   } catch (err: unknown) {
-    showError(parseApiError(err, '保存失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToSave')), t('ui.error'))
   } finally {
     saving.value = false
   }
 }
+
 </script>

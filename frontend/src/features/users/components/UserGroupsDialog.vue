@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="open"
-    :title="legacyT('用户分组')"
-    :description="legacyT('管理用户组、默认注册组、成员和组级访问控制')"
+    :title="t('ui.userGroupscf4c1d2')"
+    :description="t('ui.manageUserGroupsTheDefaultRegistrationGroupMembersAndGroup')"
     size="4xl"
     persistent
     @update:model-value="handleDialogUpdate"
@@ -52,13 +52,13 @@
         :disabled="saving"
         @click="emit('close')"
       >
-        {{ legacyT('关闭') }}
+        {{ t('ui.close') }}
       </Button>
       <Button
         :disabled="saving || !form.name.trim()"
         @click="saveGroup"
       >
-        {{ legacyT('保存') }}
+        {{ t('ui.save') }}
       </Button>
     </template>
   </Dialog>
@@ -102,7 +102,7 @@ const emit = defineEmits<{
 const usersStore = useUsersStore()
 const { success, error } = useToast()
 const { confirmDanger, confirmInfo } = useConfirm()
-const { legacyT, locale } = useI18n()
+const { t } = useI18n()
 const {
   providerOptions,
   apiFormatOptions,
@@ -120,10 +120,7 @@ const USER_OPTIONS_CACHE_TTL_MS = 30 * 1000
 let dialogUsersLoadedAt = 0
 let dialogUsersLoadedVersion = -1
 
-const groupPolicyHelpText = '模型、供应商和端点会在多个用户组之间叠加授权；unrestricted 仍表示不限制，deny_all 只是不授予额外权限。速率限制按付费档位取更高额度，0 表示不限速；用户/API Key 自身限制仍会收窄最终权限。'
-const groupPolicyHelpTextLocalized = computed(() => locale.value === 'en-US'
-  ? 'Models, providers, and endpoints accumulate across multiple user groups. unrestricted still means no restriction, while deny_all grants no extra permission. Rate limits take the higher quota by tier, and 0 means unlimited. User/API key limits still narrow the final permissions.'
-  : groupPolicyHelpText)
+const groupPolicyHelpTextLocalized = computed(() => t('ui.modelsProvidersAndEndpointsAccumulateAcrossMultipleUserGroupsUnrestricted'))
 
 const form = ref<UserGroupFormState>(createEmptyForm())
 
@@ -139,7 +136,7 @@ watch(
     if (!open) return
     void loadDialogData()
     void loadAccessControlOptions().catch((err) => {
-      error(parseApiError(err, '加载访问控制选项失败'), legacyT('加载访问控制选项失败'))
+      error(parseApiError(err, t('ui.failedToLoadAccessControlOptions')), t('ui.failedToLoadAccessControlOptions'))
     })
   },
 )
@@ -168,7 +165,7 @@ async function loadDialogData(): Promise<void> {
       startCreate()
     }
   } catch (err) {
-    error(parseApiError(err, '加载用户分组失败'), legacyT('加载用户分组失败'))
+    error(parseApiError(err, t('ui.failedToLoadUserGroups')), t('ui.failedToLoadUserGroups'))
   } finally {
     loading.value = false
   }
@@ -213,7 +210,7 @@ async function selectGroup(groupId: string): Promise<void> {
     memberUserIds.value = members.map((member) => member.user_id)
   } catch (err) {
     memberUserIds.value = []
-    error(parseApiError(err, '加载分组成员失败'), legacyT('加载分组成员失败'))
+    error(parseApiError(err, t('ui.failedToLoadGroupMembers')), t('ui.failedToLoadGroupMembers'))
   }
 }
 
@@ -249,20 +246,18 @@ async function toggleDefault(): Promise<void> {
   const group = selectedGroup.value
   if (!group || group.is_default) return
   const confirmed = await confirmInfo(
-    locale.value === 'en-US'
-      ? `Set "${group.name}" as the default registration group? Locally registered users and OAuth-created users will join this group.`
-      : `确定将「${group.name}」设为默认注册组吗？后续本地注册和 OAuth 自动创建的用户将加入该分组。`,
-    legacyT('设为默认注册组'),
+    t('users.groups.setDefaultConfirm', { name: group.name }),
+    t('ui.setAsDefaultRegistrationGroup'),
   )
   if (!confirmed) return
   saving.value = true
   try {
     await usersStore.setDefaultUserGroup(group.id)
-    success(legacyT('已更新默认注册组'))
+    success(t('ui.defaultRegistrationGroupUpdated'))
     emit('changed')
     await loadDialogData()
   } catch (err) {
-    error(parseApiError(err, '设置默认注册组失败'), legacyT('设置默认注册组失败'))
+    error(parseApiError(err, t('ui.failedToSetDefaultRegistrationGroup')), t('ui.failedToSetDefaultRegistrationGroup'))
   } finally {
     saving.value = false
   }
@@ -300,12 +295,12 @@ async function saveGroup(): Promise<void> {
     if (!saved.is_default) {
       await usersStore.replaceUserGroupMembers(saved.id, memberUserIds.value)
     }
-    success(legacyT('用户分组已保存'))
+    success(t('ui.userGroupSaved'))
     emit('changed')
     editingGroupId.value = saved.id
     await loadDialogData()
   } catch (err) {
-    error(parseApiError(err, '保存用户分组失败'), legacyT('保存用户分组失败'))
+    error(parseApiError(err, t('ui.failedToSaveUserGroup')), t('ui.failedToSaveUserGroup'))
   } finally {
     saving.value = false
   }
@@ -315,21 +310,19 @@ async function deleteSelectedGroup(): Promise<void> {
   if (!selectedGroup.value) return
   const group = selectedGroup.value
   const confirmed = await confirmDanger(
-    locale.value === 'en-US'
-      ? `Delete user group ${group.name}? Member relationships will be cleaned up as well.`
-      : `确定要删除用户分组 ${group.name} 吗？成员关系会一并清理。`,
-    legacyT('删除用户分组'),
+    t('users.groups.deleteConfirm', { name: group.name }),
+    t('ui.deleteUserGroup'),
   )
   if (!confirmed) return
   saving.value = true
   try {
     await usersStore.deleteUserGroup(group.id)
-    success(legacyT('用户分组已删除'))
+    success(t('ui.userGroupDeleted'))
     emit('changed')
     editingGroupId.value = null
     await loadDialogData()
   } catch (err) {
-    error(parseApiError(err, '删除用户分组失败'), legacyT('删除用户分组失败'))
+    error(parseApiError(err, t('ui.failedToDeleteUserGroup')), t('ui.failedToDeleteUserGroup'))
   } finally {
     saving.value = false
   }

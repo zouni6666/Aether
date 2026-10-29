@@ -11,10 +11,10 @@
       >
         <SelectValue
           :placeholder="proxyNodesStore.loading
-            ? legacyT('加载节点列表中...')
+            ? t('ui.loadingNodeList')
             : nodeOptions.length === 0
-              ? legacyT('暂无可用节点')
-              : legacyT('选择代理节点...')"
+              ? t('ui.noAvailableNodes')
+              : t('ui.selectProxyNode40ff86b')"
         />
       </SelectTrigger>
       <SelectContent>
@@ -58,8 +58,9 @@ defineEmits<{
   'update:modelValue': [value: string]
 }>()
 
+const { t } = useI18n()
+
 const proxyNodesStore = useProxyNodesStore()
-const { legacyT } = useI18n()
 
 /** 在线节点 + 保留当前已选节点（可能已离线） */
 const nodeOptions = computed(() => {

@@ -1,14 +1,14 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="Bark 推送"
-      description="第三方推送服务，用于通知服务的 Bark 渠道"
+      :title="t('ui.barkNotifications')"
+      :description="t('ui.thirdPartyPushServiceForTheBarkNotificationChannel')"
     />
 
     <div class="mt-6 space-y-6">
       <CardSection
-        title="服务配置"
-        description="配置 Bark Device Key、服务器地址和服务启用状态"
+        :title="t('ui.serviceSettings')"
+        :description="t('ui.configureBarkDeviceKeyServerUrlAndServiceEnabledState')"
       >
         <template #actions>
           <Button
@@ -16,18 +16,16 @@
             :disabled="saving"
             @click="saveConfig"
           >
-            {{ saving ? '保存中...' : '保存' }}
+            {{ saving ? t('ui.saving') : t('ui.save') }}
           </Button>
         </template>
 
         <div class="space-y-5">
           <div class="flex items-center justify-between gap-4 rounded-lg border border-border/70 px-4 py-3">
             <div>
-              <Label class="text-sm font-medium">
-                启用 Bark 推送
-              </Label>
+              <Label class="text-sm font-medium"> {{ t('ui.enableBarkNotifications') }} </Label>
               <p class="mt-1 text-xs text-muted-foreground">
-                通知服务选择 Bark 时会检查此开关
+                {{ t('ui.barkMustBeEnabledBeforeTheNotificationServiceCanUse') }}
               </p>
             </div>
             <Switch
@@ -48,7 +46,7 @@
                 id="bark-device-key"
                 v-model="deviceKeyInput"
                 masked
-                :placeholder="deviceKeyIsSet ? '已设置（留空保持不变）' : '从 Bark App 推送地址中获取'"
+                :placeholder="deviceKeyIsSet ? t('ui.setLeaveEmptyToKeepUnchanged') : t('ui.findThisInYourBarkAppPushUrl')"
                 class="mt-1"
               />
               <p class="mt-1 text-xs text-muted-foreground">
@@ -60,9 +58,7 @@
               <Label
                 for="bark-server-url"
                 class="block text-sm font-medium"
-              >
-                服务器地址
-              </Label>
+              > {{ t('ui.serverAddress') }} </Label>
               <Input
                 id="bark-server-url"
                 v-model="serverUrlInput"
@@ -70,7 +66,7 @@
                 class="mt-1"
               />
               <p class="mt-1 text-xs text-muted-foreground">
-                支持官方服务或自建 Bark Server，保存时会去掉末尾斜杠
+                {{ t('ui.supportsTheOfficialServiceOrASelfHostedBarkServer') }}
               </p>
             </div>
           </div>
@@ -78,16 +74,14 @@
       </CardSection>
 
       <CardSection
-        title="通知模板"
-        description="模板支持 {title} 和 {body} 变量"
+        :title="t('ui.notificationTemplates')"
+        :description="t('ui.templatesSupportValueAndValueVariables')"
       >
         <div>
           <Label
             for="bark-template"
             class="block text-sm font-medium"
-          >
-            模板内容
-          </Label>
+          > {{ t('ui.templateContent') }} </Label>
           <Textarea
             id="bark-template"
             v-model="templateInput"
@@ -100,8 +94,8 @@
       </CardSection>
 
       <CardSection
-        title="测试服务"
-        description="按已保存配置发送一条 Bark 测试通知"
+        :title="t('ui.testService')"
+        :description="t('ui.sendABarkTestNotificationUsingTheSavedSettings')"
       >
         <div class="flex flex-wrap gap-2">
           <Button
@@ -109,13 +103,13 @@
             :disabled="testing || !deviceKeyIsSet"
             @click="handleTest"
           >
-            {{ testing ? '发送中...' : '发送测试' }}
+            {{ testing ? t('auth.register.sendingCode') : t('ui.sendTest') }}
           </Button>
           <RouterLink
             to="/admin/notification-service"
             class="inline-flex h-11 items-center rounded-xl px-3 text-sm text-primary hover:underline"
           >
-            打开通知服务
+            {{ t('ui.openNotificationService') }}
           </RouterLink>
         </div>
 
@@ -128,7 +122,7 @@
             :key="item.channel"
             class="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2 text-sm"
           >
-            <span>{{ formatChannel(item.channel) }}</span>
+            <span>{{ formatNotificationChannel(item.channel) }}</span>
             <span :class="item.success ? 'text-green-600 dark:text-green-400' : 'text-destructive'">
               {{ item.message }}
             </span>
@@ -140,6 +134,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { Button, Input, Label, Switch, Textarea } from '@/components/ui'
@@ -149,6 +146,7 @@ import { modulesApi } from '@/api/modules'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
+import { formatNotificationChannel } from './notificationChannel'
 
 const CONFIG_KEYS = {
   enabled: 'module.bark_push.enabled',
@@ -195,7 +193,7 @@ async function loadConfig() {
       : DEFAULT_SERVER_URL
     templateInput.value = typeof template?.value === 'string' ? template.value : ''
   } catch (err) {
-    error(parseApiError(err, '加载 Bark 推送配置失败'))
+    error(parseApiError(err, t('ui.failedToLoadBarkSettings')))
     log.error('加载 Bark 推送配置失败:', err)
   }
 }
@@ -228,9 +226,9 @@ async function saveConfig() {
       enabled.value = false
     }
     await modulesApi.setEnabled('bark_push', enabled.value)
-    success('Bark 推送配置已保存')
+    success(t('ui.barkSettingsSaved'))
   } catch (err) {
-    error(parseApiError(err, '保存 Bark 推送配置失败'))
+    error(parseApiError(err, t('ui.failedToSaveBarkSettings')))
     log.error('保存 Bark 推送配置失败:', err)
   } finally {
     saving.value = false
@@ -243,12 +241,12 @@ async function handleTest() {
     const result = await adminApi.testImportantNotification({ channel: 'bark' })
     lastTestResult.value = result.channels || []
     if (result.success) {
-      success(result.message || '测试通知已发送')
+      success(result.message || t('ui.testNotificationSent'))
     } else {
-      error(result.message || '测试通知发送失败')
+      error(result.message || t('ui.failedToSendTestNotification'))
     }
   } catch (err) {
-    error(parseApiError(err, '测试通知发送失败'))
+    error(parseApiError(err, t('ui.failedToSendTestNotification')))
     log.error('测试 Bark 推送失败:', err)
   } finally {
     testing.value = false
@@ -260,12 +258,4 @@ function normalizeServerUrl(value: string): string {
   return trimmed || DEFAULT_SERVER_URL
 }
 
-function formatChannel(channel: string): string {
-  if (channel === 'bark') return 'Bark'
-  if (channel === 'server_chan') return 'Server 酱'
-  if (channel === 'email') return '邮件'
-  if (channel === 'module') return '模块'
-  if (channel === 'none') return '无可用服务'
-  return channel
-}
 </script>

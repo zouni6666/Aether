@@ -7,8 +7,8 @@
 <script setup lang="ts">
 import { onMounted, onErrorCaptured, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import ToastContainer from '@/components/ToastContainer.vue'
-import ConfirmContainer from '@/components/ConfirmContainer.vue'
+import ToastContainer from '@/components/common/ToastContainer.vue'
+import ConfirmContainer from '@/components/common/ConfirmContainer.vue'
 import {
   AUTH_SESSION_SIGNAL_KEY,
   AUTH_STATE_CHANGE_EVENT,

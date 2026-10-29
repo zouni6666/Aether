@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="modelValue"
-    title="号池代理均分"
-    description="选择号池和代理节点后生成分配预览，再写入账号独立代理。"
+    :title="t('ui.poolProxyDistribution')"
+    :description="t('ui.selectAPoolAndProxyNodesGenerateAnAssignmentPreview')"
     size="3xl"
     persistent
     @update:model-value="handleOpenChange"
@@ -10,7 +10,7 @@
     <div class="space-y-4">
       <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
         <div class="space-y-1.5">
-          <Label>号池</Label>
+          <Label>{{ t('ui.pool') }}</Label>
           <Select
             :model-value="selectedProviderId"
             :disabled="loadingPools || executing || poolOptions.length === 0"
@@ -19,10 +19,10 @@
             <SelectTrigger class="h-9 text-xs">
               <SelectValue
                 :placeholder="loadingPools
-                  ? '加载号池中...'
+                  ? t('ui.loadingPools')
                   : poolOptions.length === 0
-                    ? '暂无可用号池'
-                    : '选择号池'"
+                    ? t('ui.noAvailablePools')
+                    : t('ui.selectPool')"
               />
             </SelectTrigger>
             <SelectContent>
@@ -39,7 +39,7 @@
 
         <div class="space-y-1.5">
           <div class="flex items-center justify-between gap-2">
-            <Label>代理节点</Label>
+            <Label>{{ t('ui.proxyNodes23f1b6a') }}</Label>
             <Button
               variant="ghost"
               size="sm"
@@ -47,14 +47,14 @@
               :disabled="executing || proxyNodeOptions.length === 0"
               @click="selectAllProxyNodes"
             >
-              全部
+              {{ t('ui.all5c55a67') }}
             </Button>
           </div>
           <MultiSelect
             v-model="selectedProxyNodeIds"
             :options="proxyNodeOptions"
-            placeholder="选择代理节点"
-            empty-text="暂无可用代理节点"
+            :placeholder="t('ui.selectProxyNode')"
+            :empty-text="t('ui.noAvailableProxyNodes')"
             trigger-class="h-9 text-xs"
             dropdown-min-width="22rem"
             :disabled="executing || proxyNodeOptions.length === 0"
@@ -64,7 +64,7 @@
 
       <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div class="space-y-1.5">
-          <Label>模式</Label>
+          <Label>{{ t('ui.mode') }}</Label>
           <div class="grid grid-cols-2 gap-2 rounded-lg border border-border/60 bg-muted/30 p-1">
             <Button
               type="button"
@@ -73,8 +73,7 @@
               :disabled="executing"
               @click="mode = 'fill'"
             >
-              <Shuffle class="mr-1.5 h-3.5 w-3.5" />
-              均衡补齐
+              <Shuffle class="mr-1.5 h-3.5 w-3.5" /> {{ t('ui.balanceFill') }}
             </Button>
             <Button
               type="button"
@@ -83,8 +82,7 @@
               :disabled="executing"
               @click="mode = 'rewrite'"
             >
-              <RefreshCw class="mr-1.5 h-3.5 w-3.5" />
-              强制重排
+              <RefreshCw class="mr-1.5 h-3.5 w-3.5" /> {{ t('ui.forceRebalance') }}
             </Button>
           </div>
         </div>
@@ -98,7 +96,7 @@
             class="mr-1.5 h-3.5 w-3.5"
             :class="{ 'animate-spin': loadingKeys }"
           />
-          {{ plan ? '刷新预览' : '生成预览' }}
+          {{ plan ? t('ui.refreshPreview') : t('ui.generatePreview') }}
         </Button>
       </div>
 
@@ -113,7 +111,7 @@
         v-else-if="!plan"
         class="rounded-lg border border-border/60 bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground"
       >
-        选择号池和代理节点后生成分配预览
+        {{ t('ui.selectAPoolAndProxyNodesToGenerateAnAssignment') }}
       </div>
 
       <div
@@ -123,7 +121,7 @@
         <div class="grid gap-2 text-xs sm:grid-cols-4">
           <div class="rounded-lg border bg-background px-3 py-2">
             <div class="text-muted-foreground">
-              号池账号
+              {{ t('ui.poolAccounts') }}
             </div>
             <div class="mt-1 text-base font-semibold tabular-nums">
               {{ plan.totalKeys }}
@@ -131,7 +129,7 @@
           </div>
           <div class="rounded-lg border bg-background px-3 py-2">
             <div class="text-muted-foreground">
-              代理节点
+              {{ t('ui.proxyNodes23f1b6a') }}
             </div>
             <div class="mt-1 text-base font-semibold tabular-nums">
               {{ plan.nodeCount }}
@@ -139,7 +137,7 @@
           </div>
           <div class="rounded-lg border bg-background px-3 py-2">
             <div class="text-muted-foreground">
-              单节点上限
+              {{ t('ui.perNodeLimit') }}
             </div>
             <div class="mt-1 text-base font-semibold tabular-nums">
               {{ plan.maxPerNode }}
@@ -147,7 +145,7 @@
           </div>
           <div class="rounded-lg border bg-background px-3 py-2">
             <div class="text-muted-foreground">
-              待写入
+              {{ t('ui.pendingWrite') }}
             </div>
             <div class="mt-1 text-base font-semibold tabular-nums">
               {{ plan.changedCount }}
@@ -156,12 +154,8 @@
         </div>
 
         <div class="rounded-lg border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-          <span v-if="mode === 'fill'">
-            保留 {{ plan.retainedCount }} 个有效既有绑定，处理 {{ plan.overflowCount }} 个超额绑定和 {{ plan.outsideSelectedProxyCount }} 个非选中节点绑定。
-          </span>
-          <span v-else>
-            将全部 {{ plan.totalKeys }} 个账号随机重新分配到选中的代理节点。
-          </span>
+          <span v-if="mode === 'fill'"> {{ t('ui.keep') }} {{ plan.retainedCount }} {{ t('ui.validExistingAssignmentsProcess') }} {{ plan.overflowCount }} {{ t('ui.excessAssignmentsAnd') }} {{ plan.outsideSelectedProxyCount }} {{ t('ui.assignmentsToUnselectedNodes') }} </span>
+          <span v-else> {{ t('ui.reassignAll') }} {{ plan.totalKeys }} {{ t('ui.accountsRandomlyAcrossTheSelectedProxyNodes') }} </span>
         </div>
 
         <div class="max-h-[360px] overflow-y-auto rounded-lg border">
@@ -180,13 +174,13 @@
             </div>
             <div class="flex flex-wrap items-center gap-2 text-xs">
               <Badge variant="outline">
-                目标 {{ item.targetCount }}
+                {{ t('ui.target') }} {{ item.targetCount }}
               </Badge>
               <Badge variant="secondary">
-                保留 {{ item.retainedCount }}
+                {{ t('ui.keep') }} {{ item.retainedCount }}
               </Badge>
               <Badge :variant="item.changedCount > 0 ? 'default' : 'outline'">
-                写入 {{ item.changedCount }}
+                {{ t('ui.write') }} {{ item.changedCount }}
               </Badge>
             </div>
           </div>
@@ -197,7 +191,7 @@
           class="space-y-1"
         >
           <div class="flex items-center justify-between text-xs text-muted-foreground">
-            <span>正在写入代理绑定...</span>
+            <span>{{ t('ui.writingProxyAssignments') }}</span>
             <span>{{ progressDone }} / {{ progressTotal }}</span>
           </div>
           <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
@@ -216,7 +210,7 @@
         :disabled="executing"
         @click="handleOpenChange(false)"
       >
-        关闭
+        {{ t('ui.close') }}
       </Button>
       <Button
         :disabled="executing || !plan || plan.changedCount === 0"
@@ -226,13 +220,15 @@
           v-if="executing"
           class="mr-1.5 h-3.5 w-3.5 animate-spin"
         />
-        {{ executing ? '执行中...' : '执行分配' }}
+        {{ executing ? t('ui.runningfeed25e') : t('ui.assign') }}
       </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, ref, watch } from 'vue'
 import { Loader2, RefreshCw, Shuffle } from 'lucide-vue-next'
 import {
@@ -275,6 +271,8 @@ const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   changed: []
 }>()
+
+const { t } = useI18n()
 
 const { success, error: showError, warning } = useToast()
 const { confirm } = useConfirm()
@@ -330,10 +328,10 @@ const canBuildPlan = computed(() =>
 const loadingText = computed(() => {
   if (loadingKeys.value) {
     return loadingKeyPage.value > 0
-      ? `正在加载账号列表，第 ${loadingKeyPage.value} 页...`
-      : '正在加载账号列表...'
+      ? t('feedback.pool.loadingAccountsPage', { page: loadingKeyPage.value })
+      : t('ui.loadingAccounts')
   }
-  return '正在加载号池和代理节点...'
+  return t('ui.loadingPoolsAndProxyNodes')
 })
 
 const assignmentRows = computed(() => {
@@ -383,7 +381,7 @@ async function loadInitialData(): Promise<void> {
     selectAllProxyNodes()
   } catch (err) {
     if (requestId !== poolLoadRequestId) return
-    showError(parseApiError(err, '加载号池信息失败'))
+    showError(parseApiError(err, t('ui.failedToLoadPoolInformation')))
   } finally {
     if (requestId === poolLoadRequestId) {
       loadingPools.value = false
@@ -416,7 +414,7 @@ async function loadAllPoolKeys(providerId: string): Promise<PoolKeyDetail[]> {
 
 async function loadKeysAndBuildPlan(): Promise<void> {
   if (!canBuildPlan.value) {
-    warning('请先选择号池和代理节点')
+    warning(t('ui.selectAPoolAndProxyNodesFirst'))
     return
   }
 
@@ -432,7 +430,7 @@ async function loadKeysAndBuildPlan(): Promise<void> {
     buildPreviewPlan()
   } catch (err) {
     if (requestId !== keyLoadRequestId) return
-    showError(parseApiError(err, '加载号池账号失败'))
+    showError(parseApiError(err, t('ui.failedToLoadPoolAccounts')))
   } finally {
     if (requestId === keyLoadRequestId) {
       loadingKeys.value = false
@@ -456,16 +454,16 @@ function buildPreviewPlan(): void {
 async function executePlan(): Promise<void> {
   if (!plan.value || !selectedProviderId.value) return
   if (plan.value.changedCount === 0) {
-    success('当前分配已经满足目标，无需写入')
+    success(t('ui.currentAssignmentsAlreadyMeetTheTargetNoChangesAreNeeded'))
     emit('changed')
     emit('update:modelValue', false)
     return
   }
 
   const confirmed = await confirm({
-    title: '执行号池代理均分',
-    message: `将写入 ${plan.value.changedCount} 个账号代理绑定，是否继续？`,
-    confirmText: '开始分配',
+    get title() { return t('ui.distributePoolAccountsAcrossProxies') },
+    message: t('feedback.pool.distributeConfirm', { count: plan.value.changedCount }),
+    get confirmText() { return t('ui.startAssignment') },
     variant: 'warning',
   })
   if (!confirmed || !plan.value) return
@@ -492,11 +490,11 @@ async function executePlan(): Promise<void> {
       }
     }
 
-    success(`号池代理均分完成，已写入 ${affected} 个账号`)
+    success(t('feedback.pool.distributeCompleted', { count: affected }))
     emit('changed')
     emit('update:modelValue', false)
   } catch (err) {
-    showError(parseApiError(err, '执行号池代理均分失败'))
+    showError(parseApiError(err, t('ui.failedToDistributePoolAccountsAcrossProxies')))
   } finally {
     executing.value = false
     progressDone.value = 0
@@ -524,4 +522,5 @@ watch([selectedProviderId, selectedProxyNodeIds, mode], () => {
     plan.value = null
   }
 })
+
 </script>

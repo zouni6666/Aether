@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 /**
  * 候选"被跳过"原因的中文标签。
  *
@@ -14,32 +15,32 @@ export const CANDIDATE_SKIP_REASON_LABELS: Record<string, string> = {
   account_quota_exhausted: '账号额度已耗尽',
   oauth_invalid: 'OAuth 凭证已失效',
   provider_quota_blocked: '上游提供商额度已用尽',
-  provider_concurrency_limit_reached: '上游提供商并发已达上限',
-  provider_key_concurrency_limit_reached: '上游账号并发已达上限',
-  provider_inactive: '提供商已停用',
-  key_inactive: '密钥已停用',
+  get provider_concurrency_limit_reached() { return translate('ui.theUpstreamProviderConcurrencyLimitHasBeenReached') },
+  get provider_key_concurrency_limit_reached() { return translate('ui.theUpstreamAccountConcurrencyLimitHasBeenReached') },
+  get provider_inactive() { return translate('ui.providerDisabled793b685') },
+  get key_inactive() { return translate('ui.keyDisabled0261100') },
   key_circuit_open: '密钥熔断中（连续失败后暂停）',
   key_health_score_zero: '密钥健康分为 0',
   key_rpm_exhausted: '密钥本分钟请求数已达上限',
   key_model_disabled: '该密钥已停用此模型',
   key_model_not_allowed: '该密钥不允许使用此模型',
   key_api_format_disabled: '该密钥已停用此 API 格式',
-  api_key_concurrency_limit_reached: '调用方 API Key 并发已达上限',
-  auth_api_key_concurrency_limit_reached: '调用方 API Key 并发已达上限',
+  get api_key_concurrency_limit_reached() { return translate('ui.theCallerApiKeyConcurrencyLimitHasBeenReached') },
+  get auth_api_key_concurrency_limit_reached() { return translate('ui.theCallerApiKeyConcurrencyLimitHasBeenReached') },
 
   // —— 传输与路由策略门（在真正发请求前就被拦下）——
   auth_channel_mismatch: '鉴权通道不匹配',
   auth_snapshot_missing: '缺少该密钥的鉴权快照',
   endpoint_api_format_changed: '端点 API 格式已变更',
-  endpoint_inactive: '端点已停用',
+  get endpoint_inactive() { return translate('ui.endpointDisabledeac0740') },
   format_conversion_disabled: '该提供商未开启格式转换',
   mapped_model_missing: '缺少映射后的上游模型',
   routing_profile_disallowed_key: '路由策略未允许该密钥',
   routing_profile_disallowed_provider: '路由策略未允许该提供商',
   upstream_url_missing: '缺少上游地址',
   gemini_file_mapping_mismatch: 'Gemini 文件映射不匹配',
-  provider_request_body_build_failed: '上游请求体转换失败',
-  provider_request_body_missing: '无法构建上游请求体',
+  get provider_request_body_build_failed() { return translate('ui.failedToConvertUpstreamRequestBody') },
+  get provider_request_body_missing() { return translate('ui.unableToBuildUpstreamRequestBody') },
 
   // —— transport_* 系列：该提供商/端点不支持当前这种转发方式 ——
   transport_unsupported: '该传输方式不受支持',
@@ -68,7 +69,7 @@ export const CANDIDATE_SKIP_REASON_LABELS: Record<string, string> = {
   pool_active_probe_sealed: '号池探测中，暂不分配',
   pool_cooldown: '号池账号冷却中',
   pool_cost_limit_reached: '号池费用已达上限',
-  pool_key_lease_busy: '池内账号正被其他请求占用',
+  get pool_key_lease_busy() { return translate('ui.poolAccountsAreBusyWithOtherRequests') },
   pool_score_member_missing: '号池评分成员缺失',
 }
 

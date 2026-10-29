@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="open"
-    title="故障转移规则"
-    description="配置提供商级别的故障转移规则。默认所有错误都会触发转移，此处可自定义例外。"
+    :title="t('ui.failoverRules')"
+    :description="t('ui.configureFailoverRulesForThisProviderAllErrorsTriggerFailover')"
     :icon="GitBranch"
     size="lg"
     @update:model-value="handleClose"
@@ -12,22 +12,22 @@
       <div class="space-y-3">
         <div>
           <h3 class="text-sm font-medium">
-            传输错误
+            {{ t('ui.transportErrors') }}
           </h3>
           <p class="text-xs text-muted-foreground mt-0.5">
-            这类错误没有可用于故障转移判断的上游 HTTP 状态码，因此不会命中下方的状态码规则
+            {{ t('ui.theseErrorsHaveNoUpstreamHttpStatusCodeSoThe') }}
           </p>
         </div>
 
         <div class="flex items-center justify-between gap-4 rounded-lg border bg-muted/50 p-3">
           <div class="min-w-0 space-y-0.5">
-            <span class="text-sm font-medium">继续尝试下一候选</span>
+            <span class="text-sm font-medium">{{ t('ui.tryTheNextCandidate') }}</span>
             <p class="text-xs leading-relaxed text-muted-foreground">
-              适用于 DNS 解析、TCP 连接、TLS 握手、代理/WARP 连接，以及响应提交前的连接重置或超时。默认开启；关闭后会立即返回网关错误。响应开始发送后无法切换候选。
+              {{ t('ui.appliesToDnsTcpTlsProxyWarpConnectionsAndConnection') }}
             </p>
           </div>
           <Switch
-            aria-label="传输错误时继续尝试下一候选"
+            :aria-label="t('ui.tryTheNextCandidateAfterATransportError')"
             class="shrink-0"
             :model-value="continueOnTransportErrors"
             @update:model-value="(value: boolean) => continueOnTransportErrors = value"
@@ -40,10 +40,10 @@
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
             <h3 class="text-sm font-medium">
-              成功转移规则
+              {{ t('ui.successfulResponseFailoverRules') }}
             </h3>
             <p class="text-xs text-muted-foreground mt-0.5">
-              HTTP 200 但响应体匹配正则时，视为失败并触发转移
+              {{ t('ui.treatHttp200ResponsesAsFailuresAndTriggerFailoverWhen') }}
             </p>
           </div>
           <div class="flex items-center gap-1 shrink-0">
@@ -52,11 +52,11 @@
               variant="ghost"
               size="sm"
               class="h-7 text-xs px-2"
-              :title="successJsonMode ? '切回成功转移表单' : '切到成功转移 JSON'"
+              :title="successJsonMode ? t('ui.editSuccessfulResponseRulesInTheForm') : t('ui.editSuccessfulResponseRulesAsJson')"
               @click="toggleSuccessJsonMode"
             >
               <Code2 class="w-3 h-3 mr-1" />
-              {{ successJsonMode ? '表单' : 'JSON' }}
+              {{ successJsonMode ? t('ui.form') : 'JSON' }}
             </Button>
             <Button
               v-if="successJsonMode"
@@ -64,11 +64,10 @@
               variant="ghost"
               size="sm"
               class="h-7 px-2 text-xs"
-              title="格式化成功转移 JSON"
+              :title="t('ui.formatSuccessfulResponseRulesJson')"
               @click="formatSuccessJsonDraft"
             >
-              <AlignLeft class="w-3 h-3 mr-1" />
-              格式化
+              <AlignLeft class="w-3 h-3 mr-1" /> {{ t('ui.formatf69273d') }}
             </Button>
             <Button
               v-if="!successJsonMode"
@@ -78,8 +77,7 @@
               class="h-7 text-xs px-2"
               @click="addRule('success')"
             >
-              <Plus class="w-3 h-3 mr-1" />
-              添加
+              <Plus class="w-3 h-3 mr-1" /> {{ t('ui.add') }}
             </Button>
           </div>
         </div>
@@ -92,7 +90,7 @@
             :model-value="successJsonDraft"
             class="min-h-[160px] font-mono text-xs leading-relaxed"
             spellcheck="false"
-            placeholder="[{ &quot;pattern&quot;: &quot;relay:.*格式错误&quot; }]"
+            :placeholder="t('providers.migration.dad84233')"
             @update:model-value="updateSuccessJsonDraft"
           />
           <div
@@ -102,7 +100,7 @@
             {{ successJsonError }}
           </div>
           <p class="text-xs text-muted-foreground">
-            仅管理成功转移规则；JSON 应为数组，<code class="bg-muted px-1 rounded">pattern</code> 必填。
+            {{ t('ui.successfulResponseRulesOnlyUseAJsonArray') }}<code class="bg-muted px-1 rounded">pattern</code> {{ t('ui.isRequired') }}
           </p>
         </div>
 
@@ -111,7 +109,7 @@
             v-if="successPatterns.length === 0"
             class="text-xs text-muted-foreground px-3 py-4 border border-dashed rounded-lg text-center"
           >
-            暂无规则
+            {{ t('ui.noRules') }}
           </div>
 
           <div
@@ -121,7 +119,7 @@
           >
             <Input
               v-model="rule.pattern"
-              placeholder="例如: relay:.*格式错误"
+              :placeholder="t('ui.eGRelayFormatError')"
               size="sm"
               class="font-mono text-xs flex-1"
             />
@@ -142,10 +140,10 @@
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
             <h3 class="text-sm font-medium">
-              错误终止规则
+              {{ t('ui.errorTerminationRules') }}
             </h3>
             <p class="text-xs text-muted-foreground mt-0.5">
-              HTTP 非 200 且规则命中时，停止转移并直接返回错误。状态码不填则所有错误状态都尝试匹配正则
+              {{ t('ui.forNon200ResponsesMatchingRulesStopFailoverAndReturn') }}
             </p>
           </div>
           <div class="flex items-center gap-1 shrink-0">
@@ -154,11 +152,11 @@
               variant="ghost"
               size="sm"
               class="h-7 text-xs px-2"
-              :title="errorJsonMode ? '切回错误终止表单' : '切到错误终止 JSON'"
+              :title="errorJsonMode ? t('ui.editErrorTerminationRulesInTheForm') : t('ui.editErrorTerminationRulesAsJson')"
               @click="toggleErrorJsonMode"
             >
               <Code2 class="w-3 h-3 mr-1" />
-              {{ errorJsonMode ? '表单' : 'JSON' }}
+              {{ errorJsonMode ? t('ui.form') : 'JSON' }}
             </Button>
             <Button
               v-if="errorJsonMode"
@@ -166,11 +164,10 @@
               variant="ghost"
               size="sm"
               class="h-7 px-2 text-xs"
-              title="格式化错误终止 JSON"
+              :title="t('ui.formatErrorTerminationRulesJson')"
               @click="formatErrorJsonDraft"
             >
-              <AlignLeft class="w-3 h-3 mr-1" />
-              格式化
+              <AlignLeft class="w-3 h-3 mr-1" /> {{ t('ui.formatf69273d') }}
             </Button>
             <Button
               v-if="!errorJsonMode"
@@ -180,8 +177,7 @@
               class="h-7 text-xs px-2"
               @click="addRule('error')"
             >
-              <Plus class="w-3 h-3 mr-1" />
-              添加
+              <Plus class="w-3 h-3 mr-1" /> {{ t('ui.add') }}
             </Button>
           </div>
         </div>
@@ -204,7 +200,7 @@
             {{ errorJsonError }}
           </div>
           <p class="text-xs text-muted-foreground">
-            仅管理错误终止规则；JSON 应为数组，<code class="bg-muted px-1 rounded">status_codes</code> 选填数组，不填则所有错误状态都尝试匹配 <code class="bg-muted px-1 rounded">pattern</code>；两者至少填一个。
+            {{ t('ui.errorTerminationRulesOnlyUseAJsonArray') }}<code class="bg-muted px-1 rounded">status_codes</code> {{ t('ui.isAnOptionalArrayWhenOmittedMatchAllErrorStatuses') }} <code class="bg-muted px-1 rounded">pattern</code>{{ t('ui.provideAtLeastOne') }}
           </p>
         </div>
 
@@ -213,7 +209,7 @@
             v-if="errorPatterns.length === 0"
             class="text-xs text-muted-foreground px-3 py-4 border border-dashed rounded-lg text-center"
           >
-            暂无规则
+            {{ t('ui.noRules') }}
           </div>
 
           <div
@@ -223,13 +219,13 @@
           >
             <Input
               v-model="statusCodeInputs[index]"
-              placeholder="状态码 (选填，可多个)"
+              :placeholder="t('ui.statusCodesOptionalMultipleAllowed')"
               size="sm"
               class="font-mono text-xs w-40 shrink-0"
             />
             <Input
               v-model="rule.pattern"
-              placeholder="正则内容 (选填)"
+              :placeholder="t('ui.regexPatternOptional')"
               size="sm"
               class="font-mono text-xs flex-1"
             />
@@ -252,19 +248,21 @@
         :disabled="saving"
         @click="handleClose"
       >
-        取消
+        {{ t('common.cancel') }}
       </Button>
       <Button
         :disabled="saving"
         @click="handleSave"
       >
-        {{ saving ? '保存中...' : '保存' }}
+        {{ saving ? t('ui.saving') : t('ui.save') }}
       </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, watch } from 'vue'
 import {
   Dialog,
@@ -288,6 +286,8 @@ const emit = defineEmits<{
   'update:open': [value: boolean]
   'saved': []
 }>()
+
+const { t } = useI18n()
 
 const { success, error: showError } = useToast()
 const saving = ref(false)
@@ -433,28 +433,28 @@ function parseStatusCodes(
   const trimmed = input.trim()
   if (!trimmed) {
     return required
-      ? { valid: false, reason: '状态码不能为空' }
+      ? { valid: false, reason: t('ui.statusCodeIsRequired') }
       : { valid: true, codes: [] }
   }
   const parts = trimmed.split(/[,\s]+/)
   const codes: number[] = []
   for (const part of parts) {
     if (!part) continue
-    if (!/^\d+$/.test(part)) return { valid: false, reason: `"${part}" 不是有效数字` }
+    if (!/^\d+$/.test(part)) return { valid: false, reason: t('providers.migration.isNotAValidNumber620356', { value: String(part) }) }
     const n = parseInt(part, 10)
-    if (n < 100 || n > 599) return { valid: false, reason: `${n} 不在 100-599 范围内` }
+    if (n < 100 || n > 599) return { valid: false, reason: t('providers.migration.isOutsideThe10059982a9ab', { value: String(n) }) }
     codes.push(n)
   }
   const uniqueCodes = Array.from(new Set(codes))
   return uniqueCodes.length > 0
     ? { valid: true, codes: uniqueCodes }
     : required
-      ? { valid: false, reason: '状态码不能为空' }
+      ? { valid: false, reason: t('ui.statusCodeIsRequired') }
       : { valid: true, codes: [] }
 }
 
 function validatePattern(pattern: string): string | null {
-  if (!pattern.trim()) return '正则表达式不能为空'
+  if (!pattern.trim()) return t('ui.regularExpressionCannotBeEmpty')
   return validateOptionalPattern(pattern)
 }
 
@@ -464,7 +464,7 @@ function validateOptionalPattern(pattern: string): string | null {
     new RegExp(pattern)
     return null
   } catch {
-    return `无效的正则表达式: ${pattern}`
+    return t('providers.migration.invalidRegularExpression1a732b', { value: String(pattern) })
   }
 }
 
@@ -527,11 +527,11 @@ function readJsonRuleArray(
   key: 'success_failover_patterns' | 'error_stop_patterns',
 ): { root: Record<string, unknown>; value: unknown[]; error: string | null } {
   if (Array.isArray(parsed)) return { root: {}, value: parsed, error: null }
-  if (!isJsonObject(parsed)) return { root: {}, value: [], error: '规则 JSON 必须是数组或对象' }
+  if (!isJsonObject(parsed)) return { root: {}, value: [], error: t('ui.rulesJsonMustBeAnArrayOrObject') }
   const root = isJsonObject(parsed.failover_rules) ? parsed.failover_rules : parsed
   const raw = root[key]
   if (raw === undefined || raw === null) return { root, value: [], error: null }
-  if (!Array.isArray(raw)) return { root, value: [], error: `${key} 必须是数组或 null` }
+  if (!Array.isArray(raw)) return { root, value: [], error: t('providers.migration.mustBeAnArrayOr606f8c', { value: String(key) }) }
   return { root, value: raw, error: null }
 }
 
@@ -542,33 +542,33 @@ function parseJsonStatusCodes(
 ): { codes: number[]; error: string | null } {
   if (value === undefined || value === null) {
     return required
-      ? { codes: [], error: `${label}status_codes 必填` }
+      ? { codes: [], error: t('providers.migration.statusCodesIsRequiredacda84', { value: String(label) }) }
       : { codes: [], error: null }
   }
-  if (!Array.isArray(value)) return { codes: [], error: `${label}status_codes 必须是数组` }
+  if (!Array.isArray(value)) return { codes: [], error: t('providers.migration.statusCodesMustBeAn478dcc', { value: String(label) }) }
   const codes: number[] = []
   for (const item of value) {
     if (!Number.isInteger(item)) {
-      return { codes: [], error: `${label}status_codes 只能包含整数` }
+      return { codes: [], error: t('providers.migration.statusCodesMustContainOnly1c2627', { value: String(label) }) }
     }
     const code = item as number
     if (code < 100 || code > 599) {
-      return { codes: [], error: `${label}status_codes 只能填写 100-599` }
+      return { codes: [], error: t('providers.migration.statusCodesMustBeBetween6739f5', { value: String(label) }) }
     }
     codes.push(code)
   }
   const uniqueCodes = uniqueStatusCodes(codes)
   if (required && uniqueCodes.length === 0) {
-    return { codes: [], error: `${label}status_codes 必填` }
+    return { codes: [], error: t('providers.migration.statusCodesIsRequiredacda84', { value: String(label) }) }
   }
   return { codes: uniqueCodes, error: null }
 }
 
 function parseJsonSuccessRule(rule: unknown, index: number): { rule: FailoverRuleItem | null; error: string | null } {
-  const label = `成功转移 JSON 第 ${index + 1} 条：`
-  if (!isJsonObject(rule)) return { rule: null, error: `${label}必须是对象` }
+  const label = t('providers.migration.successFailoverJsonEntry8dda49', { value: String(index + 1) })
+  if (!isJsonObject(rule)) return { rule: null, error: t('providers.migration.mustBeAnObject3d1941', { value: String(label) }) }
   if (typeof rule.pattern !== 'string' || !rule.pattern.trim()) {
-    return { rule: null, error: `${label}pattern 必填` }
+    return { rule: null, error: t('providers.migration.patternIsRequired147d12', { value: String(label) }) }
   }
   const pattern = rule.pattern.trim()
   const patternError = validatePattern(pattern)
@@ -587,18 +587,18 @@ function parseJsonSuccessRule(rule: unknown, index: number): { rule: FailoverRul
 }
 
 function parseJsonErrorRule(rule: unknown, index: number): { rule: FailoverRuleItem | null; error: string | null } {
-  const label = `错误终止 JSON 第 ${index + 1} 条：`
-  if (!isJsonObject(rule)) return { rule: null, error: `${label}必须是对象` }
+  const label = t('providers.migration.errorTerminationJsonEntry09f2d8', { value: String(index + 1) })
+  if (!isJsonObject(rule)) return { rule: null, error: t('providers.migration.mustBeAnObject3d1941', { value: String(label) }) }
   const status = parseJsonStatusCodes(rule.status_codes, label, false)
   if (status.error) return { rule: null, error: status.error }
   if (rule.pattern !== undefined && rule.pattern !== null && typeof rule.pattern !== 'string') {
-    return { rule: null, error: `${label}pattern 必须是字符串` }
+    return { rule: null, error: t('providers.migration.patternMustBeAString457127', { value: String(label) }) }
   }
   const pattern = typeof rule.pattern === 'string' ? rule.pattern.trim() : ''
   const patternError = validateOptionalPattern(pattern)
   if (patternError) return { rule: null, error: `${label}${patternError}` }
   if (status.codes.length === 0 && !pattern) {
-    return { rule: null, error: `${label}status_codes 和 pattern 至少填写一个` }
+    return { rule: null, error: t('providers.migration.specifyAtLeastOneOf90324b', { value: String(label) }) }
   }
 
   return {
@@ -619,7 +619,7 @@ function parseSuccessRulesJsonDraft(draft: string): { value: FailoverRuleItem[] 
   try {
     parsed = JSON.parse(raw)
   } catch (error: unknown) {
-    return { value: null, error: error instanceof Error ? error.message : 'JSON 格式无效' }
+    return { value: null, error: error instanceof Error ? error.message : t('ui.invalidJsonFormat') }
   }
 
   const rules = readJsonRuleArray(parsed, 'success_failover_patterns')
@@ -642,7 +642,7 @@ function parseErrorRulesJsonDraft(draft: string): { value: FailoverRuleItem[] | 
   try {
     parsed = JSON.parse(raw)
   } catch (error: unknown) {
-    return { value: null, error: error instanceof Error ? error.message : 'JSON 格式无效' }
+    return { value: null, error: error instanceof Error ? error.message : t('ui.invalidJsonFormat') }
   }
 
   const rules = readJsonRuleArray(parsed, 'error_stop_patterns')
@@ -675,7 +675,7 @@ function applySuccessJsonDraft(options: { notify?: boolean; notifyError?: boolea
   const parsed = parseSuccessRulesJsonDraft(successJsonDraft.value)
   if (!parsed.value) {
     successJsonError.value = parsed.error
-    if (notifyError) showError(parsed.error || '成功转移规则 JSON 无效', '验证失败')
+    if (notifyError) showError(parsed.error || t('ui.invalidSuccessfulResponseRulesJson'), t('auth.register.verifyFailed'))
     return false
   }
 
@@ -683,7 +683,7 @@ function applySuccessJsonDraft(options: { notify?: boolean; notifyError?: boolea
   successJsonDraft.value = stringifyRuleArray(parsed.value)
   successJsonError.value = null
   successJsonDirty.value = false
-  if (options.notify !== false) success('成功转移 JSON 已应用')
+  if (options.notify !== false) success(t('ui.successfulResponseRulesJsonApplied'))
   return true
 }
 
@@ -692,7 +692,7 @@ function applyErrorJsonDraft(options: { notify?: boolean; notifyError?: boolean 
   const parsed = parseErrorRulesJsonDraft(errorJsonDraft.value)
   if (!parsed.value) {
     errorJsonError.value = parsed.error
-    if (notifyError) showError(parsed.error || '错误终止规则 JSON 无效', '验证失败')
+    if (notifyError) showError(parsed.error || t('ui.invalidErrorTerminationRulesJson'), t('auth.register.verifyFailed'))
     return false
   }
 
@@ -701,7 +701,7 @@ function applyErrorJsonDraft(options: { notify?: boolean; notifyError?: boolean 
   errorJsonDraft.value = stringifyRuleArray(parsed.value)
   errorJsonError.value = null
   errorJsonDirty.value = false
-  if (options.notify !== false) success('错误终止 JSON 已应用')
+  if (options.notify !== false) success(t('ui.errorTerminationRulesJsonApplied'))
   return true
 }
 
@@ -765,7 +765,7 @@ async function handleSave() {
   for (const rule of successPatterns.value) {
     const err = validatePattern(rule.pattern)
     if (err) {
-      showError(err, '验证失败')
+      showError(err, t('auth.register.verifyFailed'))
       return
     }
   }
@@ -775,17 +775,17 @@ async function handleSave() {
     const raw = statusCodeInputs.value[i]?.trim() || ''
     const result = parseStatusCodes(raw)
     if (!result.valid) {
-      showError(`状态码格式错误: ${result.reason}，请输入 100-599 之间的整数，多个用逗号分隔`, '验证失败')
+      showError(t('providers.migration.invalidStatusCodesEnterIntegersb7627a', { value: String(result.reason) }), t('auth.register.verifyFailed'))
       return
     }
     const patternErr = validateOptionalPattern(errorPatterns.value[i].pattern)
     if (patternErr) {
-      showError(patternErr, '验证失败')
+      showError(patternErr, t('auth.register.verifyFailed'))
       return
     }
     const pattern = errorPatterns.value[i].pattern.trim()
     if (result.codes.length === 0 && !pattern) {
-      showError(`第 ${i + 1} 条错误终止规则：状态码和正则内容至少填写一个`, '验证失败')
+      showError(t('providers.migration.errorTerminationRuleSpecifyAb91cef', { value: String(i + 1) }), t('auth.register.verifyFailed'))
       return
     }
     errorPatterns.value[i].status_codes = result.codes.length > 0 ? result.codes : undefined
@@ -813,13 +813,14 @@ async function handleSave() {
       failover_rules: nextFailoverRules,
     })
 
-    success('故障转移规则已保存')
+    success(t('ui.failoverRulesSaved'))
     emit('saved')
     handleClose()
   } catch (err: unknown) {
-    showError(parseApiError(err, '保存故障转移规则失败'), '保存失败')
+    showError(parseApiError(err, t('ui.failedToSaveFailoverRules')), t('ui.failedToSave'))
   } finally {
     saving.value = false
   }
 }
+
 </script>

@@ -19,6 +19,8 @@
 </template>
 
 <script setup lang="ts">
+import { translate as t } from '@/i18n'
+
 import { computed } from 'vue'
 import {
   formatAvailability,
@@ -42,22 +44,22 @@ const availabilityItem = computed(() => ({
 
 const metrics = computed(() => [
   {
-    label: '平均耗时',
+    label: t('ui.averageDuration'),
     value: formatMs(props.avgLatencyMs),
     valueClass: ''
   },
   {
-    label: '平均TTFB',
+    label: t('ui.averageTtfb'),
     value: formatMs(props.avgFirstByteMs),
     valueClass: ''
   },
   {
-    label: '平均速度',
+    label: t('ui.averageSpeed'),
     value: formatTps(props.avgTps),
     valueClass: ''
   },
   {
-    label: '可用率',
+    label: t('ui.availability'),
     value: formatAvailability(availabilityItem.value),
     valueClass: getAvailabilityClass(availabilityItem.value)
   }

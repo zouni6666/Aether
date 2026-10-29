@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { reactive } from 'vue'
 import { HelpCircle, ChevronRight } from 'lucide-vue-next'
 
@@ -20,6 +23,7 @@ const faqs = reactive([
 const toggleFaq = (index: number) => {
   faqs[index].isOpen = !faqs[index].isOpen
 }
+
 </script>
 
 <template>
@@ -27,14 +31,13 @@ const toggleFaq = (index: number) => {
     <!-- Hero 区域 -->
     <div class="space-y-4">
       <div class="inline-flex items-center gap-1.5 rounded-full bg-[#cc785c]/10 dark:bg-[#cc785c]/20 border border-[#cc785c]/20 dark:border-[#cc785c]/40 px-3 py-1 text-xs font-medium text-[#cc785c] dark:text-[#d4a27f]">
-        <HelpCircle class="h-3 w-3" />
-        答疑解惑
+        <HelpCircle class="h-3 w-3" /> {{ t('ui.questionsAndTroubleshooting') }}
       </div>
       <h1 class="text-3xl font-bold text-[#262624] dark:text-[#f1ead8]">
-        常见问题
+        {{ t('guide.nav.faq.description') }}
       </h1>
       <p class="text-base text-[#666663] dark:text-[#a3a094] max-w-2xl">
-        在使用 Aether 过程中遇到的常见问题与排错指南。
+        {{ t('ui.commonQuestionsAndTroubleshootingGuidanceForUsingAether') }}
       </p>
     </div>
 

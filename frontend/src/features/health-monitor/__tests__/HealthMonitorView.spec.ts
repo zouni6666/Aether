@@ -3,6 +3,7 @@ import { createApp, defineComponent, h, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import HealthMonitorView from '../HealthMonitorView.vue'
 import type { HealthMeta, PublicHealthObject } from '@/api/endpoints/health-v2'
+import { getI18nLocale, setI18nLocale } from '@/i18n'
 
 const api = vi.hoisted(() => ({
   getAdminHealthSummary: vi.fn(), getAdminHealthObjects: vi.fn(), getAdminHealthObject: vi.fn(),
@@ -62,6 +63,30 @@ beforeEach(() => {
 afterEach(() => { for (const { app, root } of mounted.splice(0)) { app.unmount(); root.remove() } })
 
 describe('independent health monitor', () => {
+  it('localizes status labels inside timeline tooltips and fallback errors', async () => {
+    const previousLocale = getI18nLocale()
+    try {
+      setI18nLocale('en-US')
+      const response = page()
+      response.data.items[0].timeline = [{
+        from: meta.range.from,
+        to: meta.range.to,
+        status: 'degraded',
+        service_availability: ratio,
+        unknown_failure_count: 0,
+      }]
+      api.getPublicHealthObjects.mockResolvedValueOnce(response)
+      const { root } = await mountView()
+      expect(root.querySelector('[title*="Degraded"]')?.getAttribute('title')).toContain('100 samples')
+      api.getPublicHealthSummaryV2.mockRejectedValueOnce(new Error('network unavailable'))
+      root.querySelector<HTMLButtonElement>('[aria-label="Refresh health data"]')!.click()
+      await flush()
+      expect(root.textContent).toContain('Health data is temporarily unavailable. Refresh later.')
+    } finally {
+      setI18nLocale(previousLocale)
+    }
+  })
+
   it('keeps authenticated health independent of the public publication switch', async () => {
     const { root } = await mountView(false, false)
     expect(api.getUserHealthSummary).toHaveBeenCalledOnce()

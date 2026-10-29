@@ -1,3 +1,5 @@
+import { translate as t } from '@/i18n'
+
 import {
   DEFAULT_ROUTING_POLICY_MODEL,
   SCHEDULING_POLICY_RULE_PREFIX,
@@ -141,19 +143,19 @@ export function readSchedulingPolicies(config: RoutingGroupConfig): SchedulingPo
 }
 
 export function validateSchedulingPolicies(entries: SchedulingPolicy[]): string | null {
-  if (entries.length === 0) return '请至少添加一条调度配置'
+  if (entries.length === 0) return t('routing.validation.configRequired')
   const assignedModels = new Set<string>()
   let hasAllModels = false
   for (const [index, entry] of entries.entries()) {
     if (entry.scope === 'all') {
-      if (hasAllModels) return '只能有一条适用于全部模型的配置'
+      if (hasAllModels) return t('routing.validation.oneDefault')
       hasAllModels = true
       continue
     }
-    if (entry.models.length === 0) return `请为配置 ${index + 1} 选择至少一个全局模型`
+    if (entry.models.length === 0) return t('routing.validation.selectModels', { index: index + 1 })
     for (const model of entry.models) {
-      if (!model.trim() || model === DEFAULT_ROUTING_POLICY_MODEL) return `配置 ${index + 1} 的模型无效`
-      if (assignedModels.has(model)) return `模型 ${model} 不能重复分配给多条配置`
+      if (!model.trim() || model === DEFAULT_ROUTING_POLICY_MODEL) return t('routing.validation.invalidModels', { index: index + 1 })
+      if (assignedModels.has(model)) return t('routing.validation.duplicateModel', { model })
       assignedModels.add(model)
     }
   }

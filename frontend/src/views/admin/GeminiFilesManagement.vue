@@ -15,7 +15,7 @@
               {{ stats?.total_mappings ?? '-' }}
             </p>
             <p class="text-xs text-muted-foreground">
-              总文件数
+              {{ t('ui.totalFiles') }}
             </p>
           </div>
         </div>
@@ -33,7 +33,7 @@
               {{ stats?.active_mappings ?? '-' }}
             </p>
             <p class="text-xs text-muted-foreground">
-              有效文件
+              {{ t('ui.activeFiles') }}
             </p>
           </div>
         </div>
@@ -51,7 +51,7 @@
               {{ stats?.expired_mappings ?? '-' }}
             </p>
             <p class="text-xs text-muted-foreground">
-              已过期
+              {{ t('ui.expired') }}
             </p>
           </div>
         </div>
@@ -69,7 +69,7 @@
               {{ stats?.capable_keys_count ?? '-' }}
             </p>
             <p class="text-xs text-muted-foreground">
-              支持的 Key
+              {{ t('ui.supportedKeys') }}
             </p>
           </div>
         </div>
@@ -83,7 +83,7 @@
     >
       <div class="flex items-center justify-between mb-3">
         <h3 class="text-sm font-medium">
-          上传文件
+          {{ t('ui.uploadFiles') }}
         </h3>
         <Button
           v-if="capableKeys.length > 0"
@@ -92,7 +92,7 @@
           class="h-7 text-xs"
           @click="toggleSelectAll"
         >
-          {{ selectedKeyIds.length === capableKeys.length ? '取消全选' : '全选' }}
+          {{ selectedKeyIds.length === capableKeys.length ? t('ui.deselectAll') : t('ui.selectAll') }}
         </Button>
       </div>
 
@@ -102,7 +102,7 @@
         class="mb-4"
       >
         <p class="text-xs text-muted-foreground mb-2">
-          选择要上传到的 Key（可多选）：
+          {{ t('ui.selectKeysToUploadToMultipleAllowed') }}
         </p>
         <div class="flex flex-wrap gap-2">
           <button
@@ -126,7 +126,7 @@
         v-else
         class="mb-4 text-sm text-amber-600 bg-amber-50 dark:bg-amber-950/30 rounded-lg p-3"
       >
-        暂无可用的 Key，请先配置具有「Gemini 文件 API」能力的 Key
+        {{ t('ui.noAvailableKeysConfigureAKeyWithGeminiFilesApi') }}
       </div>
 
       <!-- 拖拽上传区 -->
@@ -153,7 +153,7 @@
         >
           <Loader2 class="w-8 h-8 animate-spin text-primary" />
           <p class="text-sm text-muted-foreground">
-            正在上传到 {{ selectedKeyIds.length }} 个 Key...
+            {{ t('ui.uploadingTo') }} {{ selectedKeyIds.length }} {{ t('ui.keys1490083') }}
           </p>
         </div>
         <div
@@ -163,20 +163,19 @@
           <Upload class="w-8 h-8 text-muted-foreground" />
           <p class="text-sm text-muted-foreground">
             <template v-if="selectedKeyIds.length > 0">
-              拖拽文件到此处，或
-              <button
+              {{ t('ui.dragFilesHereOr') }} <button
                 class="text-primary hover:underline"
                 @click="fileInputRef?.click()"
               >
-                点击选择
+                {{ t('ui.clickToSelect') }}
               </button>
             </template>
             <template v-else>
-              请先选择至少一个 Key
+              {{ t('ui.selectAtLeastOneKeyFirst') }}
             </template>
           </p>
           <p class="text-xs text-muted-foreground">
-            支持视频、图片、音频、文档等，最大 2GB，有效期 48 小时
+            {{ t('ui.supportsVideoImagesAudioDocumentsAndMoreMax2Gb') }}
           </p>
         </div>
       </div>
@@ -189,7 +188,7 @@
       class="p-4"
     >
       <h3 class="text-sm font-medium mb-3">
-        文件类型分布
+        {{ t('ui.fileTypeDistribution') }}
       </h3>
       <div class="flex flex-wrap gap-2">
         <Badge
@@ -212,14 +211,14 @@
       <div class="px-4 sm:px-6 py-3.5 border-b border-border/60">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h3 class="text-base font-semibold">
-            文件映射
+            {{ t('ui.fileMappings') }}
           </h3>
           <div class="flex items-center gap-2">
             <!-- 搜索 -->
             <Input
               v-model="searchQuery"
               type="text"
-              placeholder="搜索文件名..."
+              :placeholder="t('ui.searchFileName')"
               class="w-40 h-8 text-xs"
             />
             <!-- 包含过期 -->
@@ -228,9 +227,7 @@
                 v-model="includeExpired"
                 type="checkbox"
                 class="rounded border-border"
-              >
-              包含过期
-            </label>
+              > {{ t('ui.includeExpired') }} </label>
             <!-- 清理过期按钮 -->
             <Button
               variant="outline"
@@ -239,8 +236,7 @@
               :disabled="loading || (stats?.expired_mappings ?? 0) === 0"
               @click="cleanupExpired"
             >
-              <Trash2 class="w-3 h-3 mr-1" />
-              清理过期
+              <Trash2 class="w-3 h-3 mr-1" /> {{ t('ui.cleanExpired') }}
             </Button>
             <!-- 刷新按钮 -->
             <Button
@@ -266,7 +262,7 @@
       >
         <Loader2 class="w-8 h-8 animate-spin mx-auto text-muted-foreground" />
         <p class="mt-2 text-sm text-muted-foreground">
-          加载中...
+          {{ t('common.loading') }}
         </p>
       </div>
 
@@ -277,10 +273,10 @@
       >
         <FileUp class="w-12 h-12 mx-auto text-muted-foreground/50" />
         <p class="mt-2 text-sm text-muted-foreground">
-          暂无文件映射
+          {{ t('ui.noFileMappings') }}
         </p>
         <p class="mt-1 text-xs text-muted-foreground">
-          用户通过 Gemini Files API 上传文件后会在此显示
+          {{ t('ui.filesUploadedThroughTheGeminiFilesApiAppearHere') }}
         </p>
       </div>
 
@@ -309,14 +305,14 @@
                   variant="secondary"
                   class="text-xs"
                 >
-                  已过期
+                  {{ t('ui.expired') }}
                 </Badge>
                 <Badge
                   v-else
                   variant="outline"
                   class="text-xs text-green-600"
                 >
-                  有效
+                  {{ t('ui.valid') }}
                 </Badge>
               </div>
               <!-- 显示名 -->
@@ -351,14 +347,13 @@
                 </span>
                 <span class="flex items-center gap-1">
                   <Clock class="w-3 h-3" />
-                  {{ formatDate(mapping.created_at) }}
+                  {{ formatDateTimeCompact(mapping.created_at) }}
                 </span>
                 <span
                   class="flex items-center gap-1"
                   :class="{ 'text-red-500': mapping.is_expired }"
                 >
-                  <Timer class="w-3 h-3" />
-                  过期: {{ formatDate(mapping.expires_at) }}
+                  <Timer class="w-3 h-3" /> {{ t('ui.expires') }} {{ formatDateTimeCompact(mapping.expires_at) }}
                 </span>
               </div>
             </div>
@@ -368,7 +363,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8 text-muted-foreground hover:text-red-500"
-                title="删除映射"
+                :title="t('ui.deleteMapping')"
                 @click.stop="deleteMapping(mapping)"
               >
                 <Trash2 class="w-4 h-4" />
@@ -384,7 +379,7 @@
         class="px-4 sm:px-6 py-3 border-t border-border/60 flex items-center justify-between"
       >
         <p class="text-xs text-muted-foreground">
-          共 {{ total }} 条记录
+          {{ t('ui.total76e547a') }} {{ total }} {{ t('ui.records6016bf6') }}
         </p>
         <div class="flex items-center gap-2">
           <Button
@@ -393,7 +388,7 @@
             :disabled="currentPage <= 1"
             @click="currentPage--"
           >
-            上一页
+            {{ t('userStats.pagination.previous') }}
           </Button>
           <span class="text-sm text-muted-foreground">
             {{ currentPage }} / {{ totalPages }}
@@ -404,7 +399,7 @@
             :disabled="currentPage >= totalPages"
             @click="currentPage++"
           >
-            下一页
+            {{ t('userStats.pagination.next') }}
           </Button>
         </div>
       </div>
@@ -413,9 +408,11 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { ref, computed, watch, onMounted } from 'vue'
 import { useToast } from '@/composables/useToast'
-import { getI18nLocale, useI18n } from '@/i18n'
 import Card from '@/components/ui/card.vue'
 import Badge from '@/components/ui/badge.vue'
 import Button from '@/components/ui/button.vue'
@@ -440,9 +437,11 @@ import {
 import { geminiFilesApi, type FileMappingStatsResponse, type FileMappingResponse, type CapableKeyResponse } from '@/api/gemini-files'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
+import { formatDateTimeCompact } from '@/utils/format'
+import { useConfirm } from '@/composables/useConfirm'
 
 const { toast } = useToast()
-const { legacyT } = useI18n()
+const { confirmDanger } = useConfirm()
 
 // 状态
 const loading = ref(false)
@@ -515,7 +514,7 @@ async function fetchStats() {
     stats.value = data
   } catch (error: unknown) {
     toast({
-      title: '获取统计失败',
+      get title() { return t('ui.failedToLoadStatistics') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive'
     })
@@ -535,7 +534,7 @@ async function fetchMappings() {
     total.value = data.total
   } catch (error: unknown) {
     toast({
-      title: '获取文件列表失败',
+      get title() { return t('ui.failedToLoadFileList') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive'
     })
@@ -545,20 +544,20 @@ async function fetchMappings() {
 }
 
 async function deleteMapping(mapping: FileMappingResponse) {
-  if (!confirm(legacyT(`确定要删除映射 "${mapping.file_name}" 吗？\n\n注意：这只会删除映射记录，不会删除 Google 上的实际文件。`))) {
+  if (!(await confirmDanger(t('ui.deleteMappingValueThisOnlyDeletesTheMappingRecordAnd', { name: mapping.file_name }), t('ui.deleteMapping')))) {
     return
   }
 
   try {
     await geminiFilesApi.deleteMapping(mapping.id)
     toast({
-      title: '删除成功',
-      description: `已删除映射 ${mapping.file_name}`
+      get title() { return t('ui.deletedSuccessfully') },
+      description: t('ui.deletedMappingValue', { name: mapping.file_name })
     })
     await fetchData()
   } catch (error: unknown) {
     toast({
-      title: '删除失败',
+      get title() { return t('ui.deletionFailed') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive'
     })
@@ -566,20 +565,20 @@ async function deleteMapping(mapping: FileMappingResponse) {
 }
 
 async function cleanupExpired() {
-  if (!confirm(legacyT('确定要清理所有过期的文件映射吗？'))) {
+  if (!(await confirmDanger(t('ui.cleanUpAllExpiredFileMappings'), '清理过期映射', '清理'))) {
     return
   }
 
   try {
     const result = await geminiFilesApi.cleanupExpired()
     toast({
-      title: '清理完成',
-      description: `已清理 ${result.deleted_count} 条过期映射`
+      get title() { return t('ui.cleanupComplete') },
+      description: t('ui.cleanedValueExpiredMappings', { count: result.deleted_count })
     })
     await fetchData()
   } catch (error: unknown) {
     toast({
-      title: '清理失败',
+      get title() { return t('ui.cleanupFailed') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive'
     })
@@ -590,8 +589,8 @@ async function cleanupExpired() {
 async function uploadFile(file: globalThis.File) {
   if (selectedKeyIds.value.length === 0) {
     toast({
-      title: '请选择 Key',
-      description: '请至少选择一个 Key 来上传文件',
+      get title() { return t('ui.selectAKey') },
+      get description() { return t('ui.selectAtLeastOneKeyForTheFileUpload') },
       variant: 'destructive'
     })
     return
@@ -603,28 +602,28 @@ async function uploadFile(file: globalThis.File) {
     const result = await geminiFilesApi.uploadFile(file, selectedKeyIds.value)
     if (result.fail_count === 0) {
       toast({
-        title: '上传成功',
+        get title() { return t('ui.uploadSucceeded') },
         description: `文件 ${result.display_name} 已上传到 ${result.success_count} 个 Key`
       })
       hasSuccess = true
     } else if (result.success_count > 0) {
       toast({
-        title: '部分成功',
-        description: `成功 ${result.success_count} 个，失败 ${result.fail_count} 个`
+        get title() { return t('ui.partiallySuccessful') },
+        description: t('ui.succeededValueFailedValue6c5022e', { count: result.success_count, count2: result.fail_count })
       })
       hasSuccess = true
     } else {
       const errors = result.results.map(r => r.error).filter(Boolean).join('; ')
       toast({
-        title: '上传失败',
+        get title() { return t('ui.uploadFailed') },
         description: errors || '所有 Key 上传都失败了',
         variant: 'destructive'
       })
     }
   } catch (error: unknown) {
     toast({
-      title: '上传失败',
-      description: parseApiError(error, '上传失败'),
+      get title() { return t('ui.uploadFailed') },
+      description: parseApiError(error, t('ui.uploadFailed')),
       variant: 'destructive'
     })
   } finally {
@@ -654,18 +653,6 @@ function handleFileSelect(e: Event) {
   }
 }
 
-// 工具函数
-function formatDate(dateStr: string) {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleString(getI18nLocale(), {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  })
-}
-
 function getFileIcon(mimeType: string | null) {
   if (!mimeType) return File
   if (mimeType.startsWith('video/')) return Video
@@ -679,4 +666,5 @@ function getFileIcon(mimeType: string | null) {
 onMounted(() => {
   fetchData()
 })
+
 </script>

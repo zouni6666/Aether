@@ -124,13 +124,13 @@ const props = withDefaults(defineProps<{
   resetKey: '',
   accept: '.json,.txt',
   multiple: true,
-  dropTitle: '拖入导入文件或点击选择',
-  dropHint: '支持 .json / .txt，可多选',
+  dropTitle: undefined,
+  dropHint: undefined,
   manualLabel: '',
   manualPlaceholder: '',
   manualDescription: '',
-  pasteToggleText: '或手动粘贴 JSON',
-  fileToggleText: '或选择 JSON 文件导入',
+  pasteToggleText: undefined,
+  fileToggleText: undefined,
   textareaClass: 'min-h-[220px] text-xs font-mono break-all !rounded-xl',
 })
 
@@ -138,18 +138,18 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
   error: [payload: ImportInputErrorPayload]
 }>()
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const showManualInput = ref(false)
 const isDragging = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
-const localizedDropTitle = computed(() => legacyT(props.dropTitle))
-const localizedDropHint = computed(() => legacyT(props.dropHint))
-const localizedManualLabel = computed(() => props.manualLabel ? legacyT(props.manualLabel) : '')
-const localizedManualPlaceholder = computed(() => props.manualPlaceholder ? legacyT(props.manualPlaceholder) : '')
-const localizedManualDescription = computed(() => props.manualDescription ? legacyT(props.manualDescription) : '')
-const localizedPasteToggleText = computed(() => legacyT(props.pasteToggleText))
-const localizedFileToggleText = computed(() => legacyT(props.fileToggleText))
+const localizedDropTitle = computed(() => props.dropTitle ?? t('ui.dropImportFilesOrClickToChoose'))
+const localizedDropHint = computed(() => props.dropHint ?? t('ui.supportsJsonTxtAndMultipleSelection'))
+const localizedManualLabel = computed(() => props.manualLabel ? props.manualLabel : '')
+const localizedManualPlaceholder = computed(() => props.manualPlaceholder ? props.manualPlaceholder : '')
+const localizedManualDescription = computed(() => props.manualDescription ? props.manualDescription : '')
+const localizedPasteToggleText = computed(() => props.pasteToggleText ?? t('ui.orPasteJsonManually'))
+const localizedFileToggleText = computed(() => props.fileToggleText ?? t('ui.orChooseAJsonFileToImport'))
 
 const acceptParts = computed(() => {
   return props.accept
@@ -171,8 +171,8 @@ function resetUiState() {
 
 function emitError(message: string, title?: string) {
   emit('error', {
-    message: legacyT(message),
-    title: title ? legacyT(title) : undefined,
+    message,
+    title,
   })
 }
 
@@ -207,9 +207,9 @@ function readFileAsText(file: File): Promise<string> {
         resolve(content)
         return
       }
-      reject(new Error(legacyT('读取失败')))
+      reject(new Error(t('ui.failedToRead')))
     }
-    reader.onerror = () => reject(new Error(legacyT('读取失败')))
+    reader.onerror = () => reject(new Error(t('ui.failedToRead')))
     reader.readAsText(file)
   })
 }
@@ -250,16 +250,16 @@ async function readFiles(files: File[]) {
   const sourceFiles = props.multiple ? files : files.slice(0, 1)
 
   if (!props.multiple && files.length > 1) {
-    emitError('仅支持选择 1 个文件，已读取第一个文件', '提示')
+    emitError(t('ui.onlyOneFileIsSupportedTheFirstFileWasRead'), t('ui.notice'))
   }
 
   const validFiles = sourceFiles.filter(isValidFileType)
   if (validFiles.length === 0) {
-    emitError('仅支持 .json 或 .txt 文件', '格式错误')
+    emitError(t('ui.onlyJsonOrTxtFilesAreSupported'), t('ui.formatError'))
     return
   }
   if (validFiles.length < sourceFiles.length) {
-    emitError(`已忽略 ${sourceFiles.length - validFiles.length} 个不支持的文件`, '提示')
+    emitError(t('feedback.import.ignoredFiles', { count: sourceFiles.length - validFiles.length }), t('ui.notice'))
   }
 
   try {
@@ -268,7 +268,7 @@ async function readFiles(files: File[]) {
     emit('update:modelValue', merged)
     showManualInput.value = true
   } catch {
-    emitError('文件读取失败', '错误')
+    emitError(t('ui.failedToReadFile'), t('ui.error'))
   } finally {
     if (fileInputRef.value) {
       fileInputRef.value.value = ''

@@ -1,17 +1,17 @@
 <template>
   <div class="grid gap-2 rounded-xl border border-border/70 bg-muted/20 p-3 sm:grid-cols-[9rem_minmax(0,1fr)] sm:items-start">
     <div>
-      <Label class="text-sm font-medium">{{ legacyT('按分组选择') }}</Label>
+      <Label class="text-sm font-medium">{{ t('ui.selectByGroup') }}</Label>
       <p class="mt-1 text-[11px] text-muted-foreground">
-        {{ legacyT('可与直接用户或筛选条件混合') }}
+        {{ t('ui.canBeCombinedWithDirectUsersOrFilters') }}
       </p>
     </div>
     <MultiSelect
       :model-value="modelValue"
       :options="groupOptions"
       :search-threshold="0"
-      :placeholder="legacyT('选择一个或多个分组')"
-      :empty-text="legacyT('暂无用户分组')"
+      :placeholder="t('ui.selectOneOrMoreGroupse395fd4')"
+      :empty-text="t('ui.noUserGroups')"
       @update:model-value="$emit('update:modelValue', $event)"
     />
   </div>
@@ -33,10 +33,10 @@ defineEmits<{
   'update:modelValue': [value: string[]]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const groupOptions = computed(() => props.groups.map((group) => ({
-  label: `${group.name}${group.is_default ? ` (${legacyT('默认')})` : ''}`,
+  label: `${group.name}${group.is_default ? ` (${t('ui.default844b8cc')})` : ''}`,
   value: group.id,
 })))
 </script>

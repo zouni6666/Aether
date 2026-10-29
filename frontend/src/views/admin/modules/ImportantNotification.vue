@@ -1,14 +1,14 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="通知服务"
-      description="统一管理通知项、通知模板和推送服务选择"
+      :title="t('ui.notificationService')"
+      :description="t('ui.manageNotificationsTemplatesAndPushServicesInOnePlace')"
     />
 
     <div class="mt-6 space-y-6">
       <CardSection
-        title="通知服务配置"
-        description="选择全局推送服务，并配置邮件和第三方推送渠道"
+        :title="t('ui.notificationServiceSettings')"
+        :description="t('ui.selectTheDefaultPushServiceAndConfigureEmailAndThird')"
       >
         <template #actions>
           <Button
@@ -16,29 +16,27 @@
             :disabled="saving"
             @click="saveConfig"
           >
-            {{ saving ? '保存中...' : '保存' }}
+            {{ saving ? t('ui.saving') : t('ui.save') }}
           </Button>
         </template>
 
         <div class="space-y-6">
           <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
             <div>
-              <Label class="block text-sm font-medium">
-                全局推送服务
-              </Label>
+              <Label class="block text-sm font-medium"> {{ t('ui.defaultPushService7bb64ce') }} </Label>
               <Select v-model="config.default_channel">
                 <SelectTrigger class="mt-1">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">
-                    所有可用服务
+                    {{ t('ui.allAvailableServices') }}
                   </SelectItem>
                   <SelectItem value="email">
-                    邮件
+                    {{ t('ui.email') }}
                   </SelectItem>
                   <SelectItem value="server_chan">
-                    Server 酱
+                    {{ t('ui.serverChan') }}
                   </SelectItem>
                   <SelectItem value="bark">
                     Bark
@@ -49,11 +47,9 @@
 
             <div class="flex items-center justify-between gap-4">
               <div>
-                <Label class="text-sm font-medium">
-                  启用通知服务
-                </Label>
+                <Label class="text-sm font-medium"> {{ t('ui.enableNotificationServicea224643') }} </Label>
                 <p class="mt-1 text-xs text-muted-foreground">
-                  {{ canEnableService ? '当前策略有可用推送服务' : '当前策略没有可用推送服务' }}
+                  {{ canEnableService ? t('ui.pushServicesAreAvailableForTheCurrentPolicy') : t('ui.noPushServicesAreAvailableForTheCurrentPolicy') }}
                 </p>
               </div>
               <Switch
@@ -68,22 +64,18 @@
               <div class="flex items-center justify-between gap-3">
                 <div>
                   <div class="flex items-center gap-2">
-                    <Label class="text-sm font-medium">
-                      邮件配置
-                    </Label>
+                    <Label class="text-sm font-medium"> {{ t('guide.nav.modules.emailConfig') }} </Label>
                     <Badge :variant="emailReady ? 'success' : 'outline'">
-                      {{ emailReady ? '可用' : '未就绪' }}
+                      {{ emailReady ? t('ui.available4d99c97') : t('ui.notReady') }}
                     </Badge>
                   </div>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    SMTP 配置在
-                    <RouterLink
+                    {{ t('ui.smtpSettingsAreManagedIn') }} <RouterLink
                       to="/admin/email"
                       class="text-primary hover:underline"
                     >
-                      邮件配置
-                    </RouterLink>
-                    中维护
+                      {{ t('guide.nav.modules.emailConfig') }}
+                    </RouterLink> {{ t('ui.settings0437a8c') }}
                   </p>
                 </div>
                 <Switch
@@ -96,9 +88,7 @@
                 <Label
                   for="notification-service-recipients"
                   class="block text-sm font-medium"
-                >
-                  管理员收件人
-                </Label>
+                > {{ t('ui.administratorRecipients02c2945') }} </Label>
                 <Textarea
                   id="notification-service-recipients"
                   v-model="config.email_recipients"
@@ -113,15 +103,13 @@
               <div class="flex items-center justify-between gap-3">
                 <div>
                   <div class="flex items-center gap-2">
-                    <Label class="text-sm font-medium">
-                      Server 酱
-                    </Label>
+                    <Label class="text-sm font-medium"> {{ t('ui.serverChan') }} </Label>
                     <Badge :variant="serverChanReady ? 'success' : 'outline'">
-                      {{ serverChanReady ? '可用' : '未就绪' }}
+                      {{ serverChanReady ? t('ui.available4d99c97') : t('ui.notReady') }}
                     </Badge>
                   </div>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    第三方推送服务在扩展模块中独立启用
+                    {{ t('ui.enableThirdPartyPushServicesSeparatelyInExtensionModules') }}
                   </p>
                 </div>
               </div>
@@ -130,7 +118,7 @@
                 to="/admin/modules/server-chan"
                 class="inline-flex h-11 items-center rounded-xl border border-border/60 bg-card/60 px-4 text-sm font-semibold text-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-primary"
               >
-                配置 Server 酱推送
+                {{ t('ui.configureServerChan') }}
               </RouterLink>
             </section>
 
@@ -142,11 +130,11 @@
                       Bark
                     </Label>
                     <Badge :variant="barkReady ? 'success' : 'outline'">
-                      {{ barkReady ? '可用' : '未就绪' }}
+                      {{ barkReady ? t('ui.available4d99c97') : t('ui.notReady') }}
                     </Badge>
                   </div>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    通过 Bark 向 iOS 设备推送通知
+                    {{ t('ui.sendNotificationsToIosDevicesThroughBark') }}
                   </p>
                 </div>
               </div>
@@ -155,7 +143,7 @@
                 to="/admin/modules/bark"
                 class="inline-flex h-11 items-center rounded-xl border border-border/60 bg-card/60 px-4 text-sm font-semibold text-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-primary"
               >
-                配置 Bark 推送
+                {{ t('ui.configureBark') }}
               </RouterLink>
             </section>
           </div>
@@ -163,8 +151,8 @@
       </CardSection>
 
       <CardSection
-        title="通知项"
-        description="每个通知项可以继承全局服务，也可以单独指定推送服务"
+        :title="t('ui.notificationItems')"
+        :description="t('ui.eachNotificationCanUseTheDefaultServiceOrASpecific')"
       >
         <template #actions>
           <Button
@@ -172,8 +160,7 @@
             variant="outline"
             @click="addItem"
           >
-            <Plus class="mr-1.5 h-4 w-4" />
-            添加通知项
+            <Plus class="mr-1.5 h-4 w-4" /> {{ t('ui.addNotification') }}
           </Button>
         </template>
 
@@ -187,16 +174,16 @@
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
                   <Label class="text-sm font-semibold">
-                    {{ item.name || item.key || '未命名通知项' }}
+                    {{ item.name || item.key || t('ui.untitledNotification') }}
                   </Label>
                   <Badge
                     v-if="item.system"
                     variant="outline"
                   >
-                    内置
+                    {{ t('ui.builtIn95e35aa') }}
                   </Badge>
                   <Badge :variant="isItemReady(item) ? 'success' : 'outline'">
-                    {{ isItemReady(item) ? '可投递' : '未就绪' }}
+                    {{ isItemReady(item) ? t('ui.deliverable') : t('ui.notReady') }}
                   </Badge>
                 </div>
                 <p class="mt-1 truncate text-xs text-muted-foreground">
@@ -218,9 +205,7 @@
 
             <div class="mt-4 grid gap-4 lg:grid-cols-2">
               <div>
-                <Label class="block text-xs font-medium">
-                  通知键
-                </Label>
+                <Label class="block text-xs font-medium"> {{ t('ui.notificationKey') }} </Label>
                 <Input
                   v-model="item.key"
                   class="mt-1"
@@ -229,35 +214,31 @@
                 />
               </div>
               <div>
-                <Label class="block text-xs font-medium">
-                  名称
-                </Label>
+                <Label class="block text-xs font-medium"> {{ t('stats.column.name') }} </Label>
                 <Input
                   v-model="item.name"
                   class="mt-1"
-                  placeholder="自定义通知"
+                  :placeholder="t('ui.customNotification')"
                 />
               </div>
               <div>
-                <Label class="block text-xs font-medium">
-                  推送服务
-                </Label>
+                <Label class="block text-xs font-medium"> {{ t('ui.pushService') }} </Label>
                 <Select v-model="item.channel">
                   <SelectTrigger class="mt-1">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="global">
-                      使用全局
+                      {{ t('ui.useDefault') }}
                     </SelectItem>
                     <SelectItem value="all">
-                      所有可用服务
+                      {{ t('ui.allAvailableServices') }}
                     </SelectItem>
                     <SelectItem value="email">
-                      邮件
+                      {{ t('ui.email') }}
                     </SelectItem>
                     <SelectItem value="server_chan">
-                      Server 酱
+                      {{ t('ui.serverChan') }}
                     </SelectItem>
                     <SelectItem value="bark">
                       Bark
@@ -267,11 +248,9 @@
               </div>
               <div class="flex items-center justify-between rounded-lg border border-border/70 px-4 py-3">
                 <div>
-                  <Label class="text-xs font-medium">
-                    用户邮件
-                  </Label>
+                  <Label class="text-xs font-medium"> {{ t('ui.userEmail') }} </Label>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    允许发送到用户自己的邮箱
+                    {{ t('ui.allowDeliveryToTheUserEmailAddress') }}
                   </p>
                 </div>
                 <Switch
@@ -283,9 +262,7 @@
 
             <div class="mt-4 grid gap-4">
               <div>
-                <Label class="block text-xs font-medium">
-                  标题模板
-                </Label>
+                <Label class="block text-xs font-medium"> {{ t('ui.titleTemplate') }} </Label>
                 <Input
                   v-model="item.title_template"
                   class="mt-1"
@@ -294,9 +271,7 @@
               </div>
               <div class="grid gap-4 lg:grid-cols-2">
                 <div>
-                  <Label class="block text-xs font-medium">
-                    Markdown 模板
-                  </Label>
+                  <Label class="block text-xs font-medium"> {{ t('ui.markdownTemplate') }} </Label>
                   <Textarea
                     v-model="item.markdown_template"
                     rows="5"
@@ -305,9 +280,7 @@
                   />
                 </div>
                 <div>
-                  <Label class="block text-xs font-medium">
-                    文本模板
-                  </Label>
+                  <Label class="block text-xs font-medium"> {{ t('ui.textTemplate') }} </Label>
                   <Textarea
                     v-model="item.text_template"
                     rows="5"
@@ -322,13 +295,13 @@
       </CardSection>
 
       <CardSection
-        title="测试通知"
-        description="按已保存配置发送测试通知"
+        :title="t('ui.testNotification')"
+        :description="t('ui.sendATestNotificationUsingTheSavedSettings')"
       >
         <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_180px_auto]">
           <Select v-model="testItemKey">
             <SelectTrigger>
-              <SelectValue placeholder="选择通知项" />
+              <SelectValue :placeholder="t('ui.selectNotification')" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem
@@ -346,16 +319,16 @@
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="global">
-                按通知项
+                {{ t('ui.byNotification') }}
               </SelectItem>
               <SelectItem value="all">
-                所有可用服务
+                {{ t('ui.allAvailableServices') }}
               </SelectItem>
               <SelectItem value="email">
-                邮件
+                {{ t('ui.email') }}
               </SelectItem>
               <SelectItem value="server_chan">
-                Server 酱
+                {{ t('ui.serverChan') }}
               </SelectItem>
               <SelectItem value="bark">
                 Bark
@@ -368,7 +341,7 @@
             @click="handleTest"
           >
             <Send class="mr-1.5 h-4 w-4" />
-            {{ testing ? '发送中...' : '发送测试' }}
+            {{ testing ? t('auth.register.sendingCode') : t('ui.sendTest') }}
           </Button>
         </div>
 
@@ -381,7 +354,7 @@
             :key="item.channel"
             class="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2 text-sm"
           >
-            <span>{{ formatChannel(item.channel) }}</span>
+            <span>{{ formatNotificationChannel(item.channel) }}</span>
             <span :class="item.success ? 'text-green-600 dark:text-green-400' : 'text-destructive'">
               {{ item.message }}
             </span>
@@ -393,6 +366,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { Plus, Send, Trash2 } from 'lucide-vue-next'
@@ -415,6 +391,7 @@ import { modulesApi, type ModuleStatus } from '@/api/modules'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
+import { formatNotificationChannel } from './notificationChannel'
 
 type DeliveryChannel = 'global' | 'all' | 'email' | 'server_chan' | 'bark'
 
@@ -563,7 +540,7 @@ async function loadConfig() {
       testItemKey.value = config.value.items[0]?.key || ''
     }
   } catch (err) {
-    error(parseApiError(err, '加载通知服务配置失败'))
+    error(parseApiError(err, t('ui.failedToLoadNotificationServiceSettings')))
     log.error('加载通知服务配置失败:', err)
   }
 }
@@ -581,9 +558,9 @@ async function saveConfig() {
       adminApi.updateSystemConfig(CONFIG_KEYS.items, serializeItems(), '通知服务通知项和模板'),
     ])
     await adminApi.updateSystemConfig(CONFIG_KEYS.enabled, config.value.enabled, '通知服务总开关')
-    success('通知服务配置已保存')
+    success(t('ui.notificationServiceSettingsSaved'))
   } catch (err) {
-    error(parseApiError(err, '保存通知服务配置失败'))
+    error(parseApiError(err, t('ui.failedToSaveNotificationServiceSettings')))
     log.error('保存通知服务配置失败:', err)
   } finally {
     saving.value = false
@@ -599,12 +576,12 @@ async function handleTest() {
     })
     lastTestResult.value = result.channels || []
     if (result.success) {
-      success(result.message || '测试通知已发送')
+      success(result.message || t('ui.testNotificationSent'))
     } else {
-      error(result.message || '测试通知发送失败')
+      error(result.message || t('ui.failedToSendTestNotification'))
     }
   } catch (err) {
-    error(parseApiError(err, '测试通知发送失败'))
+    error(parseApiError(err, t('ui.failedToSendTestNotification')))
     log.error('测试通知服务失败:', err)
   } finally {
     testing.value = false
@@ -727,14 +704,4 @@ function normalizeRecipients(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-function formatChannel(channel: string): string {
-  if (channel === 'email') return '邮件'
-  if (channel === 'server_chan') return 'Server 酱'
-  if (channel === 'bark') return 'Bark'
-  if (channel === 'user_email') return '用户邮件'
-  if (channel === 'module') return '模块'
-  if (channel === 'item') return '通知项'
-  if (channel === 'none') return '无可用服务'
-  return channel
-}
 </script>

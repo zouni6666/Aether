@@ -7,7 +7,7 @@
     <div class="space-y-3">
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold">
-          {{ legacyT('订阅配额') }}
+          {{ t('ui.subscriptionQuota') }}
         </h3>
         <Badge
           variant="secondary"
@@ -36,7 +36,7 @@
           class="text-muted-foreground"
           data-testid="provider-monthly-quota-reset"
         >
-          {{ legacyT('每月') }} {{ resetDay }} {{ legacyT('号重置') }}
+          {{ t('ui.everyMonthOnDay') }} {{ resetDay }} {{ t('ui.reset87d368d') }}
         </span>
       </div>
     </div>
@@ -59,7 +59,7 @@ const props = withDefaults(defineProps<{
   resetDay: null,
 })
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const used = computed(() => Number.isFinite(Number(props.used)) ? Number(props.used) : 0)
 const quota = computed(() => Number.isFinite(Number(props.quota)) ? Number(props.quota) : 0)

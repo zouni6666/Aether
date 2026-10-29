@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="open"
-    :title="providerName ? `批量管理模型 - ${providerName}` : '批量管理模型'"
-    description="选中的模型将被关联到提供商，取消选中将移除关联"
+    :title="providerName ? t('ui.manageModelsInBulkValue', { name: providerName }) : t('ui.manageModelsInBulk')"
+    :description="t('ui.selectedModelsAreLinkedToThisProviderDeselectingAModel')"
     :icon="Layers"
     size="2xl"
     @update:model-value="handleDialogUpdate"
@@ -15,7 +15,7 @@
             <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               v-model="searchQuery"
-              placeholder="搜索模型..."
+              :placeholder="t('ui.searchModelscd01488')"
               class="pl-8 h-9"
             />
           </div>
@@ -27,7 +27,7 @@
                 class="h-9 w-9 shrink-0"
                 :disabled="loadingGlobalModels || loadingProviderKeys || fetchingAutoMatchedModels || providerKeys.length === 0"
                 :title="autoMatchButtonTitle"
-                aria-label="按密钥匹配"
+                :aria-label="t('ui.matchByKey')"
               >
                 <Loader2
                   v-if="loadingProviderKeys || fetchingAutoMatchedModels"
@@ -69,8 +69,7 @@
             data-testid="batch-assign-create-model"
             @click="openCreateModelDialog"
           >
-            <Plus class="w-4 h-4" />
-            创建模型
+            <Plus class="w-4 h-4" /> {{ t('ui.createModel') }}
           </Button>
         </div>
 
@@ -91,7 +90,7 @@
                   class="flex items-center justify-between px-3 py-2 bg-muted sticky top-0 z-10"
                 >
                   <div class="flex items-center gap-2">
-                    <span class="text-xs font-medium">全局模型</span>
+                    <span class="text-xs font-medium">{{ t('ui.globalModel') }}</span>
                     <span class="text-xs text-muted-foreground">({{ filteredGlobalModels.length }})</span>
                   </div>
                   <button
@@ -100,7 +99,7 @@
                     class="text-xs text-primary hover:underline shrink-0"
                     @click.stop="toggleAllGlobalModels"
                   >
-                    {{ isAllGlobalModelsSelected ? '取消全选' : '全选' }}
+                    {{ isAllGlobalModelsSelected ? t('ui.deselectAll') : t('ui.selectAll') }}
                   </button>
                 </div>
                 <div class="space-y-1 p-2">
@@ -139,10 +138,10 @@
               >
                 <Layers class="w-10 h-10 mb-2 opacity-30" />
                 <p class="text-sm">
-                  {{ searchQuery ? '无匹配结果' : '暂无可用全局模型' }}
+                  {{ searchQuery ? t('ui.noMatchingResults') : t('ui.noGlobalModelsAvailable') }}
                 </p>
                 <p class="text-xs mt-1">
-                  请先前往"模型目录"页面创建全局模型
+                  {{ t('ui.createAGlobalModelInTheModelCatalogFirst') }}
                 </p>
               </div>
             </template>
@@ -162,7 +161,7 @@
     <template #footer>
       <div class="flex items-center justify-between w-full">
         <p class="text-xs text-muted-foreground">
-          {{ hasChanges ? `${pendingChangesCount} 项更改待保存` : '' }}
+          {{ hasChanges ? t('ui.valueChangesToSave', { count: pendingChangesCount }) : '' }}
         </p>
         <div class="flex items-center gap-2">
           <Button
@@ -173,13 +172,13 @@
               v-if="saving"
               class="w-4 h-4 mr-1 animate-spin"
             />
-            {{ saving ? '保存中...' : '保存' }}
+            {{ saving ? t('ui.saving') : t('ui.save') }}
           </Button>
           <Button
             variant="outline"
             @click="handleClose"
           >
-            关闭
+            {{ t('ui.close') }}
           </Button>
         </div>
       </div>
@@ -188,6 +187,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch } from 'vue'
 import { Layers, Loader2, Search, Check, ListChecks, Plus } from 'lucide-vue-next'
 import Dialog from '@/components/ui/dialog/Dialog.vue'
@@ -201,7 +202,7 @@ import {
   DropdownMenuItem,
 } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
-import { useConfirm } from '@/composables/useConfirm'
+import { useDiscardConfirm } from '@/composables/useDiscardConfirm'
 import { parseApiError } from '@/utils/errorParser'
 import { useUpstreamModelsCache } from '../composables/useUpstreamModelsCache'
 import {
@@ -232,6 +233,8 @@ const emit = defineEmits<{
   'changed': []
 }>()
 
+const { t } = useI18n()
+
 interface AutoMatchKeyLike {
   id: string
   name?: string | null
@@ -239,7 +242,7 @@ interface AutoMatchKeyLike {
 }
 
 const { error: showError, success, warning: showWarning } = useToast()
-const { confirmWarning } = useConfirm()
+const { confirmDiscard } = useDiscardConfirm(() => hasChanges.value)
 const { fetchModels: fetchCachedModels } = useUpstreamModelsCache()
 
 // 状态
@@ -265,9 +268,9 @@ const initialGlobalModelIds = ref<Set<string>>(new Set())
 const searchQuery = ref('')
 
 const autoMatchButtonTitle = computed(() => {
-  if (loadingProviderKeys.value) return '正在加载密钥'
-  if (providerKeys.value.length === 0) return '暂无可用于匹配的密钥'
-  return '选择密钥，并按该密钥的上游模型自动勾选同名模型'
+  if (loadingProviderKeys.value) return t('ui.loadingKeysdb73a97')
+  if (providerKeys.value.length === 0) return t('ui.noKeysAvailableForMatching')
+  return t('ui.selectAKeyToMatchGlobalModelsWithTheSame')
 })
 
 // 已关联的全局模型 ID 集合（从已有数据计算）
@@ -398,14 +401,14 @@ async function applyAutoMatchFromKey(key: AutoMatchKey) {
     if (!props.open) return
 
     if (result.warning) {
-      showWarning(`部分格式获取失败: ${result.warning}`)
+      showWarning(t('providers.migration.someFormatsCouldNotBe4b64a3', { value: String(result.warning) }))
     }
 
     if (result.models.length === 0) {
       if (result.error) {
-        showError(result.error, '获取上游模型失败')
+        showError(result.error, t('ui.failedToFetchUpstreamModels'))
       } else {
-        showWarning('此 Key 未返回可用模型')
+        showWarning(t('ui.thisKeyReturnedNoAvailableModels'))
       }
       return
     }
@@ -420,7 +423,7 @@ async function applyAutoMatchFromKey(key: AutoMatchKey) {
       .map(model => model.id)
 
     if (matchedGlobalModelIds.length === 0) {
-      showWarning('未找到与此 Key 上游模型 ID 同名的全局模型')
+      showWarning(t('ui.noGlobalModelsMatchThisKeyUpstreamModelIds'))
       return
     }
 
@@ -436,12 +439,12 @@ async function applyAutoMatchFromKey(key: AutoMatchKey) {
     searchQuery.value = ''
 
     if (newlySelectedCount > 0) {
-      success(`已按 ${getAutoMatchKeyLabel(key)} 勾选 ${matchedGlobalModelIds.length} 个同名模型`)
+      success(t('providers.migration.selectedMatchingModelsFor0d8ce1', { value: String(getAutoMatchKeyLabel(key)), value_2: String(matchedGlobalModelIds.length) }))
     } else {
-      success(`${matchedGlobalModelIds.length} 个同名模型已在选中列表中`)
+      success(t('providers.migration.matchingModelsAreAlreadySelected529aca', { value: String(matchedGlobalModelIds.length) }))
     }
   } catch (err: unknown) {
-    showError(parseApiError(err, '自动匹配模型失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToMatchModelsAutomatically')), t('ui.error'))
   } finally {
     fetchingAutoMatchedModels.value = false
   }
@@ -459,19 +462,13 @@ async function handleGlobalModelCreated() {
 
 // 处理关闭
 async function handleClose() {
-  if (hasChanges.value) {
-    const confirmed = await confirmWarning('有未保存的更改，确定要关闭吗？', '放弃更改')
-    if (!confirmed) return
-  }
+  if (!(await confirmDiscard())) return
   emit('update:open', false)
 }
 
 // 处理对话框状态变更
 async function handleDialogUpdate(value: boolean) {
-  if (!value && hasChanges.value) {
-    const confirmed = await confirmWarning('有未保存的更改，确定要关闭吗？', '放弃更改')
-    if (!confirmed) return
-  }
+  if (!value && !(await confirmDiscard())) return
   emit('update:open', value)
 }
 
@@ -494,7 +491,7 @@ async function handleSave() {
           await deleteModel(props.providerId, existingModel.id)
           totalSuccess++
         } catch (err: unknown) {
-          allErrors.push(parseApiError(err, '移除失败'))
+          allErrors.push(parseApiError(err, t('ui.failedToRemove')))
         }
       }
     }
@@ -509,22 +506,22 @@ async function handleSave() {
           allErrors.push(...result.errors.map(e => e.error))
         }
       } catch (err: unknown) {
-        allErrors.push(parseApiError(err, '批量添加全局模型失败'))
+        allErrors.push(parseApiError(err, t('ui.failedToAddGlobalModelsInBulk')))
       }
     }
 
     if (totalSuccess > 0) {
-      success(`成功处理 ${totalSuccess} 个模型`)
+      success(t('providers.migration.processedModelsSuccessfullyef5475', { value: String(totalSuccess) }))
     }
 
     if (allErrors.length > 0) {
-      showError(`部分操作失败: ${allErrors.slice(0, 3).join(', ')}${allErrors.length > 3 ? '...' : ''}`, '警告')
+      showError(t('providers.migration.someOperationsFailed6e0167', { value: String(allErrors.slice(0, 3).join(', ')), value_2: String(allErrors.length > 3 ? '...' : '') }), t('ui.warning'))
     }
 
     emit('changed')
     emit('update:open', false)
   } catch (err: unknown) {
-    showError(parseApiError(err, '保存失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToSave')), t('ui.error'))
     if (hasAnyOperation) {
       emit('changed')
     }
@@ -571,7 +568,7 @@ async function loadGlobalModels() {
     const response = await getGlobalModels({ limit: 1000 })
     allGlobalModels.value = response.models
   } catch (err: unknown) {
-    showError(parseApiError(err, '加载全局模型失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToLoadGlobalModels')), t('ui.error'))
   } finally {
     loadingGlobalModels.value = false
   }
@@ -582,7 +579,7 @@ async function loadExistingModels() {
   try {
     existingModels.value = await getProviderModels(props.providerId)
   } catch (err: unknown) {
-    showError(parseApiError(err, '加载已关联模型失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToLoadLinkedModels')), t('ui.error'))
   }
 }
 
@@ -593,9 +590,10 @@ async function loadProviderKeys() {
     providerKeys.value = await getProviderKeys(props.providerId)
   } catch (err: unknown) {
     providerKeys.value = []
-    showError(parseApiError(err, '加载密钥失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToLoadKeys')), t('ui.error'))
   } finally {
     loadingProviderKeys.value = false
   }
 }
+
 </script>

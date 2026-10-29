@@ -3,7 +3,7 @@
     <div class="flex flex-col gap-3 sm:hidden">
       <div class="flex items-center justify-between">
         <h3 class="text-base font-semibold">
-          {{ legacyT('用户管理') }}
+          {{ t('nav.userManagement') }}
         </h3>
         <div class="flex items-center gap-2">
           <Button
@@ -11,7 +11,7 @@
             variant="ghost"
             size="icon"
             class="h-8 w-8"
-            :title="legacyT('分组管理')"
+            :title="t('ui.groupManagement')"
             @click="$emit('openGroups')"
           >
             <FolderKanban class="w-3.5 h-3.5" />
@@ -21,7 +21,7 @@
             variant="ghost"
             size="icon"
             class="h-8 w-8"
-            :title="legacyT('新增用户')"
+            :title="t('ui.addUser')"
             @click="$emit('createUser')"
           >
             <Plus class="w-3.5 h-3.5" />
@@ -54,7 +54,7 @@
 
     <div class="hidden sm:flex items-center justify-between gap-4">
       <h3 class="text-base font-semibold">
-        {{ legacyT('用户管理') }}
+        {{ t('nav.userManagement') }}
       </h3>
 
       <div class="flex items-center gap-2">
@@ -82,7 +82,7 @@
           variant="ghost"
           size="icon"
           class="h-8 w-8"
-          :title="legacyT('分组管理')"
+          :title="t('ui.groupManagement')"
           @click="$emit('openGroups')"
         >
           <FolderKanban class="w-3.5 h-3.5" />
@@ -92,7 +92,7 @@
           variant="ghost"
           size="icon"
           class="h-8 w-8"
-          :title="legacyT('新增用户')"
+          :title="t('ui.addUser')"
           @click="$emit('createUser')"
         >
           <Plus class="w-3.5 h-3.5" />
@@ -148,5 +148,5 @@ defineEmits<{
   refresh: []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

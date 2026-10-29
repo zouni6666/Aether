@@ -12,7 +12,7 @@
         size="sm"
         @click="isOpen = false"
       >
-        关闭
+        {{ t('ui.close') }}
       </Button>
     </template>
 
@@ -25,10 +25,10 @@
           <div class="mb-3 flex items-center justify-between gap-3">
             <div>
               <h4 class="text-sm font-semibold">
-                当前健康
+                {{ t('ui.currentHealth') }}
               </h4>
               <p class="text-xs text-muted-foreground">
-                当前卡片在相同回溯窗口内的健康概况
+                {{ t('ui.healthSummaryForTheSameLookbackWindow') }}
               </p>
             </div>
           </div>
@@ -44,7 +44,7 @@
           class="flex items-center justify-center rounded-xl border border-dashed border-border/60 py-12 text-muted-foreground"
         >
           <Loader2 class="h-5 w-5 animate-spin" />
-          <span class="ml-2 text-sm">加载关联健康...</span>
+          <span class="ml-2 text-sm">{{ t('ui.loadingRelatedHealth') }}</span>
         </div>
 
         <div
@@ -55,7 +55,7 @@
             <AlertTriangle class="mt-0.5 h-4 w-4 flex-shrink-0" />
             <div class="min-w-0">
               <p class="font-medium">
-                关联健康加载失败
+                {{ t('ui.failedToLoadRelatedHealth') }}
               </p>
               <p class="mt-1 text-xs">
                 {{ errorMessage }}
@@ -68,7 +68,7 @@
             size="sm"
             @click="loadRelated"
           >
-            重试
+            {{ t('vscodex.connection.retry') }}
           </Button>
         </div>
 
@@ -102,7 +102,7 @@
             v-if="relatedSections.length === 0"
             class="rounded-xl border border-dashed border-border/60 py-10 text-center text-sm text-muted-foreground"
           >
-            当前时间范围内暂无关联健康数据
+            {{ t('ui.noRelatedHealthDataForThisTimeRange') }}
           </div>
         </template>
       </div>
@@ -111,6 +111,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, ref, watch } from 'vue'
 import { AlertTriangle, Loader2 } from 'lucide-vue-next'
 import Dialog from '@/components/ui/dialog/Dialog.vue'
@@ -142,6 +144,8 @@ const emit = defineEmits<{
   viewDetails: [target: HealthMonitorDetailTarget]
 }>()
 
+const { t } = useI18n()
+
 const { error: showError } = useToast()
 
 const related = ref<HealthRelatedMonitorResponse | null>(null)
@@ -155,14 +159,14 @@ const isOpen = computed({
 })
 
 const dialogTitle = computed(() => {
-  if (!props.target) return '健康详情'
-  return `${props.target.source.title} 详情`
+  if (!props.target) return t('ui.healthDetails')
+  return t('providers.migration.detailsf7b2aa', { value: String(props.target.source.title) })
 })
 
 const dialogDescription = computed(() => {
-  if (!props.target) return '查看关联健康维度'
-  const dimensions = props.isAdmin ? '关联端点、模型与提供商健康' : '关联端点与模型健康'
-  return `${props.target.lookbackHours} 小时内的${dimensions}`
+  if (!props.target) return t('ui.viewRelatedHealthMetrics')
+  const dimensions = props.isAdmin ? t('ui.relatedEndpointModelAndProviderHealth') : t('ui.relatedEndpointAndModelHealth')
+  return t('providers.migration.withinHours5e4094', { value: String(props.target.lookbackHours), value_2: String(dimensions) })
 })
 
 const sourceMonitor = computed<HealthRelatedMonitor | null>(() => {
@@ -195,20 +199,20 @@ const relatedSections = computed(() => {
   const sectionMap = {
     endpoints: {
       key: 'endpoints',
-      title: '关联端点健康',
-      description: '当前维度下实际请求涉及的端点健康',
+      title: t('ui.relatedEndpointHealth'),
+      description: t('ui.healthOfEndpointsUsedByTheseRequests'),
       items: data.related_endpoints || []
     },
     models: {
       key: 'models',
-      title: '关联模型健康',
-      description: '当前维度下实际请求涉及的模型健康',
+      title: t('ui.relatedModelHealth'),
+      description: t('ui.healthOfModelsUsedByTheseRequests'),
       items: data.related_models || []
     },
     providers: {
       key: 'providers',
-      title: '关联提供商健康',
-      description: '当前维度下实际请求涉及的提供商健康',
+      title: t('ui.relatedProviderHealth'),
+      description: t('ui.healthOfProvidersUsedByTheseRequests'),
       items: props.isAdmin ? (data.related_providers || []) : []
     }
   }
@@ -241,7 +245,7 @@ async function loadRelated() {
     }
     const dimension = target.source.kind
     if (!props.isAdmin && dimension === 'provider') {
-      throw new Error('公开健康监控不支持 provider 详情')
+      throw new Error(t('ui.providerDetailsAreUnavailableInPublicHealthMonitoring'))
     }
     const data = props.isAdmin
       ? await getHealthRelatedMonitor(params)
@@ -253,9 +257,9 @@ async function loadRelated() {
     }
   } catch (err: unknown) {
     if (seq === requestSeq) {
-      const message = parseApiError(err, '加载关联健康失败')
+      const message = parseApiError(err, t('ui.failedToLoadRelatedHealth691f039'))
       errorMessage.value = message
-      showError(message, '错误')
+      showError(message, t('ui.error'))
     }
   } finally {
     if (seq === requestSeq) {
@@ -307,4 +311,5 @@ watch([
     loadRelated()
   }
 }, { immediate: true })
+
 </script>

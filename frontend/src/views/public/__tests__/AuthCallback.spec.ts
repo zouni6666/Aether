@@ -25,7 +25,7 @@ vi.mock('@/composables/useToast', () => ({ useToast: () => toastMocks }))
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
     t: (key: string) => key,
-    legacyT: (value: string) => value,
+
   }),
   setI18nLocale: vi.fn(),
 }))

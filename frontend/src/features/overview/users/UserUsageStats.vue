@@ -66,25 +66,25 @@
         <Select v-model="granularity">
           <SelectTrigger
             class="h-8 w-24 text-xs"
-            :aria-label="legacyT('粒度')"
+            :aria-label="t('ui.granularity')"
           >
-            <SelectValue :placeholder="legacyT('粒度')" />
+            <SelectValue :placeholder="t('ui.granularity')" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem
               v-if="canUseHourly"
               value="hour"
             >
-              {{ legacyT('小时') }}
+              {{ t('ui.hours') }}
             </SelectItem>
             <SelectItem value="day">
-              {{ legacyT('天') }}
+              {{ t('ui.days') }}
             </SelectItem>
             <SelectItem value="week">
-              {{ legacyT('周') }}
+              {{ t('providers.antigravity.quota.period.weekly') }}
             </SelectItem>
             <SelectItem value="month">
-              {{ legacyT('月') }}
+              {{ t('ui.month') }}
             </SelectItem>
           </SelectContent>
         </Select>
@@ -225,7 +225,7 @@ const props = defineProps<{ range: OverviewRange; revision: number }>()
 defineSlots<{
   'user-leaderboard'(props: { selectUser: (user: SelectedUser) => void }): unknown
 }>()
-const { t, legacyT } = useI18n()
+const { t } = useI18n()
 
 const PAGE_SIZE = 10
 const granularity = ref<'hour' | 'day' | 'week' | 'month'>('day')

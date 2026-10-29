@@ -11,7 +11,7 @@
     >
       <div>
         <h3 class="text-sm font-medium">
-          调度配置
+          {{ t('ui.routingConfiguration') }}
         </h3>
       </div>
       <Button
@@ -22,11 +22,10 @@
         class="shrink-0 gap-1.5"
         :disabled="!canAddEntry"
         :title="addEntryHint"
-        aria-label="添加调度配置"
+        :aria-label="t('ui.addSchedulingConfiguration')"
         @click="addEntry"
       >
-        <Plus class="h-3.5 w-3.5" />
-        添加配置
+        <Plus class="h-3.5 w-3.5" /> {{ t('ui.addConfiguration') }}
       </Button>
     </div>
 
@@ -45,10 +44,10 @@
         <slot name="toolbar-leading" />
       </div>
       <div class="scheduling-toolbar__scope min-w-0 space-y-1.5">
-        <span class="flex h-6 items-center text-xs font-medium text-muted-foreground">模型配置</span>
+        <span class="flex h-6 items-center text-xs font-medium text-muted-foreground">{{ t('ui.modelConfiguration') }}</span>
         <div
           role="group"
-          aria-label="调度范围"
+          :aria-label="t('ui.schedulingScope')"
           class="scheduling-switch w-full grid-cols-2"
         >
           <button
@@ -61,7 +60,7 @@
             :disabled="disabled"
             @click="setScopeMode(mode.value)"
           >
-            {{ mode.value === 'all' ? '全局配置' : mode.label }}
+            {{ mode.value === 'all' ? t('ui.globalConfiguration') : mode.label }}
           </button>
         </div>
       </div>
@@ -75,7 +74,7 @@
     <div
       v-else
       role="group"
-      aria-label="调度范围"
+      :aria-label="t('ui.schedulingScope')"
       class="scheduling-switch w-full grid-cols-2"
     >
       <button
@@ -97,16 +96,16 @@
       class="min-w-0 space-y-1.5 border-t border-border/50 pt-2"
     >
       <div class="flex h-6 items-center gap-1 text-xs font-medium text-muted-foreground">
-        <span>调度策略</span>
+        <span>{{ t('nav.routing') }}</span>
         <HelpHint
-          label="调度策略"
+          :label="t('nav.routing')"
           :text="schedulingDescription"
           :portal="sidebar"
         />
       </div>
       <div
         role="group"
-        aria-label="调度策略"
+        :aria-label="t('nav.routing')"
         class="scheduling-switch w-full grid-cols-3"
       >
         <button
@@ -131,21 +130,21 @@
     >
       <div
         role="group"
-        aria-label="模型调度配置"
+        :aria-label="t('ui.modelSchedulingConfiguration')"
         class="divide-y divide-border/60 border-b border-border/60"
       >
         <section
           v-for="(entry, index) in entries"
           :key="entry.id"
           class="min-w-0"
-          :aria-label="`调度配置 ${index + 1}`"
+          :aria-label="t('ui.schedulingConfigurationValue', { value: index + 1 })"
         >
           <div class="flex min-w-0 items-center">
             <button
               type="button"
               class="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-md px-1 text-left text-xs hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-50"
               :class="selectedEntryId === entry.id ? 'text-primary' : 'text-foreground'"
-              :aria-label="`选择调度配置 ${index + 1}`"
+              :aria-label="t('ui.selectSchedulingConfigurationValue', { value: index + 1 })"
               :aria-pressed="selectedEntryId === entry.id"
               :aria-expanded="expandedId === entry.id"
               :disabled="disabled"
@@ -157,7 +156,7 @@
               />
               <span
                 class="min-w-0 flex-1 truncate font-medium"
-                :title="entry.scope === 'selected' ? entry.models.join('、') : '默认配置'"
+                :title="entry.scope === 'selected' ? entry.models.join('、') : t('ui.defaultConfiguration')"
               >{{ scopeSummary(entry) }}</span>
               <span class="shrink-0 text-muted-foreground">{{ schedulingModeLabel(entry.schedulingMode) }}</span>
             </button>
@@ -180,7 +179,7 @@
               variant="ghost"
               size="icon"
               class="mr-0.5 h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-              :aria-label="`删除调度配置 ${index + 1}`"
+              :aria-label="t('ui.deleteSchedulingConfigurationValue', { value: index + 1 })"
               :disabled="disabled"
               @click="removeEntry(entry.id)"
             >
@@ -190,17 +189,17 @@
           <div
             v-if="selectedEntryId === entry.id && expandedId === entry.id"
             role="region"
-            aria-label="当前配置的适用模型"
+            :aria-label="t('ui.applicableModelsForThisConfiguration')"
             class="min-w-0 px-1 pb-2"
           >
             <span
               v-if="entry.scope === 'selected'"
               class="mb-1.5 block text-xs font-medium text-muted-foreground"
-            >适用模型</span>
+            >{{ t('ui.applicableModels') }}</span>
             <div
               v-if="entry.models.length"
               class="flex min-w-0 flex-wrap gap-1.5 py-1"
-              aria-label="已配置模型"
+              :aria-label="t('ui.configuredModels')"
             >
               <span
                 v-for="name in entry.models"
@@ -213,13 +212,13 @@
               v-else-if="entry.scope === 'selected'"
               class="py-2 text-xs leading-5 text-muted-foreground"
             >
-              请选择适用模型
+              {{ t('ui.selectApplicableModels1fcd022') }}
             </p>
             <p
               v-else
               class="py-2 text-xs leading-5 text-muted-foreground"
             >
-              此默认配置适用于未单独指定的模型，新增模型也会自动使用。
+              {{ t('ui.thisDefaultConfigurationAppliesToModelsWithoutASeparateConfiguration') }}
             </p>
           </div>
           <div
@@ -227,16 +226,16 @@
             class="min-w-0 space-y-1.5 px-1 pb-3 pt-1"
           >
             <div class="flex h-6 items-center gap-1 text-xs font-medium text-muted-foreground">
-              <span>调度策略</span>
+              <span>{{ t('nav.routing') }}</span>
               <HelpHint
-                label="调度策略"
+                :label="t('nav.routing')"
                 :text="schedulingDescription"
                 :portal="sidebar"
               />
             </div>
             <div
               role="group"
-              aria-label="调度策略"
+              :aria-label="t('nav.routing')"
               class="scheduling-switch w-full grid-cols-3"
             >
               <button
@@ -261,11 +260,10 @@
         class="h-8 w-full gap-1 px-2 text-xs"
         :disabled="!canAddEntry"
         :title="addEntryHint"
-        aria-label="添加调度配置"
+        :aria-label="t('ui.addSchedulingConfiguration')"
         @click="addEntry"
       >
-        <Plus class="h-3.5 w-3.5" />
-        添加配置
+        <Plus class="h-3.5 w-3.5" /> {{ t('ui.addConfiguration') }}
       </Button>
     </fieldset>
     <fieldset
@@ -278,7 +276,7 @@
         v-for="(entry, index) in entries"
         :key="entry.id"
         :class="scopeMode === 'selected' ? 'rounded-lg border border-border/60' : ''"
-        :aria-label="`调度配置 ${index + 1}`"
+        :aria-label="t('ui.schedulingConfigurationValue', { value: index + 1 })"
       >
         <div
           v-if="scopeMode === 'selected'"
@@ -287,7 +285,7 @@
           <button
             type="button"
             class="flex min-w-0 flex-1 items-center gap-3 text-left"
-            :aria-label="`${expandedId === entry.id ? '收起' : '展开'}调度配置 ${index + 1}`"
+            :aria-label="expandedId === entry.id ? t('routing.collapseConfiguration', { index: index + 1 }) : t('routing.expandConfiguration', { index: index + 1 })"
             :aria-expanded="expandedId === entry.id"
             @click="toggleEntry(entry.id)"
           >
@@ -298,12 +296,11 @@
             <span class="min-w-0">
               <span
                 class="block truncate text-sm font-medium"
-                :title="entry.scope === 'selected' ? entry.models.join('、') : '默认配置'"
+                :title="entry.scope === 'selected' ? entry.models.join('、') : t('ui.defaultConfiguration')"
               >
                 {{ scopeSummary(entry) }}
               </span>
-              <span class="mt-0.5 block text-xs text-muted-foreground">
-                配置 {{ index + 1 }} · {{ schedulingModeLabel(entry.schedulingMode) }}
+              <span class="mt-0.5 block text-xs text-muted-foreground"> {{ t('common.configure') }} {{ index + 1 }} · {{ schedulingModeLabel(entry.schedulingMode) }}
               </span>
             </span>
           </button>
@@ -313,7 +310,7 @@
             variant="ghost"
             size="icon"
             class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
-            :aria-label="`删除调度配置 ${index + 1}`"
+            :aria-label="t('ui.deleteSchedulingConfigurationValue', { value: index + 1 })"
             @click="removeEntry(entry.id)"
           >
             <Trash2 class="h-4 w-4" />
@@ -331,7 +328,7 @@
           >
             <div class="min-w-0 space-y-2">
               <h4 class="text-sm font-medium">
-                适用模型
+                {{ t('ui.applicableModels') }}
               </h4>
               <RoutingModelSelector
                 :model-value="entry.models"
@@ -352,24 +349,22 @@
             :class="entry.scope === 'selected' ? 'border-t border-border/60 pt-4' : ''"
           >
             <h4 class="text-sm font-medium">
-              调度设置
+              {{ t('ui.schedulingSettings') }}
             </h4>
             <div class="rounded-md bg-primary/5 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
               <template v-if="entry.scope === 'all'">
-                {{ scopeMode === 'all' ? '此配置适用于全部模型，新增模型也会自动使用。' : '此默认配置适用于未单独指定的模型。' }}
+                {{ scopeMode === 'all' ? t('ui.thisConfigurationAppliesToAllModelsIncludingNewModelsAutomatically') : t('ui.thisDefaultConfigurationAppliesToModelsWithoutASeparateConfigurationb0e4eaf') }}
               </template>
               <template v-else>
-                正在编辑 {{ entry.models.length }} 个模型共用的配置：
-                <span class="text-foreground">{{ entry.models.join('、') }}</span>。
-                此处修改调度方式或排序，会同时应用于这些模型。
+                {{ t('ui.editingTheConfigurationSharedBy') }} {{ entry.models.length }} {{ t('ui.models4e3a7e6') }} <span class="text-foreground">{{ entry.models.join('、') }}</span>{{ t('ui.changesToTheSchedulingMethodOrOrderHereApplyTo') }}
               </template>
             </div>
             <div class="max-w-xl">
               <div class="space-y-1.5 text-sm">
-                <span class="text-muted-foreground">调度策略</span>
+                <span class="text-muted-foreground">{{ t('nav.routing') }}</span>
                 <div
                   role="group"
-                  aria-label="调度策略"
+                  :aria-label="t('nav.routing')"
                   class="scheduling-switch grid-cols-3"
                 >
                   <button
@@ -391,7 +386,7 @@
               :provider-model-ids="entry.scope === 'selected' ? providerModelIds(entry) : undefined"
               :show-scheduling-mode="false"
               :refresh-revision="refreshRevision"
-              :subtitle="entry.scope === 'all' ? '此配置范围内的模型共用排序，仅对实际可用的候选生效' : `${entry.models.length} 个模型共用此排序，仅对各模型可用的候选生效`"
+              :subtitle="entry.scope === 'all' ? t('ui.modelsWithinThisConfigurationShareTheSameOrderWhichApplies') : t('ui.valueModelsShareThisOrderWhichAppliesOnlyToCandidates', { count: entry.models.length })"
               @update:config="value => updateEntry(entry.id, { policy: getDefaultModelPolicy(value) })"
               @inspect-provider="providerId => emit('inspect-provider', providerId)"
             >
@@ -407,7 +402,7 @@
             v-else
             class="border-t border-border/60 pt-4 text-xs text-muted-foreground"
           >
-            选好模型后，即可设置调度方式和排序。
+            {{ t('ui.selectModelsToConfigureTheSchedulingMethodAndOrder') }}
           </p>
         </div>
       </section>
@@ -423,7 +418,7 @@
       v-if="layout !== 'config-only' && scopeMode === 'selected' && !hasAllModels"
       class="text-xs text-muted-foreground"
     >
-      {{ availableModels.length ? `还有 ${availableModels.length} 个模型可配置；` : '' }}未指定的模型继续使用默认调度。
+      {{ availableModels.length ? t('ui.valueMoreModelsCanBeConfigured', { count: availableModels.length }) : '' }}{{ t('ui.modelsWithoutASeparateConfigurationContinueToUseDefaultScheduling') }}
     </p>
     <div
       v-if="layout === 'config-only' && sidebar && $slots['toolbar-actions']"
@@ -435,24 +430,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { ChevronRight, Plus, Trash2 } from 'lucide-vue-next'
-import { Button } from '@/components/ui'
-import HelpHint from '@/components/common/HelpHint.vue'
-import type { GlobalModelResponse } from '@/api/global-models'
-import RoutingPriorityPolicyEditor from './RoutingPriorityPolicyEditor.vue'
-import RoutingModelSelector from './RoutingModelSelector.vue'
-import RoutingModelSelectionPopover from './RoutingModelSelectionPopover.vue'
-import { getDefaultModelPolicy, normalizeRoutingGroupConfig, type RoutingGroupConfig, type RoutingModelPolicy, type RoutingPriorityMode, type RoutingSchedulingMode } from '../utils/routingPolicy'
-import {
-  createSchedulingPolicy,
-  readSchedulingPolicies,
-  schedulingPolicyEditorConfig,
-  validateSchedulingPolicies,
-  writeSchedulingPolicies,
-  type SchedulingPolicy,
-} from '../utils/schedulingPolicies'
-
+import { useI18n } from '@/i18n'
 const props = defineProps<{
   config: RoutingGroupConfig
   refreshRevision?: number
@@ -484,14 +462,34 @@ const emit = defineEmits<{
   }]
 }>()
 
+const { t, locale } = useI18n()
+
+import { computed, ref, watch } from 'vue'
+import { ChevronRight, Plus, Trash2 } from 'lucide-vue-next'
+import { Button } from '@/components/ui'
+import HelpHint from '@/components/common/HelpHint.vue'
+import type { GlobalModelResponse } from '@/api/global-models'
+import RoutingPriorityPolicyEditor from './RoutingPriorityPolicyEditor.vue'
+import RoutingModelSelector from './RoutingModelSelector.vue'
+import RoutingModelSelectionPopover from './RoutingModelSelectionPopover.vue'
+import { getDefaultModelPolicy, normalizeRoutingGroupConfig, type RoutingGroupConfig, type RoutingModelPolicy, type RoutingPriorityMode, type RoutingSchedulingMode } from '../utils/routingPolicy'
+import {
+  createSchedulingPolicy,
+  readSchedulingPolicies,
+  schedulingPolicyEditorConfig,
+  validateSchedulingPolicies,
+  writeSchedulingPolicies,
+  type SchedulingPolicy,
+} from '../utils/schedulingPolicies'
+
 const scopeModes = [
-  { value: 'all' as const, label: '全部模型' },
-  { value: 'selected' as const, label: '区分模型' },
+  { value: 'all' as const, get label() { return t('ui.allModels') } },
+  { value: 'selected' as const, get label() { return t('ui.perModelRouting') } },
 ]
 const schedulingModes: Array<{ value: RoutingSchedulingMode; label: string }> = [
-  { value: 'cache_affinity', label: '缓存亲和' },
-  { value: 'load_balance', label: '负载均衡' },
-  { value: 'fixed_order', label: '固定顺序' },
+  { value: 'cache_affinity', get label() { return t('ui.cacheAffinity951ca1e') } },
+  { value: 'load_balance', get label() { return t('ui.loadBalancing9550295') } },
+  { value: 'fixed_order', get label() { return t('ui.fixedOrder2d32d74') } },
 ]
 const entries = ref(readSchedulingPolicies(props.config))
 const initialSelection = props.initialSelection
@@ -521,16 +519,16 @@ const canAddEntry = computed(() => scopeMode.value === 'selected' && !props.disa
   && !validationError.value && availableModels.value.length > 0)
 const addEntryHint = computed(() => {
   if (validationError.value) return validationError.value
-  if (props.loadingModels) return '正在加载全局模型'
-  if (props.modelsError) return '请先重新加载全局模型'
-  return availableModels.value.length ? '为其他模型添加一套调度配置' : '所有全局模型都已有配置'
+  if (props.loadingModels) return t('ui.loadingGlobalModels')
+  if (props.modelsError) return t('routing.reloadModelsFirst')
+  return availableModels.value.length ? t('routing.addOtherModelConfiguration') : t('routing.allModelsConfigured')
 })
 
 const selectedEntry = computed(() => entries.value.find(entry => entry.id === selectedEntryId.value) ?? entries.value[0] ?? null)
 const schedulingDescription = computed(() => {
-  if (selectedEntry.value?.schedulingMode === 'fixed_order') return '固定顺序：优先级决定候选的尝试次序，实际可用候选还受模型能力和 API 格式影响。'
-  if (selectedEntry.value?.schedulingMode === 'load_balance') return '负载均衡：请求会分散到可用候选，列表优先级不代表实际尝试顺序。'
-  return '缓存亲和：会优先复用缓存命中的候选，实际顺序可能与列表不同。'
+  if (selectedEntry.value?.schedulingMode === 'fixed_order') return t('routing.fixedOrderDescription')
+  if (selectedEntry.value?.schedulingMode === 'load_balance') return t('routing.loadBalanceDescription')
+  return t('routing.cacheAffinityDescription')
 })
 
 function emitSelection(): void {
@@ -604,15 +602,16 @@ function schedulingModeLabel(mode: RoutingSchedulingMode): string {
 }
 
 function scopeSummary(entry: SchedulingPolicy): string {
-  if (entry.scope === 'all') return '默认配置'
-  if (entry.models.length === 0) return '请选择适用模型'
+  if (entry.scope === 'all') return t('ui.defaultConfiguration')
+  if (entry.models.length === 0) return t('ui.selectApplicableModels1fcd022')
   if (layout.value === 'config-only') {
     const first = entry.models[0] ?? ''
     const label = props.globalModels.find(model => model.name === first)?.display_name || first
     return label + (entry.models.length > 1 ? ` +${entry.models.length - 1}` : '')
   }
   const labels = entry.models.slice(0, 2).map(name => props.globalModels.find(model => model.name === name)?.display_name || name)
-  return labels.join('、') + (entry.models.length > 2 ? ` 等 ${entry.models.length} 个模型` : '')
+  const models = labels.join(locale.value === 'en-US' ? ', ' : '、')
+  return entry.models.length > 2 ? t('routing.modelsSummary', { models, count: entry.models.length }) : models
 }
 
 function modelDisplayName(name: string): string {
@@ -701,6 +700,7 @@ function removeEntry(id: string): void {
   if (selectedEntryId.value === id) selectedEntryId.value = entries.value[0]?.id ?? null
   publish()
 }
+
 </script>
 
 <style scoped>

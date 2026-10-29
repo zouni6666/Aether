@@ -6,13 +6,13 @@
       </AvatarFallback>
     </Avatar>
     <p class="text-sm font-medium text-foreground">
-      {{ hasFilters ? legacyT('未找到匹配的用户') : legacyT('暂无用户') }}
+      {{ hasFilters ? t('ui.noMatchingUsersFound') : t('ui.noUsers') }}
     </p>
     <p
       v-if="hasFilters"
       class="mt-1 text-xs text-muted-foreground"
     >
-      {{ legacyT('尝试调整筛选条件') }}
+      {{ t('ui.tryAdjustingFilters') }}
     </p>
   </div>
 </template>
@@ -26,5 +26,5 @@ defineProps<{
   hasFilters: boolean
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

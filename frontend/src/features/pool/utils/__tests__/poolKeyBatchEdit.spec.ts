@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { setI18nLocale } from '@/i18n'
 import {
   buildPoolKeyBatchUpdatePatch,
   parsePoolKeyModelPatterns,
   type PoolKeyBatchEditState,
 } from '../poolKeyBatchEdit'
+
+beforeEach(() => setI18nLocale('zh-CN'))
+afterEach(() => setI18nLocale('zh-CN'))
 
 function state(overrides: Partial<PoolKeyBatchEditState> = {}): PoolKeyBatchEditState {
   return {
@@ -120,6 +124,13 @@ describe('buildPoolKeyBatchUpdatePatch', () => {
       applyAllowedModels: true,
       unrestrictedModels: false,
     })).error).toBe('请至少选择一个可用模型')
+  })
+
+  it('identifies the invalid field independently of the translated error', () => {
+    setI18nLocale('en-US')
+    const result = buildPoolKeyBatchUpdatePatch(state({ applyAllowedModels: true, unrestrictedModels: false }))
+    expect(result.error).toBe('Select at least one available model')
+    expect(result.errorField).toBe('allowed_models')
   })
 })
 

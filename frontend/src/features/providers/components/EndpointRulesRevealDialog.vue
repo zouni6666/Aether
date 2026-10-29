@@ -1,13 +1,13 @@
 <template>
   <Dialog
     :model-value="modelValue"
-    :title="legacyT('查看规则原值')"
+    :title="t('ui.viewOriginalRules')"
     size="2xl"
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div class="space-y-3">
       <p class="text-sm text-muted-foreground">
-        {{ legacyT('仅展示已保存的规则，可能包含密钥；不会覆盖未保存的编辑。关闭后清除明文。') }}
+        {{ t('ui.showsSavedRulesOnlyWhichMayContainSecretsUnsavedEdits') }}
       </p>
       <div
         v-if="loading"
@@ -15,19 +15,19 @@
         class="flex items-center gap-2 py-6 text-sm text-muted-foreground"
       >
         <Loader2 class="h-4 w-4 animate-spin" />
-        {{ legacyT('加载中...') }}
+        {{ t('common.loading') }}
       </div>
       <p
         v-else-if="failed"
         role="alert"
         class="text-sm text-destructive"
       >
-        {{ legacyT('加载规则失败，请关闭后重试') }}
+        {{ t('ui.unableToLoadRulesCloseThisDialogAndTryAgain') }}
       </p>
       <Textarea
         v-else-if="rulesJson"
         :model-value="rulesJson"
-        :aria-label="legacyT('原始规则 JSON')"
+        :aria-label="t('ui.originalRulesJson')"
         readonly
         spellcheck="false"
         class="min-h-[320px] font-mono text-xs leading-relaxed"
@@ -38,7 +38,7 @@
         variant="outline"
         @click="emit('update:modelValue', false)"
       >
-        {{ legacyT('关闭') }}
+        {{ t('ui.close') }}
       </Button>
     </template>
   </Dialog>
@@ -58,7 +58,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
 }>()
-const { legacyT } = useI18n()
+
+const { t } = useI18n()
+
 const rulesJson = ref('')
 const loading = ref(false)
 const failed = ref(false)

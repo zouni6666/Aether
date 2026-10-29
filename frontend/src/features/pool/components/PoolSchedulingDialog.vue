@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="modelValue"
-    title="号池调度"
-    description="管理号池内 Key 的分配模式和排序偏好"
+    :title="t('ui.poolScheduling')"
+    :description="t('ui.manageKeyDistributionModesAndOrderingPreferencesInThePool')"
     size="lg"
     @update:model-value="emit('update:modelValue', $event)"
   >
@@ -11,10 +11,10 @@
       <div class="space-y-4 rounded-2xl border border-border/60 bg-card/70 p-4">
         <div class="space-y-1">
           <h3 class="text-sm font-medium">
-            分配模式
+            {{ t('ui.distributionMode') }}
           </h3>
           <p class="text-xs text-muted-foreground">
-            控制 Key 的基础分配方式，选择一种模式。
+            {{ t('ui.chooseOneBaseDistributionModeForKeys') }}
           </p>
         </div>
 
@@ -80,14 +80,12 @@
           <label
             for="pool-reserve-minimum-quota"
             class="text-sm font-medium"
-          >
-            保留最低额度
-          </label>
+          > {{ t('ui.reserveMinimumQuota') }} </label>
           <p
             id="pool-reserve-minimum-quota-description"
             class="text-xs leading-5 text-muted-foreground"
           >
-            账号剩余额度不高于 1% 时提前标记为额度耗尽并停止调度，待额度恢复后再使用。
+            {{ t('ui.markAccountsAsExhaustedAndStopSchedulingWhenRemainingQuota') }}
           </p>
         </div>
         <Switch
@@ -104,17 +102,15 @@
         <div class="space-y-1">
           <div class="flex flex-wrap items-center gap-2">
             <h3 class="text-sm font-medium">
-              策略调度
+              {{ t('ui.strategyScheduling') }}
             </h3>
-            <span class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
-              已启用 {{ enabledStrategyCount }} 项
-            </span>
+            <span class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"> {{ t('ui.enableddfb8022') }} {{ enabledStrategyCount }} {{ t('ui.items') }} </span>
           </div>
           <p class="text-xs text-muted-foreground">
-            在分配模式基础上叠加排序因素，可组合启用。
+            {{ t('ui.layerOrderingFactorsOnTopOfTheDistributionModeMultiple') }}
           </p>
           <p class="text-xs text-muted-foreground">
-            桌面端支持拖拽排序，移动端可点按上下调整优先级。
+            {{ t('ui.desktopSupportsDragSortingMobileCanMovePrioritiesUpAnd') }}
           </p>
         </div>
 
@@ -169,9 +165,7 @@
                       <span
                         v-if="!item.applicable"
                         class="rounded-full border border-border/60 bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
-                      >
-                        当前不可用
-                      </span>
+                      > {{ t('ui.currentlyUnavailable') }} </span>
                     </div>
                     <p class="mt-0.5 text-xs leading-5 text-muted-foreground">
                       {{ item.desc }}
@@ -188,7 +182,7 @@
                       :disabled="!canMoveStrategy(index, -1)"
                       @click="moveStrategy(index, -1)"
                     >
-                      上移
+                      {{ t('ui.moveUp') }}
                     </button>
                     <button
                       type="button"
@@ -196,7 +190,7 @@
                       :disabled="!canMoveStrategy(index, 1)"
                       @click="moveStrategy(index, 1)"
                     >
-                      下移
+                      {{ t('ui.moveDown') }}
                     </button>
                   </div>
 
@@ -247,20 +241,22 @@
         :disabled="loading"
         @click="emit('update:modelValue', false)"
       >
-        取消
+        {{ t('common.cancel') }}
       </Button>
       <Button
         class="min-w-[96px] flex-1 sm:flex-none"
         :disabled="loading"
         @click="handleSave"
       >
-        {{ loading ? '保存中...' : '保存' }}
+        {{ loading ? t('ui.saving') : t('ui.save') }}
       </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, ref, watch } from 'vue'
 import { GripVertical } from 'lucide-vue-next'
 import { Dialog, Button, Switch } from '@/components/ui'
@@ -309,58 +305,60 @@ const emit = defineEmits<{
   saved: [provider: ProviderWithEndpointsSummary]
 }>()
 
+const { t } = useI18n()
+
 const DISTRIBUTION_GROUP = 'distribution_mode'
 
 const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
   {
     name: 'cache_affinity',
-    label: '缓存亲和',
-    description: '同一用户持续复用 Key，首次分配可集中或轮转',
+    get label() { return t('ui.cacheAffinity951ca1e') },
+    get description() { return t('ui.reuseAKeyForEachUserInitialAssignmentsCanBe') },
     mutex_group: DISTRIBUTION_GROUP,
-    evidence_hint: '先复用用户粘性 Key，未命中时按所选二级模式分配',
+    get evidence_hint() { return t('ui.reuseTheStickyKeyFirstThenUseTheSelectedSecondary') },
     providers: [],
     default_enabled: true,
     modes: [
-      { value: 'single_account', label: '单号优先' },
-      { value: 'lru', label: 'LRU 轮号' },
+      { value: 'single_account', get label() { return t('ui.singleAccountFirst') } },
+      { value: 'lru', get label() { return t('ui.lruRotation') } },
     ],
     default_mode: 'single_account',
   },
   {
     name: 'lru',
-    label: 'LRU 轮转',
-    description: '最久未使用的 Key 优先',
+    get label() { return t('ui.lruRotation0d37c40') },
+    get description() { return t('ui.preferTheLeastRecentlyUsedKeys') },
     mutex_group: DISTRIBUTION_GROUP,
-    evidence_hint: '依据 LRU 时间戳（最近未使用优先）',
+    get evidence_hint() { return t('ui.useLruTimestampsPreferringTheLeastRecentlyUsedAccount') },
     providers: [],
     modes: null,
     default_mode: null,
   },
   {
     name: 'single_account',
-    label: '单号优先',
-    description: '集中使用同一账号（反向 LRU）',
+    get label() { return t('ui.singleAccountFirst') },
+    get description() { return t('ui.concentrateUsageOnTheSameAccountReverseLru') },
     mutex_group: DISTRIBUTION_GROUP,
-    evidence_hint: '先按账号优先级（internal_priority），同级再按反向 LRU 集中',
+    get evidence_hint() { return t('ui.useInternalPriorityFirstThenReverseLruToConcentrateRequests') },
     providers: [],
     modes: null,
     default_mode: null,
   },
   {
     name: 'load_balance',
-    label: '负载均衡',
-    description: '随机分散 Key 使用，均匀分摊负载',
+    get label() { return t('ui.loadBalancing9550295') },
+    get description() { return t('ui.randomlyDistributeKeyUsageToBalanceLoad') },
     mutex_group: DISTRIBUTION_GROUP,
-    evidence_hint: '每次随机分值，实现完全均匀分散',
+    get evidence_hint() { return t('ui.assignRandomScoresForEvenDistribution') },
     providers: [],
     modes: null,
     default_mode: null,
   },
   {
     name: 'free_team_first',
-    label: 'Free/Team 优先',
-    description: '兼容旧配置：优先消耗 Free、Team 或两者',
-    evidence_hint: '依据 plan_type，保留旧 free_only/team_only/both 语义',
+    get label() { return t('ui.preferFreeTeam') },
+    get description() { return t('ui.legacySettingPreferFreeTeamOrBoth') },
+    get evidence_hint() { return t('ui.usePlanTypeWithLegacyFreeOnlyTeamOnlyOr') },
     providers: ['codex', 'grok', 'kiro', 'windsurf', 'xai'],
     modes: [
       { value: 'free_only', label: 'Free' },
@@ -371,54 +369,54 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
   },
   {
     name: 'free_first',
-    label: 'Free 优先',
-    description: '优先消耗 Free 账号（依赖 plan_type）',
-    evidence_hint: '依据 plan_type（Free 账号优先调度）',
+    get label() { return t('ui.preferFree') },
+    get description() { return t('ui.preferFreeAccountsBasedOnPlanType') },
+    get evidence_hint() { return t('ui.usePlanTypePrioritizingFreeAccounts') },
     providers: ['codex', 'grok', 'kiro', 'windsurf', 'xai'],
     modes: null,
     default_mode: null,
   },
   {
     name: 'team_first',
-    label: 'Team 优先',
-    description: '优先消耗 Team 账号（依赖 plan_type）',
-    evidence_hint: '依据 plan_type（Team 账号优先调度）',
+    get label() { return t('ui.preferTeam') },
+    get description() { return t('ui.preferTeamAccountsBasedOnPlanType') },
+    get evidence_hint() { return t('ui.usePlanTypePrioritizingTeamAccounts') },
     providers: ['codex', 'grok', 'kiro', 'windsurf', 'xai'],
     modes: null,
     default_mode: null,
   },
   {
     name: 'plus_first',
-    label: 'Plus 优先',
-    description: '优先消耗 Plus 账号（依赖 plan_type）',
-    evidence_hint: '依据 plan_type（Plus 账号优先调度）',
+    get label() { return t('ui.preferPlus') },
+    get description() { return t('ui.preferPlusAccountsBasedOnPlanType') },
+    get evidence_hint() { return t('ui.usePlanTypePrioritizingPlusAccounts') },
     providers: ['codex', 'grok', 'kiro', 'windsurf', 'xai'],
     modes: null,
     default_mode: null,
   },
   {
     name: 'pro_first',
-    label: 'Pro 优先',
-    description: '优先消耗 Pro 账号（依赖 plan_type）',
-    evidence_hint: '依据 plan_type（Pro 账号优先调度）',
+    get label() { return t('ui.preferPro') },
+    get description() { return t('ui.preferProAccountsBasedOnPlanType') },
+    get evidence_hint() { return t('ui.usePlanTypePrioritizingProAccounts') },
     providers: ['codex', 'grok', 'kiro', 'windsurf', 'xai'],
     modes: null,
     default_mode: null,
   },
   {
     name: 'quota_balanced',
-    label: '额度平均',
-    description: '优先选额度消耗最少的账号',
-    evidence_hint: '依据账号配额使用率；无配额时回退到窗口成本使用',
+    get label() { return t('ui.quotaBalance') },
+    get description() { return t('ui.preferAccountsWithTheLowestQuotaUsage') },
+    get evidence_hint() { return t('ui.useAccountQuotaUtilizationFallingBackToWindowCostUsage') },
     providers: [],
     modes: null,
     default_mode: null,
   },
   {
     name: 'recent_refresh',
-    label: '额度刷新优先',
-    description: '优先选即将刷新额度的账号',
-    evidence_hint: '依据账号额度重置倒计时（next_reset / reset_seconds）',
+    get label() { return t('ui.quotaRefreshFirst') },
+    get description() { return t('ui.preferAccountsWhoseQuotaWillRefreshSoon') },
+    get evidence_hint() { return t('ui.useTheAccountQuotaResetCountdownNextResetResetSeconds') },
     providers: ['codex', 'grok', 'kiro', 'windsurf', 'xai'],
     default_enabled_providers: ['codex', 'windsurf'],
     modes: null,
@@ -426,36 +424,36 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
   },
   {
     name: 'priority_first',
-    label: '优先级优先',
-    description: '按账号优先级顺序调度（数字越小越优先）',
-    evidence_hint: '依据 internal_priority（支持拖拽/手工编辑）',
+    get label() { return t('ui.priorityFirst') },
+    get description() { return t('ui.scheduleByAccountPriorityLowerNumbersAreHigherPriority') },
+    get evidence_hint() { return t('ui.useInternalPriorityWithDragAndDropOrManualEditing') },
     providers: [],
     modes: null,
     default_mode: null,
   },
   {
     name: 'health_first',
-    label: '健康优先',
-    description: '优先选择健康分更高、失败更少的账号',
-    evidence_hint: '依据 health_by_format 聚合分（含熔断/失败衰减）',
+    get label() { return t('ui.healthFirst') },
+    get description() { return t('ui.preferAccountsWithHigherHealthScoresAndFewerFailures') },
+    get evidence_hint() { return t('ui.useAggregateHealthByFormatScoresIncludingCircuitBreakerAnd') },
     providers: [],
     modes: null,
     default_mode: null,
   },
   {
     name: 'latency_first',
-    label: '延迟优先',
-    description: '优先选择最近延迟更低的账号',
-    evidence_hint: '依据号池延迟窗口均值（latency_window_seconds）',
+    get label() { return t('ui.latencyFirst') },
+    get description() { return t('ui.preferAccountsWithLowerRecentLatency') },
+    get evidence_hint() { return t('ui.useAveragePoolLatencyOverLatencyWindowSeconds') },
     providers: [],
     modes: null,
     default_mode: null,
   },
   {
     name: 'cost_first',
-    label: '成本优先',
-    description: '优先选择窗口消耗更低的账号',
-    evidence_hint: '依据窗口成本/Token 用量，缺失时回退配额使用率',
+    get label() { return t('ui.costFirst') },
+    get description() { return t('ui.preferAccountsWithLowerWindowCost') },
+    get evidence_hint() { return t('ui.useWindowCostOrTokenUsageFallingBackToQuota') },
     providers: [],
     modes: null,
     default_mode: null,
@@ -893,7 +891,7 @@ async function handleSave() {
     await ensurePresetDefsLoaded()
     if (!props.modelValue || props.providerId !== providerId || dialogRevision !== revision) return
     if (!presetDefsLoaded.value) {
-      showError('调度策略元数据加载失败，请重试')
+      showError(t('ui.failedToLoadSchedulingPolicyMetadataTryAgain'))
       return
     }
     presetList.value = normalizeMutexSelection(presetList.value)
@@ -921,7 +919,7 @@ async function handleSave() {
     const updatedProvider = await updateProvider(providerId, payload)
     if (!props.modelValue || props.providerId !== providerId || dialogRevision !== revision) return
 
-    success('号池调度已保存')
+    success(t('ui.poolSchedulingSaved'))
     emit('saved', updatedProvider)
     emit('update:modelValue', false)
   } catch (err) {
@@ -932,4 +930,5 @@ async function handleSave() {
     }
   }
 }
+
 </script>

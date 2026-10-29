@@ -1,8 +1,8 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="敏感信息保护"
-      description="发送给供应商前将聊天消息中的敏感信息替换为占位符，返回客户端前自动还原。"
+      :title="t('ui.sensitiveInformationProtection')"
+      :description="t('ui.replaceSensitiveInformationInChatMessagesWithPlaceholdersBeforeSending')"
       :icon="ShieldCheck"
     >
       <template #actions>
@@ -14,14 +14,13 @@
           <RefreshCw
             class="mr-2 h-4 w-4"
             :class="{ 'animate-spin': loading }"
-          />
-          刷新
+          /> {{ t('ui.refresh') }}
         </Button>
         <Button
           :disabled="loading || saving || !hasChanges"
           @click="saveConfig"
         >
-          {{ saving ? '保存中...' : '保存配置' }}
+          {{ saving ? t('ui.saving') : t('ui.saveConfiguration') }}
         </Button>
       </template>
     </PageHeader>
@@ -40,16 +39,16 @@
               </p>
             </div>
             <p class="max-w-3xl text-sm text-muted-foreground">
-              管理员只配置功能是否启用和匹配规则。用户、用户 Key、独立余额 Key 可在各自配置中附加此功能。
+              {{ t('ui.administratorsConfigureAvailabilityAndMatchingRulesUsersUserKeysAnd') }}
             </p>
             <p class="max-w-3xl text-xs text-muted-foreground">
-              当前支持 OpenAI Chat Completions、OpenAI Responses、Claude Messages；同格式转发和已支持的跨格式转换都会在发送给供应商前替换占位符。
+              {{ t('ui.supportsOpenaiChatCompletionsOpenaiResponsesAndClaudeMessagesSensitive') }}
             </p>
           </div>
           <div class="flex items-center gap-3 rounded-xl border border-border bg-muted/40 px-4 py-3">
             <div class="text-right">
               <p class="text-sm font-medium text-foreground">
-                启用敏感信息保护
+                {{ t('ui.enableSensitiveDataProtection') }}
               </p>
             </div>
             <Switch
@@ -61,21 +60,20 @@
       </section>
 
       <CardSection
-        title="替换类型配置"
-        description="统一配置所有可用规则。"
+        :title="t('ui.replacementRules')"
+        :description="t('ui.configureAllAvailableRules')"
       >
         <div class="space-y-4">
           <div class="flex items-center justify-between gap-3">
             <div class="text-sm text-muted-foreground">
-              规则按表格顺序保存。系统预置规则可直接修改，自定义规则可删除。
+              {{ t('ui.rulesAreSavedInTableOrderBuiltInRulesCan') }}
             </div>
             <Button
               variant="outline"
               size="sm"
               @click="addCustomRule"
             >
-              <Plus class="mr-2 h-4 w-4" />
-              新增规则
+              <Plus class="mr-2 h-4 w-4" /> {{ t('ui.addRule83009fc') }}
             </Button>
           </div>
 
@@ -84,16 +82,16 @@
               <thead class="bg-muted/50 text-left text-xs font-medium text-muted-foreground">
                 <tr>
                   <th class="w-[220px] px-4 py-3">
-                    规则名称
+                    {{ t('ui.ruleName') }}
                   </th>
                   <th class="px-4 py-3">
-                    正则
+                    {{ t('ui.regex') }}
                   </th>
                   <th class="w-[120px] px-4 py-3">
-                    是否启用
+                    {{ t('ui.enabled') }}
                   </th>
                   <th class="w-[150px] px-4 py-3 text-right">
-                    操作
+                    {{ t('ui.actionsed31fbb') }}
                   </th>
                 </tr>
               </thead>
@@ -113,7 +111,7 @@
                       v-if="rule.system"
                       class="mt-1 text-[11px] text-muted-foreground"
                     >
-                      系统预置
+                      {{ t('ui.builtIn') }}
                     </div>
                   </td>
                   <td class="px-4 py-3">
@@ -136,7 +134,7 @@
                         variant="ghost"
                         size="icon"
                         class="h-8 w-8"
-                        title="恢复默认"
+                        :title="t('ui.restoreDefaults')"
                         @click="resetSystemRule(index)"
                       >
                         <RotateCcw class="h-4 w-4" />
@@ -146,7 +144,7 @@
                         variant="ghost"
                         size="icon"
                         class="h-8 w-8 text-destructive"
-                        title="删除"
+                        :title="t('ui.delete')"
                         @click="removeRule(index)"
                       >
                         <Trash2 class="h-4 w-4" />
@@ -161,8 +159,8 @@
       </CardSection>
 
       <CardSection
-        title="占位符配置"
-        description="配置供应商侧看到的占位符前缀。"
+        :title="t('ui.placeholderSettings')"
+        :description="t('ui.configureThePlaceholderPrefixVisibleToProviders')"
       >
         <div class="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,320px)_1fr] md:items-start">
           <div class="space-y-2">
@@ -173,11 +171,11 @@
               @update:model-value="(value) => redactionConfig.placeholder_prefix = normalizePlaceholderPrefixInput(String(value))"
             />
             <p class="text-xs text-muted-foreground">
-              仅支持字母、数字、下划线，保存后统一转为大写。
+              {{ t('ui.useOnlyLettersNumbersAndUnderscoresValuesAreConvertedTo') }}
             </p>
           </div>
           <div class="rounded-xl border border-border bg-muted/40 px-4 py-3 text-sm">
-            <span class="text-muted-foreground">示例：</span>
+            <span class="text-muted-foreground">{{ t('ui.example') }}</span>
             <code class="ml-2 rounded bg-background px-2 py-1 font-mono text-xs text-foreground">
               &lt;{{ redactionConfig.placeholder_prefix || 'AETHER' }}:EMAIL:ABCDEFGHIJKLMNOPQRST&gt;
             </code>
@@ -186,8 +184,8 @@
       </CardSection>
 
       <CardSection
-        title="多轮上下文缓存"
-        description="此时间控制真实值与占位符映射在 Redis 中的缓存窗口。"
+        :title="t('ui.conversationContextCache')"
+        :description="t('ui.setsHowLongRealValuesAndTheirPlaceholderMappingsAre')"
       >
         <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
           <button
@@ -212,6 +210,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { computed, onMounted, ref } from 'vue'
 import { Plus, RefreshCw, RotateCcw, ShieldCheck, Trash2 } from 'lucide-vue-next'
 import { PageContainer, PageHeader, CardSection } from '@/components/layout'
@@ -240,12 +241,12 @@ const defaultConfig: ChatPiiRedactionConfig = {
 const ttlOptions = [
   {
     value: 300 as const,
-    label: '5 分钟（默认）',
+    get label() { return t('ui.5MinutesDefault') },
     helper: '适合短对话，同一敏感信息在 5 分钟内保持相同占位符。',
   },
   {
     value: 3600 as const,
-    label: '1 小时',
+    get label() { return t('ui.1H5482d1a') },
     helper: '适合长多轮对话，同一敏感信息在 1 小时内保持相同占位符。',
   },
 ]
@@ -262,7 +263,7 @@ const hasChanges = computed(() => JSON.stringify(redactionConfig.value) !== JSON
 
 const statusLabel = computed(() => {
   const moduleStatus = moduleStore.modules.chat_pii_redaction
-  if (moduleStatus && !moduleStatus.config_validated) return '配置异常'
+  if (moduleStatus && !moduleStatus.config_validated) return t('ui.configurationError')
   return redactionConfig.value.enabled ? '已开启' : ''
 })
 
@@ -318,7 +319,7 @@ function sanitizeRules(): ChatPiiRedactionRule[] | null {
     const name = rule.name.trim()
     const pattern = rule.pattern.trim()
     if (!name || !pattern) {
-      error('规则名称和正则不能为空')
+      error(t('ui.ruleNameAndRegularExpressionAreRequired'))
       return null
     }
     const uniqueId = seen.has(id) ? `${id}_${index + 1}` : id
@@ -345,7 +346,7 @@ async function loadConfig() {
     redactionConfig.value = cloneConfig(config)
     originalConfig.value = cloneConfig(config)
   } catch (err) {
-    error(parseApiError(err, '加载敏感信息保护配置失败'))
+    error(parseApiError(err, t('ui.failedToLoadSensitiveDataProtectionSettings')))
     log.error('加载敏感信息保护配置失败:', err)
   } finally {
     loading.value = false
@@ -357,7 +358,7 @@ async function saveConfig() {
   if (!rules) return
   const placeholderPrefix = normalizePlaceholderPrefixInput(redactionConfig.value.placeholder_prefix).trim()
   if (!placeholderPrefix) {
-    error('占位符前缀不能为空')
+    error(t('ui.placeholderPrefixIsRequired'))
     return
   }
   saving.value = true
@@ -370,9 +371,9 @@ async function saveConfig() {
     redactionConfig.value = cloneConfig(saved)
     originalConfig.value = cloneConfig(saved)
     await moduleStore.fetchModules()
-    success('敏感信息保护配置已保存')
+    success(t('ui.sensitiveDataProtectionSettingsSavedfef37f7'))
   } catch (err) {
-    error(parseApiError(err, '保存敏感信息保护配置失败'))
+    error(parseApiError(err, t('ui.failedToSaveSensitiveDataProtectionSettings')))
     log.error('保存敏感信息保护配置失败:', err)
   } finally {
     saving.value = false
@@ -380,4 +381,5 @@ async function saveConfig() {
 }
 
 onMounted(loadConfig)
+
 </script>

@@ -1,8 +1,8 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="模块管理"
-      description="管理系统功能模块的启用状态"
+      :title="t('nav.moduleManagement')"
+      :description="t('ui.manageEnabledSystemModules')"
     >
       <template #actions>
         <Button
@@ -13,8 +13,7 @@
           <RefreshCw
             class="w-4 h-4 mr-2"
             :class="{ 'animate-spin': loading }"
-          />
-          刷新
+          /> {{ t('ui.refresh') }}
         </Button>
       </template>
     </PageHeader>
@@ -25,7 +24,7 @@
         <Search class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
         <Input
           v-model="searchQuery"
-          placeholder="搜索模块名称或描述..."
+          :placeholder="t('ui.searchModuleNamesOrDescriptions')"
           class="pl-11 h-11"
         />
       </div>
@@ -38,7 +37,7 @@
         class="mb-8"
       >
         <h3 class="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-4">
-          内置工具
+          {{ t('ui.builtInTools') }}
         </h3>
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
           <div
@@ -70,8 +69,7 @@
                 class="gap-1.5"
                 @click.stop="router.push(tool.href)"
               >
-                <Settings class="w-3.5 h-3.5" />
-                管理
+                <Settings class="w-3.5 h-3.5" /> {{ t('nav.group.management') }}
               </Button>
             </div>
           </div>
@@ -81,7 +79,7 @@
       <!-- 扩展模块 -->
       <div class="mb-4 flex items-center justify-between gap-3">
         <h3 class="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
-          扩展模块
+          {{ t('ui.extensionModules') }}
         </h3>
         <Button
           v-if="hasCustomModuleOrder"
@@ -94,8 +92,7 @@
           <RotateCcw
             class="w-3.5 h-3.5"
             :class="{ 'animate-spin': orderSaving }"
-          />
-          恢复默认
+          /> {{ t('ui.restoreDefaults') }}
         </Button>
       </div>
 
@@ -116,7 +113,7 @@
             canReorderModules ? 'cursor-grab active:cursor-grabbing' : ''
           ]"
           :draggable="canReorderModules"
-          :title="orderSaving ? '正在保存排序' : '拖拽卡片调整顺序'"
+          :title="orderSaving ? t('ui.savingOrder') : t('ui.dragCardsToReorder')"
           @dragstart="handleModuleDragStart(module.name, $event)"
           @dragend="handleModuleDragEnd"
           @dragover.prevent="handleModuleDragOver(module.name)"
@@ -173,7 +170,7 @@
             v-if="!module.available"
             class="mt-4 text-xs text-orange-700 dark:text-orange-400 bg-orange-100 dark:bg-orange-950/50 rounded-lg px-3 py-2"
           >
-            模块不可用，请检查环境变量和依赖库
+            {{ t('ui.moduleUnavailableCheckEnvironmentVariablesAndDependencies') }}
           </div>
 
           <!-- 操作区域 -->
@@ -189,14 +186,14 @@
                   class="text-sm"
                   :class="module.enabled ? 'text-foreground' : 'text-muted-foreground'"
                 >
-                  {{ module.enabled ? '启用' : '禁用' }}
+                  {{ module.enabled ? t('ui.enablef4f0ead') : t('ui.disable') }}
                 </span>
                 <!-- 配置未验证提示（小字） -->
                 <span
                   v-if="module.available && !module.config_validated"
                   class="text-xs text-muted-foreground"
                 >
-                  {{ module.config_error || '请先完成配置' }}
+                  {{ module.config_error || t('ui.completeTheConfigurationFirst') }}
                 </span>
               </div>
             </div>
@@ -221,7 +218,7 @@
       >
         <Search class="w-12 h-12 mx-auto text-muted-foreground/50 mb-4" />
         <p class="text-muted-foreground">
-          没有找到匹配的模块
+          {{ t('ui.noMatchingModules') }}
         </p>
       </div>
 
@@ -232,7 +229,7 @@
       >
         <Puzzle class="w-12 h-12 mx-auto text-muted-foreground/50 mb-4" />
         <p class="text-muted-foreground">
-          暂无可管理的模块
+          {{ t('ui.noModulesAvailableToManage') }}
         </p>
       </div>
     </div>
@@ -301,11 +298,11 @@ function getCategoryIcon(category: string) {
 
 function getModuleStatusCopy(module: { name: string; enabled: boolean; active: boolean; config_validated: boolean; config_error: string | null }) {
   if (module.name !== 'chat_pii_redaction') {
-    return module.enabled ? '已启用' : '已禁用'
+    return module.enabled ? t('ui.enableddfb8022') : t('ui.disabledbc5a87a')
   }
-  if (!module.config_validated) return '配置异常'
+  if (!module.config_validated) return t('ui.configurationError')
   if (!module.enabled) return ''
-  return '已开启'
+  return t('ui.enabled8a4ef3e')
 }
 
 function compareModuleDefaultOrder(a: ModuleStatus, b: ModuleStatus) {
@@ -391,7 +388,7 @@ async function fetchModules() {
     ])
     moduleOrder.value = normalizeOrderForCurrentModules(savedOrder)
   } catch (err) {
-    error('获取模块列表失败')
+    error(t('ui.failedToLoadModules'))
     log.error('获取模块列表失败:', err)
   } finally {
     loading.value = false
@@ -403,9 +400,9 @@ async function toggleModule(moduleName: string, enabled: boolean) {
   toggling.value[moduleName] = true
   try {
     await moduleStore.setEnabled(moduleName, enabled)
-    success(enabled ? '模块已启用' : '模块已禁用')
+    success(enabled ? t('ui.moduleEnabled') : t('ui.moduleDisabled'))
   } catch (err) {
-    error(getErrorMessage(err, '操作失败'))
+    error(getErrorMessage(err, t('ui.operationFailed')))
     log.error('切换模块状态失败:', err)
   } finally {
     toggling.value[moduleName] = false
@@ -419,10 +416,10 @@ async function saveModuleOrder(nextOrder: string[]) {
   orderSaving.value = true
   try {
     await modulesApi.updateModuleManagementOrder(moduleOrder.value)
-    success('模块顺序已保存')
+    success(t('ui.moduleOrderSaved'))
   } catch (err) {
     moduleOrder.value = previousOrder
-    error(getErrorMessage(err, '保存模块顺序失败'))
+    error(getErrorMessage(err, t('ui.failedToSaveModuleOrder')))
     log.error('保存模块顺序失败:', err)
   } finally {
     orderSaving.value = false

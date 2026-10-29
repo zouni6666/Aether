@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="open"
-    :title="isEditing ? '编辑模型配置' : '添加模型'"
-    :description="isEditing ? '修改模型价格配置' : '为此 Provider 添加模型实现'"
+    :title="isEditing ? t('ui.editModelConfiguration') : t('ui.addModel')"
+    :description="isEditing ? t('ui.editModelPricing') : t('ui.addAModelImplementationToThisProvider')"
     :icon="isEditing ? SquarePen : Layers"
     size="xl"
     @update:model-value="handleClose"
@@ -17,7 +17,7 @@
         class="space-y-3"
       >
         <div class="flex items-center justify-between gap-3">
-          <Label for="global-model">选择已有模型或手动添加 *</Label>
+          <Label for="global-model">{{ t('ui.selectAnExistingModelOrAddOneManually') }}</Label>
           <Button
             type="button"
             variant="ghost"
@@ -25,7 +25,7 @@
             class="h-7 px-2 text-xs"
             @click="manualGlobalModelMode = !manualGlobalModelMode"
           >
-            {{ manualGlobalModelMode ? '选择已有模型' : '手动添加' }}
+            {{ manualGlobalModelMode ? t('ui.selectExistingModel') : t('ui.addManually') }}
           </Button>
         </div>
         <div
@@ -38,7 +38,7 @@
             @update:model-value="handleGlobalModelSelect"
           >
             <SelectTrigger class="w-full">
-              <SelectValue :placeholder="loadingGlobalModels ? '加载中...' : '请选择模型'" />
+              <SelectValue :placeholder="loadingGlobalModels ? t('common.loading') : t('ui.selectAModel')" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem
@@ -60,11 +60,11 @@
               <Label
                 for="manual-global-model-name"
                 class="text-xs"
-              >模型ID *</Label>
+              >{{ t('ui.modelId5f9dbab') }}</Label>
               <Input
                 id="manual-global-model-name"
                 v-model="form.manual_global_model_name"
-                placeholder="如 gpt-4o-mini"
+                :placeholder="t('ui.eGGpt4oMini')"
                 @update:model-value="syncManualProviderName"
               />
             </div>
@@ -72,36 +72,36 @@
               <Label
                 for="manual-global-model-display-name"
                 class="text-xs"
-              >显示名称</Label>
+              >{{ t('ui.displayName') }}</Label>
               <Input
                 id="manual-global-model-display-name"
                 v-model="form.manual_global_model_display_name"
-                placeholder="默认使用模型ID"
+                :placeholder="t('ui.defaultsToModelId')"
               />
             </div>
           </div>
           <p class="text-xs text-muted-foreground">
-            无法联网获取模型目录时，可直接填写模型ID。保存时会先创建本地全局模型，再添加到当前 Provider。
+            {{ t('ui.ifTheModelCatalogIsUnavailableEnterAModelId') }}
           </p>
         </div>
         <p
           v-if="availableGlobalModels.length === 0 && !loadingGlobalModels && !manualGlobalModelMode"
           class="text-xs text-muted-foreground"
         >
-          没有可选择的本地全局模型。可以切换到“手动添加”继续保存。
+          {{ t('ui.noLocalGlobalModelsAvailableSwitchToManualEntryTo') }}
         </p>
         <div class="space-y-1.5">
           <Label
             for="provider-model-name"
             class="text-xs"
-          >Provider 模型名 *</Label>
+          >{{ t('ui.providerModelName') }}</Label>
           <Input
             id="provider-model-name"
             v-model="form.provider_model_name"
-            placeholder="Provider 实际接收的模型名，如 gpt-4o-mini"
+            :placeholder="t('ui.modelNameAcceptedByTheProviderEGGpt4o')"
           />
           <p class="text-xs text-muted-foreground">
-            默认跟随所选模型ID；如内网模型、兼容网关或别名不同，可手动覆盖。
+            {{ t('ui.defaultsToTheSelectedModelIdOverrideForPrivateModels') }}
           </p>
         </div>
         <div
@@ -112,7 +112,7 @@
             Embedding
           </div>
           <p class="text-xs text-muted-foreground">
-            此模型将继承全局模型的 Embeddings 元数据，不按 Chat 能力处理。
+            {{ t('ui.thisModelInheritsGlobalEmbeddingMetadataAndIsNotTreated') }}
           </p>
         </div>
       </div>
@@ -150,10 +150,10 @@
           />
           <div class="space-y-1">
             <div class="text-sm font-medium">
-              图片模型
+              {{ t('ui.imageModel') }}
             </div>
             <p class="text-xs text-muted-foreground">
-              启用图片输出计费，并展开尺寸 × 质量矩阵价格。
+              {{ t('ui.enableImageOutputBillingAndShowTheSizeQualityPricing') }}
             </p>
           </div>
         </div>
@@ -162,7 +162,7 @@
       <!-- 价格配置 -->
       <section class="space-y-3 rounded-lg border bg-card p-4">
         <h4 class="font-medium text-sm">
-          选择计费模式
+          {{ t('ui.selectBillingMode') }}
         </h4>
         <Tabs
           v-model="billingMode"
@@ -173,13 +173,13 @@
               Token
             </TabsTrigger>
             <TabsTrigger value="request">
-              按次
+              {{ t('ui.perRequest') }}
             </TabsTrigger>
             <TabsTrigger value="image">
-              图片
+              {{ t('ui.image') }}
             </TabsTrigger>
             <TabsTrigger value="video">
-              视频
+              {{ t('ui.video') }}
             </TabsTrigger>
           </TabsList>
 
@@ -200,18 +200,18 @@
             class="pt-2"
           >
             <div class="rounded-lg border bg-muted/20 p-4 space-y-2">
-              <Label class="text-xs">每次请求价格（美元）</Label>
+              <Label class="text-xs">{{ t('ui.pricePerRequestUsd') }}</Label>
               <Input
                 :model-value="form.price_per_request ?? ''"
                 type="number"
                 step="0.001"
                 min="0"
                 class="max-w-48"
-                placeholder="留空使用全局模型默认值"
+                :placeholder="t('ui.leaveEmptyToUseGlobalModelDefaults')"
                 @update:model-value="updatePricePerRequest"
               />
               <p class="text-xs text-muted-foreground">
-                按每次 API 请求收取固定费用；未修改时继续继承全局模型。
+                {{ t('ui.chargeAFixedAmountPerApiRequestInheritsGlobalModel') }}
               </p>
             </div>
           </TabsContent>
@@ -223,10 +223,10 @@
             <div class="space-y-3 rounded-lg border bg-muted/20 p-4">
               <div>
                 <div class="text-sm font-medium">
-                  视频计费（分辨率 × 时长）
+                  {{ t('ui.videoPricingResolutionDuration') }}
                 </div>
                 <p class="mt-1 text-xs text-muted-foreground">
-                  根据输出分辨率配置每秒视频价格；未修改时继续继承全局模型。
+                  {{ t('ui.setVideoPricingPerSecondByOutputResolutionInheritsGlobal') }}
                 </p>
               </div>
 
@@ -238,7 +238,7 @@
                   class="h-7 text-xs"
                   @click="() => { fillVideoResolutionPricePreset('common'); configTouched = true }"
                 >
-                  通用
+                  {{ t('ui.general') }}
                 </Button>
                 <Button
                   type="button"
@@ -265,8 +265,7 @@
                   class="h-7 text-xs"
                   @click="() => { addVideoResolutionPriceRow(); configTouched = true }"
                 >
-                  <Plus class="w-3.5 h-3.5 mr-0.5" />
-                  自定义
+                  <Plus class="w-3.5 h-3.5 mr-0.5" /> {{ t('ui.custom4eafa9e') }}
                 </Button>
               </div>
 
@@ -275,8 +274,8 @@
                 class="rounded-lg border border-border overflow-hidden"
               >
                 <div class="grid grid-cols-[1fr_1fr_32px] gap-0 text-xs text-muted-foreground bg-muted/50 px-3 py-1.5 border-b border-border">
-                  <span>分辨率</span>
-                  <span>单价（$/秒）</span>
+                  <span>{{ t('ui.resolution') }}</span>
+                  <span>{{ t('ui.unitPriceSecond') }}</span>
                   <span />
                 </div>
                 <div class="divide-y divide-border">
@@ -288,7 +287,7 @@
                     <Input
                       v-model="row.resolution"
                       class="h-7 text-sm"
-                      placeholder="如 720p"
+                      :placeholder="t('ui.eG720p')"
                       @update:model-value="() => { configTouched = true }"
                     />
                     <Input
@@ -305,7 +304,7 @@
                       variant="ghost"
                       size="icon"
                       class="h-7 w-7"
-                      title="删除"
+                      :title="t('ui.delete')"
                       @click="() => { removeVideoResolutionPriceRow(idx); configTouched = true }"
                     >
                       <Trash2 class="w-3.5 h-3.5" />
@@ -317,7 +316,7 @@
                 v-else
                 class="rounded-lg border border-dashed py-8 text-center text-xs text-muted-foreground"
               >
-                选择一个价格预设或添加自定义分辨率
+                {{ t('ui.selectAPricingPresetOrAddACustomResolution') }}
               </div>
             </div>
           </TabsContent>
@@ -330,7 +329,7 @@
         variant="outline"
         @click="handleClose(false)"
       >
-        取消
+        {{ t('common.cancel') }}
       </Button>
       <Button
         :disabled="submitting || (!isEditing && !canSubmitCreate)"
@@ -340,13 +339,15 @@
           v-if="submitting"
           class="w-4 h-4 mr-2 animate-spin"
         />
-        {{ isEditing ? '保存' : '添加' }}
+        {{ isEditing ? t('ui.save') : t('ui.add') }}
       </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch } from 'vue'
 import { parseApiError } from '@/utils/errorParser'
 import { Loader2, Layers, SquarePen, Plus, Trash2 } from 'lucide-vue-next'
@@ -407,6 +408,8 @@ const emit = defineEmits<{
   'update:open': [value: boolean]
   'saved': []
 }>()
+
+const { t } = useI18n()
 
 const { error: showError, success: showSuccess } = useToast()
 
@@ -554,7 +557,7 @@ watch(() => props.open, async (newOpen) => {
           globalDefaultPricing = globalModel.default_tiered_pricing
         } catch (err: unknown) {
           if (!providerPricing.tiers?.length) {
-            showError(parseApiError(err, '加载 GlobalModel 默认价格失败'), '错误')
+            showError(parseApiError(err, t('ui.failedToLoadGlobalModelDefaultPricing')), t('ui.error'))
           }
         }
       }
@@ -901,7 +904,7 @@ async function loadAvailableGlobalModels() {
       (gm: GlobalModelResponse) => !existingGlobalModelIds.has(gm.id)
     )
   } catch (err: unknown) {
-    showError(parseApiError(err, '加载模型列表失败'), '错误')
+    showError(parseApiError(err, t('ui.failedToLoadModelList')), t('ui.error'))
   } finally {
     loadingGlobalModels.value = false
   }
@@ -918,13 +921,13 @@ function handleClose(value: boolean) {
 async function handleSubmit() {
   if (submitting.value) return
   if (!isEditing.value && !canSubmitCreate.value) {
-    showError(manualGlobalModelMode.value ? '请填写模型ID和 Provider 模型名' : '请选择模型并填写 Provider 模型名', '错误')
+    showError(manualGlobalModelMode.value ? t('ui.enterTheModelIdAndProviderModelName') : t('ui.selectAModelAndEnterItsProviderModelName'), t('ui.error'))
     return
   }
 
   const pricingValidationError = tieredPricingEditorRef.value?.getValidationError()
   if (pricingValidationError) {
-    showError(pricingValidationError, '价格配置错误')
+    showError(pricingValidationError, t('ui.invalidPricingConfiguration'))
     return
   }
 
@@ -964,14 +967,14 @@ async function handleSubmit() {
         supportsImageGeneration,
         isActive: form.value.is_active
       }))
-      showSuccess('模型配置已更新')
+      showSuccess(t('ui.modelConfigurationUpdated'))
     } else {
       // 添加模式：只有用户修改了配置才提交 tiered_pricing，否则保持继承关系
       const selectedModel = manualGlobalModelMode.value
         ? await createManualGlobalModel(finalTieredPricing, cleanConfig)
         : availableGlobalModels.value.find(m => m.id === form.value.global_model_id)
       if (!selectedModel) {
-        showError('请选择模型，或切换到手动添加后填写模型ID', '错误')
+        showError(t('ui.selectAModelOrSwitchToManualEntryAndEnter'), t('ui.error'))
         return
       }
       await createModel(props.providerId, buildProviderModelCreatePayload({
@@ -990,14 +993,15 @@ async function handleSubmit() {
         supportsImageGeneration,
         isActive: form.value.is_active
       }))
-      showSuccess('模型已添加')
+      showSuccess(t('ui.modelAdded'))
     }
     emit('update:open', false)
     emit('saved')
   } catch (err: unknown) {
-    showError(parseApiError(err, isEditing.value ? '更新失败' : '添加失败'), '错误')
+    showError(parseApiError(err, isEditing.value ? t('update.error.updateFailed') : t('ui.failedToAdd')), t('ui.error'))
   } finally {
     submitting.value = false
   }
 }
+
 </script>

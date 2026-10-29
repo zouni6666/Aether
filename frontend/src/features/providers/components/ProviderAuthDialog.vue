@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :open="open"
-    title="用户认证"
-    description="配置提供商的用户认证信息，用于余额查询、签到等操作"
+    :title="t('ui.userAuthentication')"
+    :description="t('ui.configureProviderAccountCredentialsForBalanceQueriesCheckInAnd')"
     :icon="KeyRound"
     size="md"
     @update:open="$emit('update:open', $event)"
@@ -18,7 +18,7 @@
         class="flex items-center justify-center py-8"
       >
         <div class="text-sm text-muted-foreground">
-          加载配置中...
+          {{ t('ui.loadingConfiguration') }}
         </div>
       </div>
       <div
@@ -31,13 +31,13 @@
             class="space-y-2"
             :style="{ flex: currentAuthTypes.length > 1 ? 1 : 'auto', width: currentAuthTypes.length > 1 ? undefined : '100%' }"
           >
-            <Label>认证模板</Label>
+            <Label>{{ t('ui.authenticationTemplate') }}</Label>
             <Select
               v-model="selectedArchitectureId"
               @update:model-value="handleArchitectureChange"
             >
               <SelectTrigger>
-                <SelectValue placeholder="选择认证模板" />
+                <SelectValue :placeholder="t('ui.selectAuthenticationTemplate')" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem
@@ -56,13 +56,13 @@
             class="space-y-2"
             style="flex: 1"
           >
-            <Label>认证方式</Label>
+            <Label>{{ t('ui.authenticationMethods') }}</Label>
             <Select
               v-model="selectedAuthType"
               @update:model-value="handleAuthTypeChange"
             >
               <SelectTrigger>
-                <SelectValue placeholder="选择认证方式" />
+                <SelectValue :placeholder="t('ui.selectAuthenticationMethod')" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem
@@ -92,7 +92,7 @@
               <div class="flex items-center justify-between">
                 <span class="text-sm font-medium text-foreground">{{ group.title }}</span>
                 <div class="flex items-center gap-2">
-                  <span class="text-xs text-muted-foreground">启用代理</span>
+                  <span class="text-xs text-muted-foreground">{{ t('ui.enableProxy') }}</span>
                   <Switch
                     :model-value="formData[group.toggleKey] === true"
                     @update:model-value="handleProxyToggle(group.toggleKey, $event)"
@@ -205,7 +205,7 @@
                     @update:model-value="handleFieldChange(field.key, $event)"
                   >
                     <SelectTrigger>
-                      <SelectValue :placeholder="field.placeholder || '请选择'" />
+                      <SelectValue :placeholder="field.placeholder || t('ui.selectda590a8')" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem
@@ -243,11 +243,9 @@
         <div class="rounded-lg border border-border bg-muted/20 px-4 py-3">
           <div class="flex items-center justify-between gap-4">
             <div>
-              <Label class="text-sm font-medium">
-                额度提醒
-              </Label>
+              <Label class="text-sm font-medium"> {{ t('ui.quotaAlerts') }} </Label>
               <p class="mt-1 text-xs text-muted-foreground">
-                余额低于阈值时通过通知服务发送提醒
+                {{ t('ui.sendANotificationWhenTheBalanceFallsBelowTheThreshold') }}
               </p>
             </div>
             <Switch v-model="quotaAlert.enabled" />
@@ -258,7 +256,7 @@
             class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3"
           >
             <div class="space-y-2">
-              <Label>提醒阈值</Label>
+              <Label>{{ t('ui.alertThreshold') }}</Label>
               <Input
                 v-model.number="quotaAlert.threshold_amount"
                 type="number"
@@ -268,7 +266,7 @@
               />
             </div>
             <div class="space-y-2">
-              <Label>获取频率（秒）</Label>
+              <Label>{{ t('ui.fetchIntervalSeconds') }}</Label>
               <Input
                 v-model.number="quotaAlert.fetch_interval_seconds"
                 type="number"
@@ -293,7 +291,7 @@
             :disabled="isClearing"
             @click="handleClear"
           >
-            {{ isClearing ? '清除中...' : '清除' }}
+            {{ isClearing ? t('ui.clearing30cf331') : t('ui.clear') }}
           </Button>
         </div>
         <!-- 右侧：验证、保存、取消按钮 -->
@@ -303,19 +301,19 @@
             :disabled="isVerifying || !canVerify"
             @click="handleVerify"
           >
-            {{ isVerifying ? '验证中...' : '验证' }}
+            {{ isVerifying ? t('auth.register.verifying') : t('ui.verify') }}
           </Button>
           <Button
             :disabled="isSaving || !canSave"
             @click="handleSave"
           >
-            {{ isSaving ? '保存中...' : '保存' }}
+            {{ isSaving ? t('ui.saving') : t('ui.save') }}
           </Button>
           <Button
             variant="outline"
             @click="$emit('update:open', false)"
           >
-            取消
+            {{ t('common.cancel') }}
           </Button>
         </div>
       </div>
@@ -324,6 +322,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch, nextTick } from 'vue'
 import { KeyRound } from 'lucide-vue-next'
 import {
@@ -375,6 +375,8 @@ const emit = defineEmits<{
   (e: 'update:open', value: boolean): void
   (e: 'saved'): void
 }>()
+
+const { t } = useI18n()
 
 // 敏感字段检测：根据 schema 动态判断
 function isSensitiveField(key: string): boolean {
@@ -583,7 +585,7 @@ async function handleVerify() {
 
   const effectiveBaseUrl = stringFieldValue('base_url') || props.providerWebsite
   if (!effectiveBaseUrl) {
-    showError('请填写 API 地址')
+    showError(t('ui.enterTheApiUrl'))
     return
   }
 
@@ -609,9 +611,9 @@ async function handleVerify() {
       if (!username || quota === undefined || quota === null) {
         verifyStatus.value = 'error'
         const missing: string[] = []
-        if (!username) missing.push('用户信息')
-        if (quota === undefined || quota === null) missing.push('余额')
-        showError(`验证响应缺少: ${missing.join('、')}`)
+        if (!username) missing.push(t('ui.userInformation'))
+        if (quota === undefined || quota === null) missing.push(t('ui.balance'))
+        showError(t('providers.migration.validationResponseIsMissingf31cd7', { value: String(missing.join('、')) }))
       } else {
         verifyStatus.value = 'success'
         formChanged.value = false
@@ -630,13 +632,13 @@ async function handleVerify() {
 
         const displayName = result.data?.display_name || result.data?.username
         const extra = result.data?.extra
-        let balanceText = `余额: ${formatQuota(quota)}`
+        let balanceText = t('providers.migration.balanced2ebb1', { value: String(formatQuota(quota)) })
         const extraBalance = finiteNumber(extra?.balance)
         const extraPoints = finiteNumber(extra?.points)
         if (extraBalance !== null && extraPoints !== null) {
-          balanceText = `余额: ${formatQuota(extraBalance)} | 积分: ${formatQuota(extraPoints)}`
+          balanceText = t('providers.migration.balanceCreditsee3d31', { value: String(formatQuota(extraBalance)), value_2: String(formatQuota(extraPoints)) })
         }
-        showSuccess(`用户: ${displayName} | ${balanceText}`, '验证成功')
+        showSuccess(t('providers.migration.user446b47', { value: String(displayName), value_2: String(balanceText) }), t('auth.register.verifySuccess'))
       }
     } else {
       verifyStatus.value = 'error'
@@ -648,11 +650,11 @@ async function handleVerify() {
         }
       }
 
-      showError(result.message || '验证失败')
+      showError(result.message || t('auth.register.verifyFailed'))
     }
   } catch (error: unknown) {
     verifyStatus.value = 'error'
-    showError(parseApiError(error, '验证失败'))
+    showError(parseApiError(error, t('auth.register.verifyFailed')))
   } finally {
     isVerifying.value = false
   }
@@ -680,7 +682,7 @@ async function handleSave() {
 
   const effectiveBaseUrl = stringFieldValue('base_url') || props.providerWebsite
   if (!effectiveBaseUrl) {
-    showError('请填写 API 地址')
+    showError(t('ui.enterTheApiUrl'))
     return
   }
 
@@ -696,14 +698,14 @@ async function handleSave() {
     const result = await saveProviderOpsConfig(props.providerId, request)
     if (result.success) {
       savedQuotaAlertSignature.value = quotaAlertSignature(quotaAlert.value)
-      showSuccess(result.message || '配置已保存', '保存成功')
+      showSuccess(result.message || t('ui.configurationSaved'), t('ui.saved'))
       emit('saved')
       emit('update:open', false)
     } else {
-      showError(result.message || '保存失败')
+      showError(result.message || t('ui.failedToSave'))
     }
   } catch (error: unknown) {
-    showError(parseApiError(error, '保存失败'), '保存失败')
+    showError(parseApiError(error, t('ui.failedToSave')), t('ui.failedToSave'))
   } finally {
     isSaving.value = false
   }
@@ -713,9 +715,9 @@ async function handleClear() {
   if (!props.providerId) return
 
   const confirmed = await confirmDanger(
-    '确定要清除该提供商的认证配置吗？清除后将无法进行余额查询、签到等操作。',
-    '清除认证',
-    '清除'
+    t('ui.clearThisProviderAuthenticationSettingsBalanceQueriesCheckInAnd'),
+    t('ui.clearAuthentication'),
+    t('ui.clear')
   )
   if (!confirmed) return
 
@@ -723,7 +725,7 @@ async function handleClear() {
   try {
     const result = await deleteProviderOpsConfig(props.providerId)
     if (result.success) {
-      showSuccess(result.message || '认证信息已清除', '清除成功')
+      showSuccess(result.message || t('ui.authenticationSettingsCleared'), t('ui.clearedSuccessfully'))
       hasExistingConfig.value = false
       sensitivePlaceholders.value = {}
       verifyStatus.value = null
@@ -735,10 +737,10 @@ async function handleClear() {
       emit('saved')
       emit('update:open', false)
     } else {
-      showError(result.message || '清除失败')
+      showError(result.message || t('ui.failedToClear'))
     }
   } catch (error: unknown) {
-    showError(parseApiError(error, '清除失败'), '清除失败')
+    showError(parseApiError(error, t('ui.failedToClear')), t('ui.failedToClear'))
   } finally {
     isClearing.value = false
   }
@@ -902,4 +904,5 @@ watch(
     }
   }
 )
+
 </script>

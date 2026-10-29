@@ -21,8 +21,8 @@
       class="p-4"
     >
       <EmptyState
-        title="暂无数据"
-        description="暂无月卡配额数据"
+        :title="t('stats.empty.title')"
+        :description="t('ui.noMonthlyPlanQuotaDataAvailable')"
       />
     </div>
     <div
@@ -47,9 +47,8 @@
           />
         </div>
         <div class="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>剩余 {{ formatCurrency(provider.remaining_usd) }}</span>
-          <span v-if="provider.estimated_exhaust_at">
-            预计耗尽 {{ formatDate(provider.estimated_exhaust_at) }}
+          <span>{{ t('ui.remainingd6822b0') }} {{ formatCurrency(provider.remaining_usd) }}</span>
+          <span v-if="provider.estimated_exhaust_at"> {{ t('ui.estimatedDepletion') }} {{ formatDateShort(provider.estimated_exhaust_at) }}
           </span>
         </div>
       </div>
@@ -58,10 +57,11 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { Card } from '@/components/ui'
-import { getI18nLocale } from '@/i18n'
 import { EmptyState, LoadingState } from '@/components/common'
-import { formatCurrency } from '@/utils/format'
+import { formatCurrency, formatDateShort } from '@/utils/format'
 import type { QuotaUsageProvider } from '@/api/admin'
 
 interface Props {
@@ -76,7 +76,5 @@ withDefaults(defineProps<Props>(), {
   loading: false
 })
 
-function formatDate(value: string) {
-  return new Date(value).toLocaleDateString(getI18nLocale())
-}
+const { t } = useI18n()
 </script>

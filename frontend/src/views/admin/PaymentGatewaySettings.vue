@@ -1,8 +1,8 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="支付配置"
-      description="配置易支付、支付宝官方、微信支付官方和 Stripe"
+      :title="t('ui.paymentConfiguration')"
+      :description="t('ui.configureEpayOfficialAlipayOfficialWechatPayAndStripe')"
     >
       <template #actions>
         <div class="flex items-center gap-2">
@@ -13,7 +13,7 @@
             @click="testGateway"
           >
             <PlugZap class="mr-2 h-4 w-4" />
-            {{ testing ? '测试中...' : '测试配置' }}
+            {{ testing ? t('ui.testing7b6187c') : t('ui.testConfiguration') }}
           </Button>
           <Button
             size="sm"
@@ -21,7 +21,7 @@
             @click="saveConfig"
           >
             <Save class="mr-2 h-4 w-4" />
-            {{ saving ? '保存中...' : '保存' }}
+            {{ saving ? t('ui.saving') : t('ui.save') }}
           </Button>
         </div>
       </template>
@@ -46,29 +46,29 @@
         v-if="loading"
         class="py-16"
       >
-        <LoadingState message="正在加载支付配置..." />
+        <LoadingState :message="t('ui.loadingPaymentConfiguration')" />
       </div>
 
       <template v-else>
         <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
           <Card class="p-5">
             <div class="text-xs uppercase tracking-wider text-muted-foreground">
-              网关状态
+              {{ t('ui.gatewayStatus') }}
             </div>
             <div class="mt-3 flex items-center gap-3">
               <Badge :variant="form.enabled ? 'success' : 'secondary'">
-                {{ form.enabled ? '已启用' : '未启用' }}
+                {{ form.enabled ? t('ui.enableddfb8022') : t('ui.disabled') }}
               </Badge>
               <Switch v-model="form.enabled" />
             </div>
           </Card>
           <Card class="p-5">
             <div class="text-xs uppercase tracking-wider text-muted-foreground">
-              退款能力
+              {{ t('ui.refundCapability') }}
             </div>
             <div class="mt-3 flex items-center gap-3">
               <Badge :variant="form.refund_enabled ? 'success' : 'secondary'">
-                {{ form.refund_enabled ? '允许退款' : '关闭退款' }}
+                {{ form.refund_enabled ? t('ui.refundsAllowed') : t('ui.refundsOff') }}
               </Badge>
               <Switch
                 :model-value="form.refund_enabled"
@@ -78,11 +78,11 @@
           </Card>
           <Card class="p-5">
             <div class="text-xs uppercase tracking-wider text-muted-foreground">
-              用户退款
+              {{ t('ui.userRefunds') }}
             </div>
             <div class="mt-3 flex items-center gap-3">
               <Badge :variant="form.allow_user_refund && form.refund_enabled ? 'success' : 'secondary'">
-                {{ form.allow_user_refund && form.refund_enabled ? '允许用户退款' : '关闭用户退款' }}
+                {{ form.allow_user_refund && form.refund_enabled ? t('ui.userRefundsAllowed') : t('ui.userRefundsOff') }}
               </Badge>
               <Switch
                 :model-value="form.allow_user_refund"
@@ -93,17 +93,17 @@
           </Card>
           <Card class="p-5">
             <div class="text-xs uppercase tracking-wider text-muted-foreground">
-              密钥状态
+              {{ t('ui.keyStatus') }}
             </div>
             <div class="mt-3">
               <Badge :variant="hasSecret ? 'success' : 'warning'">
-                {{ hasSecret ? '已保存' : '未设置' }}
+                {{ hasSecret ? t('ui.saved1bd91a7') : t('ui.notSet') }}
               </Badge>
             </div>
           </Card>
           <Card class="p-5">
             <div class="text-xs uppercase tracking-wider text-muted-foreground">
-              汇率
+              {{ t('ui.exchangeRate') }}
             </div>
             <div class="mt-2 text-2xl font-semibold tabular-nums">
               1 USD = {{ Number(form.usd_exchange_rate || 0).toFixed(4) }} {{ form.pay_currency }}
@@ -117,7 +117,7 @@
               <div>
                 <div class="flex items-center gap-2">
                   <h3 class="text-lg font-medium leading-6 text-foreground">
-                    {{ activeProviderMeta.label }}商户
+                    {{ activeProviderMeta.label }}{{ t('ui.merchant') }}
                   </h3>
                   <div
                     v-if="activeProvider === 'alipay'"
@@ -127,8 +127,8 @@
                     <button
                       type="button"
                       class="inline-flex h-6 w-6 cursor-pointer list-none items-center justify-center rounded-full border border-border/70 bg-background/60 text-muted-foreground transition hover:border-primary/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 [&::-webkit-details-marker]:hidden"
-                      title="支付宝支付模式说明"
-                      aria-label="支付宝支付模式说明"
+                      :title="t('ui.aboutAlipayPaymentModes')"
+                      :aria-label="t('ui.aboutAlipayPaymentModes')"
                       :aria-expanded="paymentHelpOpen === 'alipay'"
                       aria-controls="alipay-payment-help"
                       @click.stop="togglePaymentHelp('alipay')"
@@ -140,44 +140,38 @@
                       id="alipay-payment-help"
                       class="absolute left-0 top-full z-[240] mt-2 w-[320px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-card/95 p-0 text-card-foreground shadow-xl shadow-black/5 backdrop-blur supports-[backdrop-filter]:bg-card/90"
                       role="dialog"
-                      aria-label="支付宝支付模式说明"
+                      :aria-label="t('ui.aboutAlipayPaymentModes')"
                     >
                       <div class="space-y-4 p-4 text-xs leading-6">
                         <p class="font-medium text-foreground">
-                          桌面优先扫码单，失败再走收银台；移动优先手机网站支付。
+                          {{ t('ui.desktopPrioritizesQrCodeOrdersAndFallsBackToCheckout') }}
                         </p>
 
                         <div class="border-t border-border/60 pt-3">
                           <h4 class="mb-1 font-semibold text-foreground">
-                            当面付 / 扫码支付
+                            {{ t('ui.inPersonQrCodePayment') }}
                           </h4>
-                          <p>开通：需开通当面付或扫码支付能力。</p>
-                          <p>
-                            调用：桌面端下单时优先调用 <code class="rounded bg-muted px-1 py-0.5 text-foreground">alipay.trade.precreate</code>，前台直接渲染二维码。
-                          </p>
-                          <p>降级：接口不可用或返回失败时，自动降级到电脑网站支付。</p>
+                          <p>{{ t('ui.enablementInPersonOrQrCodePaymentCapabilityIsRequired') }}</p>
+                          <p> {{ t('ui.invocationDesktopOrdersCall') }} <code class="rounded bg-muted px-1 py-0.5 text-foreground">alipay.trade.precreate</code>{{ t('ui.theFrontendDisplaysTheQrCodeDirectly') }} </p>
+                          <p>{{ t('ui.fallbackWhenTheApiIsUnavailableOrFailsAutomaticallyFall') }}</p>
                         </div>
 
                         <div class="border-t border-border/60 pt-3">
                           <h4 class="mb-1 font-semibold text-foreground">
-                            电脑网站支付
+                            {{ t('ui.desktopWebPayment') }}
                           </h4>
-                          <p>开通：需开通电脑网站支付。</p>
-                          <p>
-                            调用：桌面端当面付不可用时调用 <code class="rounded bg-muted px-1 py-0.5 text-foreground">alipay.trade.page.pay</code>，并继续以返回链接渲染成二维码。
-                          </p>
-                          <p>降级：同时保留打开收银台入口，用户可手动重新拉起支付页。</p>
+                          <p>{{ t('ui.enablementDesktopWebPaymentIsRequired') }}</p>
+                          <p> {{ t('ui.invocationWhenDesktopInPersonPaymentIsUnavailableCall') }} <code class="rounded bg-muted px-1 py-0.5 text-foreground">alipay.trade.page.pay</code>{{ t('ui.theReturnedLinkIsDisplayedAsAQrCode') }} </p>
+                          <p>{{ t('ui.fallbackKeepTheCheckoutEntrySoUsersCanReopenThe') }}</p>
                         </div>
 
                         <div class="border-t border-border/60 pt-3">
                           <h4 class="mb-1 font-semibold text-foreground">
-                            手机网站支付
+                            {{ t('ui.mobileWebPayment') }}
                           </h4>
-                          <p>开通：需开通手机网站支付。</p>
-                          <p>
-                            调用：移动端优先调用 <code class="rounded bg-muted px-1 py-0.5 text-foreground">alipay.trade.wap.pay</code>，跳转支付宝收银台。
-                          </p>
-                          <p>降级：未开通或返回异常时，前端自动改走扫码支付并提示未开通移动支付。</p>
+                          <p>{{ t('ui.enablementMobileWebPaymentIsRequired') }}</p>
+                          <p> {{ t('ui.invocationMobileClientsFirstCall') }} <code class="rounded bg-muted px-1 py-0.5 text-foreground">alipay.trade.wap.pay</code>{{ t('ui.redirectsToAlipayCheckout') }} </p>
+                          <p>{{ t('ui.fallbackWhenUnavailableOrFailedTheFrontendSwitchesToQr') }}</p>
                         </div>
                       </div>
                     </div>
@@ -190,8 +184,8 @@
                     <button
                       type="button"
                       class="inline-flex h-6 w-6 cursor-pointer list-none items-center justify-center rounded-full border border-border/70 bg-background/60 text-muted-foreground transition hover:border-primary/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 [&::-webkit-details-marker]:hidden"
-                      title="微信支付模式说明"
-                      aria-label="微信支付模式说明"
+                      :title="t('ui.aboutWechatPayPaymentModes')"
+                      :aria-label="t('ui.aboutWechatPayPaymentModes')"
                       :aria-expanded="paymentHelpOpen === 'wxpay'"
                       aria-controls="wxpay-payment-help"
                       @click.stop="togglePaymentHelp('wxpay')"
@@ -203,48 +197,42 @@
                       id="wxpay-payment-help"
                       class="absolute left-0 top-full z-[240] mt-2 w-[340px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-card/95 p-0 text-card-foreground shadow-xl shadow-black/5 backdrop-blur supports-[backdrop-filter]:bg-card/90"
                       role="dialog"
-                      aria-label="微信支付模式说明"
+                      :aria-label="t('ui.aboutWechatPayPaymentModes')"
                     >
                       <div class="space-y-4 p-4 text-xs leading-6">
                         <p class="font-medium text-foreground">
-                          桌面优先 Native 扫码，移动端微信浏览器优先 JSAPI，非微信浏览器兜底 H5。
+                          {{ t('ui.desktopPrioritizesNativeQrPaymentMobileWechatBrowserPrioritizesJsapi') }}
                         </p>
 
                         <div class="border-t border-border/60 pt-3">
                           <h4 class="mb-1 font-semibold text-foreground">
-                            Native / 扫码支付
+                            {{ t('ui.nativeQrCodePayment') }}
                           </h4>
-                          <p>开通：需开通 Native 或扫码支付能力。</p>
-                          <p>
-                            调用：桌面端默认调用 Native，前台会渲染二维码内容。
-                          </p>
-                          <p>降级：移动端无法走 JSAPI 或 H5 时，也会自动回退到这里。</p>
+                          <p>{{ t('ui.enablementNativeOrQrCodePaymentCapabilityIsRequired') }}</p>
+                          <p> {{ t('ui.invocationDesktopCallsNativeByDefaultAndTheFrontendRenders') }} </p>
+                          <p>{{ t('ui.fallbackMobileAlsoFallsBackHereWhenJsapiOrH5') }}</p>
                         </div>
 
                         <div class="border-t border-border/60 pt-3">
                           <h4 class="mb-1 font-semibold text-foreground">
-                            JSAPI / 公众号支付
+                            {{ t('ui.jsapiOfficialAccountPayment') }}
                           </h4>
-                          <p>开通：需开通公众号支付，并保证当前浏览器在微信内且能拿到 OpenID。</p>
-                          <p>
-                            调用：微信内浏览器完成授权后调用 JSAPI，直接拉起微信收银台。
-                          </p>
-                          <p>降级：未配置或拉起失败时，自动改走扫码支付。</p>
+                          <p>{{ t('ui.enablementOfficialAccountPaymentIsRequiredAndTheCurrentBrowser') }}</p>
+                          <p> {{ t('ui.invocationAfterAuthorizationInWechatCallJsapiToOpenWechat') }} </p>
+                          <p>{{ t('ui.fallbackWhenNotConfiguredOrLaunchFailsAutomaticallySwitchTo') }}</p>
                         </div>
 
                         <div class="border-t border-border/60 pt-3">
                           <h4 class="mb-1 font-semibold text-foreground">
-                            H5 支付
+                            {{ t('ui.h5Payment') }}
                           </h4>
-                          <p>开通：需开通 H5 支付。</p>
-                          <p>
-                            调用：移动端非微信浏览器且客户端 IP 可用时调用 H5，跳转微信收银台。
-                          </p>
-                          <p>降级：未开通 H5 或下单失败时，自动改走扫码支付。</p>
+                          <p>{{ t('ui.enablementH5PaymentIsRequired') }}</p>
+                          <p> {{ t('ui.invocationForMobileNonWechatBrowsersWithAUsableClient') }} </p>
+                          <p>{{ t('ui.fallbackWhenH5IsNotEnabledOrOrderCreationFails') }}</p>
                         </div>
 
                         <p class="border-t border-border/60 pt-3">
-                          当前表单默认共用一个 App ID，适合同主体下统一配置网页、移动和公众号场景。
+                          {{ t('ui.thisFormUsesOneAppIdByDefaultSuitableFor') }}
                         </p>
                       </div>
                     </div>
@@ -262,7 +250,7 @@
               v-if="activeProvider === 'epay'"
               class="space-y-1.5"
             >
-              <Label for="gateway-endpoint">易支付接口地址</Label>
+              <Label for="gateway-endpoint">{{ t('ui.epayApiUrl') }}</Label>
               <Input
                 id="gateway-endpoint"
                 v-model="form.endpoint_url"
@@ -274,7 +262,7 @@
               v-if="activeProvider !== 'stripe'"
               class="space-y-1.5"
             >
-              <Label for="gateway-callback-base">回调站点根地址</Label>
+              <Label for="gateway-callback-base">{{ t('ui.callbackSiteRootUrl') }}</Label>
               <Input
                 id="gateway-callback-base"
                 v-model="form.callback_base_url"
@@ -292,9 +280,7 @@
                 <span
                   v-if="field.secret && hasSecretKey(field.key)"
                   class="text-xs font-normal text-muted-foreground"
-                >
-                  （留空保持不变）
-                </span>
+                > {{ t('ui.leaveEmptyToKeepUnchangedd163506') }} </span>
               </Label>
               <Input
                 :id="`gateway-field-${field.key}`"
@@ -308,12 +294,12 @@
         </CardSection>
 
         <CardSection
-          title="计费参数"
-          description="用户充值按美元金额下单，实际收款金额按这里的币种、汇率和通道手续费率计算"
+          :title="t('ui.billingParameters')"
+          :description="t('ui.userTopUpsAreOrderedInUsdTheActualReceived')"
         >
           <div class="grid grid-cols-1 gap-5 md:grid-cols-3">
             <div class="space-y-1.5">
-              <Label for="gateway-currency">支付币种</Label>
+              <Label for="gateway-currency">{{ t('ui.paymentCurrency') }}</Label>
               <Input
                 id="gateway-currency"
                 v-model="form.pay_currency"
@@ -322,7 +308,7 @@
               />
             </div>
             <div class="space-y-1.5">
-              <Label for="gateway-rate">USD 汇率</Label>
+              <Label for="gateway-rate">{{ t('ui.usdExchangeRate') }}</Label>
               <Input
                 id="gateway-rate"
                 v-model.number="form.usd_exchange_rate"
@@ -332,7 +318,7 @@
               />
             </div>
             <div class="space-y-1.5">
-              <Label for="gateway-min">最低充值金额 (USD)</Label>
+              <Label for="gateway-min">{{ t('ui.minimumTopUpAmountUsd') }}</Label>
               <Input
                 id="gateway-min"
                 v-model.number="form.min_recharge_usd"
@@ -345,8 +331,8 @@
         </CardSection>
 
         <CardSection
-          title="支付通道"
-          :description="activeProvider === 'epay' ? '通道值会传给易支付 type 字段' : '通道值决定用户侧展示和后端创建订单模式'"
+          :title="t('ui.paymentChannel')"
+          :description="activeProvider === 'epay' ? t('ui.theChannelValueIsPassedToTheEpayTypeField') : t('ui.theChannelValueControlsUserFacingDisplayAndTheBackend')"
         >
           <template #actions>
             <Button
@@ -354,8 +340,7 @@
               size="sm"
               @click="addChannel"
             >
-              <Plus class="mr-2 h-4 w-4" />
-              添加通道
+              <Plus class="mr-2 h-4 w-4" /> {{ t('ui.addChannel') }}
             </Button>
           </template>
 
@@ -366,7 +351,7 @@
               class="grid grid-cols-1 gap-3 rounded-lg border border-border/60 bg-muted/20 p-3 md:grid-cols-[1fr_1fr_160px_auto]"
             >
               <div class="space-y-1.5">
-                <Label :for="`gateway-channel-${index}`">通道值</Label>
+                <Label :for="`gateway-channel-${index}`">{{ t('ui.channelValue') }}</Label>
                 <Input
                   :id="`gateway-channel-${index}`"
                   v-model="channel.channel"
@@ -374,15 +359,15 @@
                 />
               </div>
               <div class="space-y-1.5">
-                <Label :for="`gateway-channel-name-${index}`">显示名称</Label>
+                <Label :for="`gateway-channel-name-${index}`">{{ t('ui.displayName') }}</Label>
                 <Input
                   :id="`gateway-channel-name-${index}`"
                   v-model="channel.display_name"
-                  placeholder="支付宝"
+                  :placeholder="t('ui.alipay')"
                 />
               </div>
               <div class="space-y-1.5">
-                <Label :for="`gateway-channel-fee-${index}`">手续费率 (%)</Label>
+                <Label :for="`gateway-channel-fee-${index}`">{{ t('ui.feeRate') }}</Label>
                 <Input
                   :id="`gateway-channel-fee-${index}`"
                   v-model.number="channel.fee_rate"
@@ -396,7 +381,7 @@
                 <Button
                   variant="ghost"
                   size="icon"
-                  title="移除通道"
+                  :title="t('ui.removeChannel')"
                   :disabled="form.channels.length <= 1"
                   @click="removeChannel(index)"
                 >
@@ -411,7 +396,7 @@
           v-if="updatedAtText"
           class="text-xs text-muted-foreground"
         >
-          最后更新：{{ updatedAtText }}
+          {{ t('ui.lastUpdated') }}{{ updatedAtText }}
         </p>
       </template>
     </div>
@@ -419,6 +404,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { getI18nLocale } from '@/i18n'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { CircleHelp, PlugZap, Plus, Save, Trash2 } from 'lucide-vue-next'
@@ -455,11 +443,11 @@ const providers: Array<{
 }> = [
   {
     key: 'epay',
-    label: '易支付',
-    description: '密钥留空会保留原密钥；回调地址留空时后端会使用当前 API 访问地址',
+    get label() { return t('ui.epay') },
+    get description() { return t('ui.leaveTheKeyEmptyToKeepTheCurrentKeyIf') },
     fields: [
-      { key: 'merchant_id', label: '商户 ID', placeholder: '1000' },
-      { key: 'merchant_key', label: '商户密钥', secret: true, placeholder: '请输入商户密钥' },
+      { key: 'merchant_id', get label() { return t('ui.merchantIdf344e15') }, placeholder: '1000' },
+      { key: 'merchant_key', get label() { return t('ui.merchantKey') }, secret: true, get placeholder() { return t('ui.enterTheMerchantSecret') } },
     ],
     defaultChannels: [
       { channel: 'alipay', display_name: '支付宝', fee_rate: 0 },
@@ -468,28 +456,28 @@ const providers: Array<{
   },
   {
     key: 'alipay',
-    label: '支付宝官方',
-    description: '用于支付宝官方当面付、手机网站支付或电脑网站支付',
+    get label() { return t('ui.officialAlipay') },
+    get description() { return t('ui.forOfficialAlipayInPersonMobileWebsiteOrDesktopWebsite') },
     fields: [
       { key: 'app_id', label: 'App ID', placeholder: '202100...' },
-      { key: 'payment_mode', label: '支付模式', placeholder: 'precreate / page / wap' },
-      { key: 'private_key', label: '应用私钥', secret: true, placeholder: 'PKCS#1 或 PKCS#8 私钥' },
-      { key: 'alipay_public_key', label: '支付宝公钥', secret: true, placeholder: '支付宝开放平台公钥' },
+      { key: 'payment_mode', get label() { return t('ui.paymentMode') }, placeholder: 'precreate / page / wap' },
+      { key: 'private_key', get label() { return t('ui.appPrivateKey') }, secret: true, get placeholder() { return t('ui.pkcs1OrPkcs8PrivateKey') } },
+      { key: 'alipay_public_key', get label() { return t('ui.alipayPublicKey') }, secret: true, get placeholder() { return t('ui.alipayOpenPlatformPublicKey') } },
     ],
     defaultChannels: [{ channel: 'alipay', display_name: '支付宝官方', fee_rate: 0 }],
   },
   {
     key: 'wxpay',
-    label: '微信支付官方',
-    description: '用于微信支付 Native/H5，JSAPI 还需要后续接入 OpenID 获取流程',
+    get label() { return t('ui.officialWechatPay') },
+    get description() { return t('ui.forWechatPayNativeAndH5PaymentsJsapiAlsoRequires') },
     fields: [
       { key: 'app_id', label: 'App ID', placeholder: 'wx...' },
-      { key: 'mch_id', label: '商户号', placeholder: '1900000000' },
-      { key: 'cert_serial', label: '商户证书序列号', placeholder: '证书序列号' },
-      { key: 'public_key_id', label: '微信支付公钥 ID', placeholder: 'PUB_KEY_ID_...' },
-      { key: 'private_key', label: '商户 API 私钥', secret: true, placeholder: 'BEGIN PRIVATE KEY' },
-      { key: 'api_v3_key', label: 'API v3 密钥', secret: true, placeholder: '32 位 API v3 key' },
-      { key: 'public_key', label: '微信支付公钥', secret: true, placeholder: 'BEGIN PUBLIC KEY' },
+      { key: 'mch_id', get label() { return t('ui.merchantId') }, placeholder: '1900000000' },
+      { key: 'cert_serial', get label() { return t('ui.merchantCertificateSerialNumber') }, get placeholder() { return t('ui.certificateSerialNumber') } },
+      { key: 'public_key_id', get label() { return t('ui.wechatPayPublicKeyId') }, placeholder: 'PUB_KEY_ID_...' },
+      { key: 'private_key', get label() { return t('ui.merchantApiPrivateKey') }, secret: true, placeholder: 'BEGIN PRIVATE KEY' },
+      { key: 'api_v3_key', get label() { return t('ui.apiV3Key') }, secret: true, get placeholder() { return t('ui.32CharacterApiV3Key') } },
+      { key: 'public_key', get label() { return t('ui.wechatPayPublicKey') }, secret: true, placeholder: 'BEGIN PUBLIC KEY' },
     ],
     defaultChannels: [
       { channel: 'native', display_name: '微信 Native', fee_rate: 0 },
@@ -499,7 +487,7 @@ const providers: Array<{
   {
     key: 'stripe',
     label: 'Stripe',
-    description: '用于 Stripe PaymentIntent；Webhook Secret 用于回调验签',
+    get description() { return t('ui.forStripePaymentintentTheWebhookSecretVerifiesCallbackSignatures') },
     fields: [
       { key: 'publishable_key', label: 'Publishable Key', placeholder: 'pk_live_...' },
       { key: 'secret_key', label: 'Secret Key', secret: true, placeholder: 'sk_live_...' },
@@ -661,16 +649,16 @@ function normalizeChannels(): EpayChannelConfig[] {
 }
 
 function validateForm(): string | null {
-  if (activeProvider.value === 'epay' && !form.endpoint_url.trim()) return '请输入易支付接口地址'
-  if (!form.pay_currency.trim()) return '请输入支付币种'
+  if (activeProvider.value === 'epay' && !form.endpoint_url.trim()) return t('ui.enterTheEpayApiUrl')
+  if (!form.pay_currency.trim()) return t('ui.enterThePaymentCurrency')
   if (!Number.isFinite(Number(form.usd_exchange_rate)) || Number(form.usd_exchange_rate) <= 0) {
-    return 'USD 汇率必须大于 0'
+    return t('ui.theUsdExchangeRateMustBeGreaterThan0')
   }
   if (!Number.isFinite(Number(form.min_recharge_usd)) || Number(form.min_recharge_usd) <= 0) {
-    return '最低充值金额必须大于 0'
+    return t('ui.theMinimumTopUpAmountMustBeGreaterThan0')
   }
   const channels = normalizeChannels()
-  if (channels.length === 0) return '至少需要一个支付通道'
+  if (channels.length === 0) return t('ui.atLeastOnePaymentChannelIsRequired')
   for (const [index, channel] of form.channels.entries()) {
     if (!channel.channel.trim() || !channel.display_name.trim()) continue
     const feeRate = Number(channel.fee_rate ?? 0)
@@ -732,7 +720,7 @@ async function saveConfig() {
     for (const field of visibleFields.value) {
       if (field.secret) fieldValues[field.key] = ''
     }
-    success('支付配置已保存')
+    success(t('ui.paymentConfigurationSaved'))
   } catch (err) {
     log.error('保存支付配置失败:', err)
     showError(parseApiError(err, '保存支付配置失败'))
@@ -745,7 +733,7 @@ async function testGateway() {
   testing.value = true
   try {
     await epayGatewayApi.test(activeProvider.value)
-    success('支付配置可用')
+    success(t('ui.paymentConfigurationIsValid'))
   } catch (err) {
     log.error('测试支付配置失败:', err)
     showError(parseApiError(err, '测试支付配置失败'))
@@ -762,4 +750,5 @@ function removeChannel(index: number) {
   if (form.channels.length <= 1) return
   form.channels.splice(index, 1)
 }
+
 </script>

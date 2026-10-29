@@ -24,14 +24,13 @@
           v-if="chunk.truncated"
           class="px-3 py-2 text-xs text-muted-foreground"
         >
-          长内容仅显示预览，复制仍保留完整内容。
-          <button
+          {{ t('ui.longContentIsShownAsAPreviewCopyingStillIncludes') }} <button
             v-if="(previewLimits[index] ?? 64_000) < 1_024_000"
             type="button"
             class="text-primary hover:underline"
             @click="showMore(index)"
           >
-            显示更多
+            {{ t('ui.showMore') }}
           </button>
         </div>
       </template>
@@ -40,6 +39,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, watch } from 'vue'
 import ConversationView from './ConversationView.vue'
 import VirtualBodyContent from './VirtualBodyContent.vue'
@@ -53,6 +54,8 @@ const props = defineProps<{
   emptyMessage: string
 }>()
 const emit = defineEmits<{ 'load-error': [error: unknown] }>()
+
+const { t } = useI18n()
 const viewer = ref<{ refresh: (index: number) => void } | null>(null)
 const viewRevision = ref(0)
 const previewLimits = ref<Record<number, number>>({})
@@ -72,4 +75,5 @@ watch([() => props.bodyDocument, () => props.kind, () => props.apiFormat], () =>
   viewRevision.value += 1
   previewLimits.value = {}
 })
+
 </script>

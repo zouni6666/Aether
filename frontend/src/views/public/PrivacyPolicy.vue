@@ -66,7 +66,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { marked } from 'marked'
 import { authApi, type RegistrationPrivacyPolicySettings } from '@/api/auth'
-import HeaderLogo from '@/components/HeaderLogo.vue'
+import HeaderLogo from '@/components/brand/HeaderLogo.vue'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { useI18n } from '@/i18n'
 import { sanitizeHtml, sanitizeMarkdown } from '@/utils/sanitize'

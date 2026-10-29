@@ -1,6 +1,7 @@
+import { translate } from '@/i18n'
 import type { QuotaWindowUsageSnapshot } from '@/api/endpoints/types/statusSnapshot'
 import type { PoolManagementStatsMode } from '@/features/pool/utils/poolManagementState'
-import { getCodexQuotaWindowPresentation } from '@/utils/codexQuotaWindow'
+import { getCodexQuotaWindowPresentation } from '@/features/providers/utils/codexQuotaWindow'
 import { formatCompactNumber } from '@/utils/format'
 
 export type PoolStatsMetricKey = 'request_count' | 'total_tokens' | 'total_cost_usd'
@@ -152,12 +153,11 @@ function getCodexCycleStatsGroups(key: PoolStatsKeyInput): PoolCodexCycleStatsGr
     .map(({ sortOrder: _sortOrder, ...group }) => group)
 }
 
-
 function buildAccountTotalMetrics(key: PoolStatsKeyInput): PoolStatsMetric[] {
   return [
-    createMetric('request_count', '请求', formatPoolStatInteger(key.request_count)),
+    createMetric('request_count', translate('ui.request'), formatPoolStatInteger(key.request_count)),
     createMetric('total_tokens', 'Token', formatPoolTokenCount(key.total_tokens)),
-    createMetric('total_cost_usd', '费用', formatPoolStatUsd(key.total_cost_usd)),
+    createMetric('total_cost_usd', translate('ui.cost7fe8603'), formatPoolStatUsd(key.total_cost_usd)),
   ]
 }
 
@@ -168,7 +168,7 @@ function buildCycleMetrics(usage: QuotaWindowUsageSnapshot | null): PoolStatsMet
   return [
     createMetric(
       'request_count',
-      '请求',
+      translate('ui.request'),
       formatCycleInteger(usage?.request_count),
       Number.isFinite(requestCount) ? Math.max(requestCount ?? 0, 0) : null,
     ),
@@ -180,7 +180,7 @@ function buildCycleMetrics(usage: QuotaWindowUsageSnapshot | null): PoolStatsMet
     ),
     createMetric(
       'total_cost_usd',
-      '费用',
+      translate('ui.cost7fe8603'),
       formatCycleUsd(usage?.total_cost_usd),
       Number.isFinite(totalCostUsd) ? Math.max(totalCostUsd ?? 0, 0) : null,
     ),

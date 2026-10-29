@@ -12,10 +12,10 @@
           </div>
           <div class="min-w-0 flex-1">
             <h3 class="text-lg font-semibold leading-tight text-foreground">
-              {{ legacyT('创建成功') }}
+              {{ t('ui.createdSuccessfully') }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ legacyT('请妥善保管, 切勿泄露给他人.') }}
+              {{ t('ui.keepItSafeAndDoNotShareIt') }}
             </p>
           </div>
         </div>
@@ -37,7 +37,7 @@
             class="h-11"
             @click="$emit('copy')"
           >
-            {{ legacyT('复制') }}
+            {{ t('common.copy') }}
           </Button>
         </div>
       </div>
@@ -48,7 +48,7 @@
         class="h-10 px-5"
         @click="$emit('close')"
       >
-        {{ legacyT('确定') }}
+        {{ t('ui.confirmfac2a67') }}
       </Button>
     </template>
   </Dialog>
@@ -69,7 +69,7 @@ defineEmits<{
   copy: []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 function selectApiKey(event: MouseEvent) {
   const target = event.target as HTMLInputElement | null

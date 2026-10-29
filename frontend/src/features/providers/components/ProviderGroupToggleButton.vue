@@ -5,8 +5,8 @@
     class="h-7 w-7"
     :class="enabled ? 'text-primary hover:text-primary' : 'text-muted-foreground/70 hover:text-foreground'"
     :disabled="disabled"
-    :title="legacyT(enabled ? '本组禁用提供商' : '本组启用提供商')"
-    :aria-label="`${providerName} ${legacyT('本组启用')}`"
+    :title="enabled ? t('ui.disableProviderInThisGroup') : t('ui.enableProviderInThisGroup')"
+    :aria-label="`${providerName} ${t('ui.enabledInGroup')}`"
     :aria-pressed="enabled"
     @click.stop="emit('update:enabled', !enabled)"
     @mousedown.stop
@@ -27,5 +27,7 @@ import { useI18n } from '@/i18n'
 
 defineProps<{ providerName: string; enabled: boolean; disabled?: boolean }>()
 const emit = defineEmits<{ 'update:enabled': [value: boolean] }>()
-const { legacyT } = useI18n()
+
+const { t } = useI18n()
+
 </script>

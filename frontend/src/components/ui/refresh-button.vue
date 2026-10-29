@@ -17,6 +17,10 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+
+import { useI18n } from '@/i18n'
+
 import { Button } from '@/components/ui'
 import { RefreshCcw } from 'lucide-vue-next'
 
@@ -30,10 +34,10 @@ interface Emits {
   (e: 'click'): void
 }
 
-withDefaults(defineProps<Props>(), {
+const props = withDefaults(defineProps<Props>(), {
   loading: false,
   active: undefined,
-  title: '刷新'
+  title: undefined
 })
 
 const emit = defineEmits<Emits>()
@@ -41,4 +45,8 @@ const emit = defineEmits<Emits>()
 function handleClick() {
   emit('click')
 }
+
+const title = computed(() => props.title ?? t('ui.refresh'))
+
+const { t } = useI18n()
 </script>

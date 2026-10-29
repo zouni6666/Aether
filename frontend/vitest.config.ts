@@ -1,10 +1,9 @@
 import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import path from 'path'
-import { legacyTemplateI18nPlugin } from './src/i18n/legacy-template-transform'
 
 export default defineConfig({
-  plugins: [legacyTemplateI18nPlugin(), vue()],
+  plugins: [vue()],
   test: {
     globals: true,
     environment: 'jsdom',

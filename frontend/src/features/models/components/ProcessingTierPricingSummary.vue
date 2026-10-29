@@ -7,7 +7,7 @@
     <div class="flex flex-wrap items-center justify-between gap-2">
       <div>
         <h5 class="text-sm font-medium text-foreground">
-          处理层级定价
+          {{ t('ui.processingTierPricing') }}
         </h5>
         <p class="text-xs text-muted-foreground">
           {{ activeEntry.label }}
@@ -16,7 +16,7 @@
       <div
         class="flex max-w-full flex-wrap gap-1"
         role="group"
-        aria-label="处理层级定价"
+        :aria-label="t('ui.processingTierPricing')"
       >
         <Button
           v-for="entry in processingTierEntries"
@@ -39,7 +39,7 @@
       class="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 text-xs"
       data-testid="processing-tier-price-multiplier"
     >
-      <span class="text-muted-foreground">相对 Standard</span>
+      <span class="text-muted-foreground">{{ t('ui.relativeToStandard') }}</span>
       <span class="font-mono font-medium text-foreground">{{ formatMultiplier(activePriceMultiplier) }}×</span>
     </div>
 
@@ -51,22 +51,22 @@
         <TableHeader>
           <TableRow class="bg-muted/30">
             <TableHead class="h-9 text-xs">
-              Token 区间
+              {{ t('ui.tokenRange') }}
             </TableHead>
             <TableHead class="h-9 text-right text-xs">
-              输入 ($/M)
+              {{ t('ui.inputM') }}
             </TableHead>
             <TableHead class="h-9 text-right text-xs">
-              输出 ($/M)
+              {{ t('ui.outputM') }}
             </TableHead>
             <TableHead class="h-9 text-right text-xs">
-              缓存创建
+              {{ t('ui.cacheCreation') }}
             </TableHead>
             <TableHead class="h-9 text-right text-xs">
-              缓存读取
+              {{ t('ui.cacheRead1ded655') }}
             </TableHead>
             <TableHead class="h-9 text-right text-xs">
-              1h 创建
+              {{ t('ui.1HourCacheWrite') }}
             </TableHead>
           </TableRow>
         </TableHeader>
@@ -106,11 +106,11 @@
       data-testid="processing-image-pricing"
     >
       <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <span class="font-medium text-foreground">图片输出</span>
+        <span class="font-medium text-foreground">{{ t('ui.imageOutput') }}</span>
         <span
           v-if="activeImageDefaultPrice !== null"
           class="font-mono text-muted-foreground"
-        >默认 {{ formatPrice(activeImageDefaultPrice) }}/张</span>
+        >{{ t('ui.default844b8cc') }} {{ formatPrice(activeImageDefaultPrice) }}{{ t('ui.imagef4878ca') }}</span>
       </div>
 
       <div
@@ -121,7 +121,7 @@
           <TableHeader>
             <TableRow class="bg-muted/30">
               <TableHead class="h-9 text-xs">
-                分辨率
+                {{ t('ui.resolution') }}
               </TableHead>
               <TableHead
                 v-for="quality in activeImageQualities"
@@ -161,7 +161,7 @@
           <TableHeader>
             <TableRow class="bg-muted/30">
               <TableHead class="h-9 text-xs">
-                像素区间
+                {{ t('ui.pixelRange') }}
               </TableHead>
               <TableHead
                 v-for="quality in activeImageQualities"
@@ -197,6 +197,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, ref, watch } from 'vue'
 import Button from '@/components/ui/button.vue'
 import Table from '@/components/ui/table.vue'
@@ -233,6 +235,8 @@ type ImageRangeRow = {
 const props = defineProps<{
   pricing: TieredPricingConfig | null | undefined
 }>()
+
+const { t } = useI18n()
 
 const KNOWN_PROCESSING_TIERS = [
   { key: 'priority', label: 'Fast（OpenAI）' },
@@ -428,4 +432,5 @@ function toFiniteNumber(value: unknown): number | null {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
+
 </script>

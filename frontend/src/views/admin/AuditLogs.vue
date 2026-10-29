@@ -10,10 +10,10 @@
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
           <div class="shrink-0">
             <h3 class="text-sm sm:text-base font-semibold">
-              审计日志
+              {{ t('ui.auditLogs') }}
             </h3>
             <p class="text-xs text-muted-foreground mt-0.5">
-              查看系统所有操作记录
+              {{ t('ui.viewAllSystemOperationRecords') }}
             </p>
           </div>
           <div class="flex flex-wrap items-center gap-2">
@@ -23,7 +23,7 @@
               <Input
                 id="audit-logs-search"
                 v-model="searchQuery"
-                placeholder="搜索用户名..."
+                :placeholder="t('ui.searchUsernames')"
                 class="w-32 sm:w-64 h-8 text-sm pl-8"
                 @input="handleSearchChange"
               />
@@ -37,7 +37,7 @@
                 @update:model-value="handleEventTypeChange"
               >
                 <SelectTrigger class="w-24 sm:w-40 h-8 border-border/60">
-                  <SelectValue placeholder="全部类型" />
+                  <SelectValue :placeholder="t('ui.allTypes')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem
@@ -76,7 +76,7 @@
               variant="ghost"
               size="icon"
               class="h-8 w-8"
-              title="重置筛选"
+              :title="t('ui.resetFilters')"
               @click="handleResetFilters"
             >
               <FilterX class="w-3.5 h-3.5" />
@@ -87,7 +87,7 @@
               variant="ghost"
               size="icon"
               class="h-8 w-8"
-              title="导出"
+              :title="t('ui.export')"
               @click="exportLogs"
             >
               <Download class="w-3.5 h-3.5" />
@@ -112,7 +112,7 @@
         v-else-if="logs.length === 0"
         class="text-center py-12 text-muted-foreground"
       >
-        暂无审计记录
+        {{ t('ui.noAuditRecords') }}
       </div>
 
       <div v-else>
@@ -124,11 +124,10 @@
                 column-key="created_at"
                 :sortable="false"
                 :filter-active="filters.days !== 7"
-                filter-title="筛选时间范围"
+                :filter-title="t('ui.filterByTimeRange')"
                 filter-content-class="w-32 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
               >
-                时间
-                <template #filter="{ close }">
+                {{ t('ui.time') }} <template #filter="{ close }">
                   <TableFilterMenu
                     :model-value="filtersDaysString"
                     :options="auditDaysFilterOptions"
@@ -138,18 +137,17 @@
                 </template>
               </SortableTableHead>
               <TableHead class="h-12 font-semibold">
-                用户
+                {{ t('auth.role.user') }}
               </TableHead>
               <SortableTableHead
                 class="h-12 font-semibold"
                 column-key="event_type"
                 :sortable="false"
                 :filter-active="filters.eventType !== '__all__'"
-                filter-title="筛选事件类型"
+                :filter-title="t('ui.filterByEventType')"
                 filter-content-class="w-48 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
               >
-                事件类型
-                <template #filter="{ close }">
+                {{ t('ui.eventType') }} <template #filter="{ close }">
                   <TableFilterMenu
                     :model-value="filters.eventType"
                     :options="auditEventTypeFilterOptions"
@@ -159,13 +157,13 @@
                 </template>
               </SortableTableHead>
               <TableHead class="h-12 font-semibold">
-                描述
+                {{ t('ui.descriptiondc2ba46') }}
               </TableHead>
               <TableHead class="h-12 font-semibold">
-                IP地址
+                {{ t('ui.ipAddressffcb085') }}
               </TableHead>
               <TableHead class="h-12 font-semibold">
-                状态
+                {{ t('ui.status6320b4a') }}
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -187,7 +185,7 @@
                   class="flex flex-col"
                 >
                   <span class="text-sm font-medium">
-                    {{ entry.user_email || `用户 ${entry.user_id}` }}
+                    {{ entry.user_email || t('ui.userValue', { value: entry.user_id }) }}
                   </span>
                   <span
                     v-if="entry.user_username"
@@ -199,7 +197,7 @@
                 <span
                   v-else
                   class="text-muted-foreground italic"
-                >系统</span>
+                >{{ t('nav.group.system') }}</span>
               </TableCell>
 
               <TableCell class="py-4">
@@ -216,7 +214,7 @@
                 class="max-w-xs truncate py-4"
                 :title="entry.description"
               >
-                {{ entry.description || '无描述' }}
+                {{ entry.description || t('ui.noDescription8ae96d7') }}
               </TableCell>
 
               <TableCell class="py-4">
@@ -279,13 +277,13 @@
               v-if="logItem.user_id"
               class="text-sm"
             >
-              {{ logItem.user_email || `用户 ${logItem.user_id}` }}
+              {{ logItem.user_email || t('ui.userValue', { value: logItem.user_id }) }}
             </div>
             <div
               class="text-xs text-muted-foreground truncate"
               :title="logItem.description"
             >
-              {{ logItem.description || '无描述' }}
+              {{ logItem.description || t('ui.noDescription8ae96d7') }}
             </div>
             <div
               v-if="logItem.ip_address"
@@ -323,7 +321,7 @@
         <div class="p-6">
           <div class="flex justify-between items-center mb-4">
             <h3 class="text-lg font-medium">
-              审计日志详情
+              {{ t('ui.auditLogDetails') }}
             </h3>
             <Button
               variant="ghost"
@@ -336,7 +334,7 @@
 
           <div class="space-y-4">
             <div>
-              <Label>事件类型</Label>
+              <Label>{{ t('ui.eventType') }}</Label>
               <p class="mt-1 text-sm">
                 {{ getEventTypeLabel(selectedLog.event_type) }}
               </p>
@@ -345,24 +343,24 @@
             <Separator />
 
             <div>
-              <Label>描述</Label>
+              <Label>{{ t('ui.descriptiondc2ba46') }}</Label>
               <p class="mt-1 text-sm">
-                {{ selectedLog.description || '无描述' }}
+                {{ selectedLog.description || t('ui.noDescription8ae96d7') }}
               </p>
             </div>
 
             <div>
-              <Label>时间</Label>
+              <Label>{{ t('ui.time') }}</Label>
               <p class="mt-1 text-sm">
                 {{ formatDateTime(selectedLog.created_at) }}
               </p>
             </div>
 
             <div v-if="selectedLog.user_id">
-              <Label>用户信息</Label>
+              <Label>{{ t('ui.userInformation') }}</Label>
               <div class="mt-1 text-sm">
                 <p class="font-medium">
-                  {{ selectedLog.user_email || `用户 ${selectedLog.user_id}` }}
+                  {{ selectedLog.user_email || t('ui.userValue', { value: selectedLog.user_id }) }}
                 </p>
                 <p
                   v-if="selectedLog.user_username"
@@ -377,28 +375,28 @@
             </div>
 
             <div v-if="selectedLog.ip_address">
-              <Label>IP地址</Label>
+              <Label>{{ t('ui.ipAddressffcb085') }}</Label>
               <p class="mt-1 text-sm">
                 {{ selectedLog.ip_address }}
               </p>
             </div>
 
             <div v-if="selectedLog.status_code">
-              <Label>状态码</Label>
+              <Label>{{ t('ui.statusCode') }}</Label>
               <p class="mt-1 text-sm">
                 {{ selectedLog.status_code }}
               </p>
             </div>
 
             <div v-if="selectedLog.error_message">
-              <Label>错误消息</Label>
+              <Label>{{ t('ui.errorMessagea033ad5') }}</Label>
               <p class="mt-1 text-sm text-destructive">
                 {{ selectedLog.error_message }}
               </p>
             </div>
 
             <div v-if="selectedLog.metadata">
-              <Label>元数据</Label>
+              <Label>{{ t('ui.metadata') }}</Label>
               <pre class="mt-1 text-sm bg-muted p-3 rounded-md overflow-x-auto">{{ JSON.stringify(selectedLog.metadata, null, 2) }}</pre>
             </div>
           </div>
@@ -409,6 +407,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { getI18nLocale } from '@/i18n'
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import {
@@ -473,7 +474,6 @@ let logsRequestId = 0
 // 搜索查询
 const searchQuery = ref('')
 
-
 const filters = ref({
   username: '',
   eventType: '__all__',
@@ -483,23 +483,23 @@ const filters = ref({
 
 const filtersDaysString = ref('7')
 const auditEventTypeFilterOptions = [
-  { value: '__all__', label: '全部类型' },
-  { value: 'login_success', label: '登录成功' },
-  { value: 'login_failed', label: '登录失败' },
-  { value: 'logout', label: '退出登录' },
-  { value: 'api_key_created', label: 'API密钥创建' },
-  { value: 'api_key_deleted', label: 'API密钥删除' },
-  { value: 'request_success', label: '请求成功' },
-  { value: 'request_failed', label: '请求失败' },
-  { value: 'user_created', label: '用户创建' },
-  { value: 'user_updated', label: '用户更新' },
-  { value: 'user_deleted', label: '用户删除' },
+  { value: '__all__', get label() { return t('ui.allTypes') } },
+  { value: 'login_success', get label() { return t('site.auth.success') } },
+  { value: 'login_failed', get label() { return t('ui.signInFailed') } },
+  { value: 'logout', get label() { return t('common.logout') } },
+  { value: 'api_key_created', get label() { return t('ui.apiKeyCreated3aeb758') } },
+  { value: 'api_key_deleted', get label() { return t('ui.apiKeyDeleted71d5c8a') } },
+  { value: 'request_success', get label() { return t('ui.requestSucceeded') } },
+  { value: 'request_failed', get label() { return t('ui.requestFailed') } },
+  { value: 'user_created', get label() { return t('ui.usersCreated') } },
+  { value: 'user_updated', get label() { return t('ui.userUpdated') } },
+  { value: 'user_deleted', get label() { return t('ui.userDeleted7d21d97') } },
 ]
 const auditDaysFilterOptions = [
-  { value: '1', label: '1天' },
-  { value: '7', label: '7天' },
-  { value: '30', label: '30天' },
-  { value: '90', label: '90天' },
+  { value: '1', get label() { return t('ui.1Day') } },
+  { value: '7', get label() { return t('ui.7Days') } },
+  { value: '30', get label() { return t('ui.30Days') } },
+  { value: '90', get label() { return t('ui.90Days') } },
 ]
 
 const currentPage = ref(1)
@@ -663,19 +663,19 @@ function closeLogDetail() {
 
 function getEventTypeLabel(eventType: string): string {
   const labels: Record<string, string> = {
-    'login_success': '登录成功',
-    'login_failed': '登录失败',
-    'logout': '退出登录',
-    'api_key_created': 'API密钥创建',
-    'api_key_deleted': 'API密钥删除',
+    get "login_success"() { return t('site.auth.success') },
+    get "login_failed"() { return t('ui.signInFailed') },
+    get "logout"() { return t('common.logout') },
+    get "api_key_created"() { return t('ui.apiKeyCreated3aeb758') },
+    get "api_key_deleted"() { return t('ui.apiKeyDeleted71d5c8a') },
     'api_key_used': 'API密钥使用',
-    'request_success': '请求成功',
-    'request_failed': '请求失败',
+    get "request_success"() { return t('ui.requestSucceeded') },
+    get "request_failed"() { return t('ui.requestFailed') },
     'request_rate_limited': '请求限流',
     'request_quota_exceeded': '配额超出',
-    'user_created': '用户创建',
-    'user_updated': '用户更新',
-    'user_deleted': '用户删除',
+    get "user_created"() { return t('ui.usersCreated') },
+    get "user_updated"() { return t('ui.userUpdated') },
+    get "user_deleted"() { return t('ui.userDeleted7d21d97') },
     'provider_added': '提供商添加',
     'provider_updated': '提供商更新',
     'provider_removed': '提供商删除',
@@ -750,4 +750,5 @@ onBeforeUnmount(() => {
   }
   logsRequestId += 1
 })
+
 </script>

@@ -1,3 +1,5 @@
+
+import { translate as t } from '@/i18n'
 /**
  * 提供商认证模板类型定义
  */
@@ -76,9 +78,9 @@ export interface BalanceExtraItem {
  */
 export const PROXY_NODE_FIELD: AuthTemplateField = {
   key: 'proxy_node_id',
-  label: '代理节点',
+  get label() { return t('ui.proxyNodes23f1b6a') },
   type: 'select',
-  placeholder: '选择代理节点...',
+  get placeholder() { return t('ui.selectProxyNode40ff86b') },
   required: false,
 }
 
@@ -87,7 +89,7 @@ export const PROXY_NODE_FIELD: AuthTemplateField = {
  * 由 ProviderAuthDialog 特殊渲染为代理节点选择器
  */
 export const PROXY_FIELD_GROUP: AuthTemplateFieldGroup = {
-  title: '代理配置',
+  get title() { return t('guide.nav.overview.proxyConfig') },
   fields: [PROXY_NODE_FIELD],
   collapsible: true,
   defaultExpanded: false,

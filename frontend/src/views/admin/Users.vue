@@ -163,7 +163,7 @@
       :sessions="userSessions"
       :loading="loadingUserSessions"
       :action-loading="sessionDialogActionLoading"
-      :format-date="formatDate"
+      :format-date="formatDateShort"
       :format-session-meta="formatSessionMeta"
       @close="showUserSessionsDialog = false"
       @revoke-session="revokeSelectedUserSession"
@@ -174,8 +174,8 @@
       :open="showWalletActionDialogState"
       :wallet="walletActionTarget?.wallet || null"
       :owner-name="walletActionTarget?.user.username || ''"
-      :owner-subtitle="walletActionTarget?.user.email || legacyT('未设置邮箱')"
-      :context-label="legacyT('用户钱包')"
+      :owner-subtitle="walletActionTarget?.user.email || t('ui.noEmailSet')"
+      :context-label="t('ui.userWallet')"
       accent="emerald"
       @close="closeWalletActionDrawer"
       @changed="handleWalletDrawerChanged"
@@ -213,7 +213,7 @@ import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
 import { adminApi } from '@/api/admin'
-import { walletStatusBadge, walletStatusLabel } from '@/utils/walletDisplay'
+import { walletStatusBadge, walletStatusLabel } from '@/features/wallet/utils/walletDisplay'
 
 // UI 组件
 import {
@@ -251,8 +251,18 @@ import {
   entitlementsWillReplaceExisting,
   isPlanEntitlementReplacementCandidate,
   billingEntitlementLabels,
+  formatBillingPlanDuration,
 } from '@/utils/billingEntitlements'
-import { formatTokens, formatRateLimitInheritable, formatRateLimitSimple, isRateLimitInherited, isRateLimitUnlimited } from '@/utils/format'
+import {
+  formatTokens,
+  formatRateLimitInheritable,
+  formatRateLimitSimple,
+  isRateLimitInherited,
+  isRateLimitUnlimited,
+  formatDateShort,
+  formatDateTime,
+  formatNumber,
+} from '@/utils/format'
 import { log } from '@/utils/logger'
 import { useBatchSelection } from '@/composables/useBatchSelection'
 import { useI18n } from '@/i18n'
@@ -260,12 +270,12 @@ import { useI18n } from '@/i18n'
 const { success, error } = useToast()
 const { confirmDanger } = useConfirm()
 const { copyToClipboard } = useClipboard()
-const { legacyT, locale } = useI18n()
+const { t, locale } = useI18n()
 const usersStore = useUsersStore()
 const authStore = useAuthStore()
 
 function localizedApiError(err: unknown, fallback: string): string {
-  return legacyT(parseApiError(err, fallback))
+  return parseApiError(err, fallback)
 }
 
 // 用户表单对话框状态
@@ -394,7 +404,7 @@ const userRows = computed<UserManagementRow[]>(() =>
     const walletStatus = getUserWalletStatus(user.id)
     return {
       user,
-      roleLabel: legacyT(formatUserRoleLabel(user.role)),
+      roleLabel: formatUserRoleLabel(user.role),
       roleBadgeVariant: userRoleBadgeVariant(user.role),
       isUnlimited: isUserUnlimited(user),
       hasWallet: Boolean(getUserWallet(user.id)),
@@ -410,8 +420,8 @@ const userRows = computed<UserManagementRow[]>(() =>
       rateLimitLabel: formatRateLimitInheritable(user.rate_limit),
       rateLimitSource: formatUserEffectiveRateLimitSource(user),
       rateLimitAsBadge: isRateLimitInherited(user.rate_limit) || isRateLimitUnlimited(user.rate_limit),
-      createdAtLabel: formatDate(user.created_at),
-      statusLabel: legacyT(user.is_active ? '活跃' : '禁用'),
+      createdAtLabel: formatDateShort(user.created_at),
+      statusLabel: user.is_active ? t('ui.activee85e590') : t('ui.disable'),
       statusVariant: user.is_active ? 'success' : 'destructive',
     }
   })
@@ -532,38 +542,16 @@ function invalidateUserOptions(): void {
   userOptionsVersion.value += 1
 }
 
-function formatDate(dateString: string) {
-  return new Date(dateString).toLocaleDateString(locale.value)
-}
-
-function formatDateTime(value?: string | null): string {
-  if (!value) return '-'
-  return new Date(value).toLocaleString(locale.value, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
 function formatPlanPrice(plan: BillingPlan): string {
   return `${Number(plan.price_amount || 0).toFixed(2)} ${plan.price_currency || 'CNY'}`
 }
 
 function formatPlanDuration(plan: BillingPlan): string {
-  const labels: Record<string, string> = {
-    day: legacyT('天'),
-    month: legacyT('个月'),
-    year: legacyT('年'),
-    custom: legacyT('天'),
-  }
-  const unit = labels[plan.duration_unit] || legacyT('天')
-  return `${Number(plan.duration_value || 1)}${unit}`
+  return formatBillingPlanDuration(plan.duration_unit, Number(plan.duration_value || 1))
 }
 
 function entitlementLabels(items: BillingEntitlement[] | undefined): string[] {
-  return billingEntitlementLabels(items, legacyT)
+  return billingEntitlementLabels(items, t)
 }
 
 function hasPackageEntitlement(items: BillingEntitlement[] | undefined): boolean {
@@ -592,11 +580,6 @@ async function loadUserWallets(options: { cacheTtlMs?: number } = {}) {
     if (requestId !== userWalletsRequestId) return
     log.error('加载用户钱包失败:', err)
   }
-}
-
-function formatNumber(value?: number | null): string {
-  const numericValue = typeof value === 'number' && Number.isFinite(value) ? value : 0
-  return numericValue.toLocaleString()
 }
 
 function getUserWallet(userId: string): AdminWallet | null {
@@ -653,13 +636,13 @@ function formatCurrencyValue(value: number | null, nullLabel = '-'): string {
 
 function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
   if (concurrentLimit == null || concurrentLimit === 0) {
-    return legacyT('不限并发')
+    return t('ui.unlimitedConcurrency')
   }
-  return locale.value === 'en-US' ? `${concurrentLimit} concurrent` : `${concurrentLimit} 并发`
+  return t('users.concurrentLimit', { limit: concurrentLimit })
 }
 
 function formatIpRules(ipRules?: string[] | null): string {
-  return ipRules && ipRules.length > 0 ? ipRules.join(', ') : legacyT('不限制')
+  return ipRules && ipRules.length > 0 ? ipRules.join(', ') : t('ui.noRestriction')
 }
 
 function parseIpRulesInput(value: string): string[] | null {
@@ -674,16 +657,16 @@ function formatUserEffectiveRateLimitSource(user: User): string {
   const source = user.effective_policy?.rate_limit
   if (!source) return ''
   if (source.source === 'group' && source.group_name) {
-    return `${legacyT('继承自分组：')}${source.group_name}`
+    return `${t('ui.inheritedFromGroup')}${source.group_name}`
   }
   if (source.source === 'combined') {
     const groupNames = Array.isArray(source.group_names) ? source.group_names.join(locale.value === 'en-US' ? ', ' : '、') : ''
-    return groupNames ? `${legacyT('用户额外限制与分组叠加：')}${groupNames}` : legacyT('用户额外限制与分组叠加')
+    return groupNames ? `${t('ui.userExtraLimitCombinedWithGroups')}${groupNames}` : t('ui.userExtraLimitCombinedWithGroupsccb5591')
   }
   if (source.source === 'user') {
-    return legacyT('用户单独配置')
+    return t('ui.userSpecificConfiguration')
   }
-  return legacyT('系统默认')
+  return t('ui.systemDefault')
 }
 
 function isNegativeWalletValue(value: number | null): boolean {
@@ -691,25 +674,25 @@ function isNegativeWalletValue(value: number | null): boolean {
 }
 
 async function toggleUserStatus(user: User) {
-  const action = user.is_active ? '禁用' : '启用'
-  const localizedAction = legacyT(action)
+  const disabling = user.is_active
   const confirmed = await confirmDanger(
-    locale.value === 'en-US'
-      ? `${localizedAction} user ${user.username}?`
-      : `确定要${action}用户 ${user.username} 吗？`,
-    locale.value === 'en-US' ? `${localizedAction} user` : `${action}用户`,
-    localizedAction
+    disabling
+      ? t('users.disable.confirmMessage', { username: user.username })
+      : t('users.enable.confirmMessage', { username: user.username }),
+    disabling ? t('users.disable.confirmTitle') : t('users.enable.confirmTitle'),
+    disabling ? t('users.disable.confirmButton') : t('users.enable.confirmButton'),
   )
 
   if (!confirmed) return
 
   try {
-    await usersStore.updateUser(user.id, { is_active: !user.is_active })
+    await usersStore.updateUser(user.id, { is_active: !disabling })
     invalidateUserOptions()
     await refreshUsers()
-    success(legacyT(`用户已${action}`))
+    success(disabling ? t('users.disable.success') : t('users.enable.success'))
   } catch (err: unknown) {
-    error(localizedApiError(err, '未知错误'), legacyT(`${action}用户失败`))
+    const fallback = disabling ? t('users.disable.failure') : t('users.enable.failure')
+    error(localizedApiError(err, fallback), fallback)
   }
 }
 
@@ -758,7 +741,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
       }
       await usersStore.updateUser(data.id, updateData)
       invalidateUserOptions()
-      success(legacyT('用户信息已更新'))
+      success(t('ui.userInformationUpdated'))
     } else {
       // 创建用户
       const newUser = await usersStore.createUser({
@@ -776,13 +759,13 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         await usersStore.updateUser(newUser.id, { is_active: false })
       }
       invalidateUserOptions()
-      success(legacyT('用户创建成功'))
+      success(t('ui.userCreated'))
     }
     closeUserFormDialog()
     await Promise.all([refreshUsers(), loadUserWallets()])
   } catch (err: unknown) {
-    const title = data.id ? '更新用户失败' : '创建用户失败'
-    error(localizedApiError(err, '未知错误'), legacyT(title))
+    const title = data.id ? t('ui.failedToUpdateUser') : t('ui.failedToCreateUser')
+    error(localizedApiError(err, title), title)
   } finally {
     userFormDialogRef.value?.setSaving(false)
   }
@@ -812,7 +795,7 @@ async function manageUserSessions(user: User) {
   try {
     userSessions.value = await usersStore.getUserSessions(user.id)
   } catch (err) {
-    error(localizedApiError(err, '加载用户设备会话失败'), legacyT('加载用户设备会话失败'))
+    error(localizedApiError(err, t('ui.failedToLoadUserDeviceSessions')), t('ui.failedToLoadUserDeviceSessions'))
   } finally {
     loadingUserSessions.value = false
   }
@@ -839,7 +822,7 @@ async function loadUserPlanEntitlements(userId: string) {
     const response = await usersApi.listUserPlanEntitlements(userId)
     userPlanEntitlements.value = response.items
   } catch (err) {
-    error(localizedApiError(err, '加载用户套餐失败'), legacyT('加载用户套餐失败'))
+    error(localizedApiError(err, t('ui.failedToLoadUserPlans')), t('ui.failedToLoadUserPlans'))
     userPlanEntitlements.value = []
   } finally {
     loadingUserPlans.value = false
@@ -858,7 +841,7 @@ async function loadAvailableBillingPlans() {
       selectedGrantPlanId.value = ''
     }
   } catch (err) {
-    error(localizedApiError(err, '加载套餐列表失败'), legacyT('加载套餐列表失败'))
+    error(localizedApiError(err, t('ui.failedToLoadPlanList')), t('ui.failedToLoadPlanList'))
     availableBillingPlans.value = []
   } finally {
     loadingBillingPlans.value = false
@@ -876,9 +859,9 @@ async function grantPlanToSelectedUser() {
   )
   if (replacesExisting) {
     const confirmed = await confirmDanger(
-      legacyT('发放成功后，冲突的旧套餐及其组合权益会整包失效。确定继续发放吗？'),
-      legacyT('确认替换旧套餐'),
-      legacyT('继续发放'),
+      t('ui.grantingThisPlanWillReplaceConflictingPlansAndAllTheir'),
+      t('ui.confirmPlanReplacement'),
+      t('ui.grantPlan'),
     )
     if (!confirmed) return
   }
@@ -890,9 +873,9 @@ async function grantPlanToSelectedUser() {
     })
     userPlanEntitlements.value = response.items
     grantReason.value = ''
-    success(legacyT('套餐已发放'))
+    success(t('ui.planGranted'))
   } catch (err) {
-    error(localizedApiError(err, '发放套餐失败'), legacyT('发放套餐失败'))
+    error(localizedApiError(err, t('ui.failedToGrantPlan')), t('ui.failedToGrantPlan'))
   } finally {
     grantingUserPlan.value = false
   }
@@ -903,9 +886,9 @@ async function revokePlanFromSelectedUser(entitlement: AdminUserPlanEntitlement)
   const userId = selectedUser.value.id
   const planTitle = entitlement.plan_title || entitlement.plan?.title || entitlement.plan_id
   const confirmed = await confirmDanger(
-    `${planTitle}\n\n${legacyT('撤销后该用户将立即失去该套餐的剩余额度和会员权益，历史订单与使用记录会保留。')}`,
-    legacyT('撤销用户套餐'),
-    legacyT('确认撤销'),
+    `${planTitle}\n\n${t('ui.theUserWillImmediatelyLoseThePlanSRemainingQuota')}`,
+    t('ui.revokeUserPlan'),
+    t('ui.confirmRevoke'),
   )
   if (!confirmed) return
   revokingUserPlanEntitlementId.value = entitlement.id
@@ -917,9 +900,9 @@ async function revokePlanFromSelectedUser(entitlement: AdminUserPlanEntitlement)
     if (selectedUser.value?.id === userId) {
       userPlanEntitlements.value = response.items
     }
-    success(legacyT('套餐已撤销'))
+    success(t('ui.planRevoked'))
   } catch (err) {
-    error(localizedApiError(err, '撤销套餐失败'), legacyT('撤销套餐失败'))
+    error(localizedApiError(err, t('ui.failedToRevokePlan')), t('ui.failedToRevokePlan'))
   } finally {
     revokingUserPlanEntitlementId.value = null
   }
@@ -1003,7 +986,7 @@ function closeUserApiKeyFormDialog() {
 async function submitUserApiKeyForm() {
   if (!selectedUser.value) return
   if (!userApiKeyForm.value.name.trim()) {
-    error(legacyT('请输入密钥名称'), legacyT(editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败'))
+    error(t('ui.enterAKeyName'), editingUserApiKey.value ? t('ui.failedToUpdateApiKeydce5430') : t('ui.failedToCreateApiKey438ebef'))
     return
   }
 
@@ -1038,7 +1021,7 @@ async function submitUserApiKeyForm() {
         ...featureSettingsPatch,
       })
       if (!mutationIsCurrent()) return
-      success(legacyT('API Key已更新'))
+      success(t('ui.apiKeyUpdated3b4d973'))
     } else {
       const response = await usersStore.createApiKey(targetUserId, {
         name: form.name,
@@ -1050,14 +1033,14 @@ async function submitUserApiKeyForm() {
       if (!mutationIsCurrent()) return
       newApiKey.value = response.key || ''
       showNewApiKeyDialog.value = true
-      success(legacyT('API Key创建成功'))
+      success(t('ui.apiKeyCreated16574ff'))
     }
     await loadUserApiKeys(targetUserId)
     if (!mutationIsCurrent()) return
     closeUserApiKeyFormDialog()
   } catch (err: unknown) {
     if (mutationIsCurrent()) {
-      error(localizedApiError(err, '未知错误'), legacyT(editingApiKey ? '更新 API Key 失败' : '创建 API Key 失败'))
+      error(localizedApiError(err, t('ui.unknownError')), editingApiKey ? t('ui.failedToUpdateApiKeydce5430') : t('ui.failedToCreateApiKey438ebef'))
     }
   } finally {
     if (mutationRequestId === userApiKeyMutationRequestId) {
@@ -1072,9 +1055,9 @@ async function revokeSelectedUserSession(sessionId: string) {
   try {
     await usersStore.revokeUserSession(selectedUser.value.id, sessionId)
     userSessions.value = userSessions.value.filter((session) => session.id !== sessionId)
-    success(legacyT('设备已强制下线'))
+    success(t('ui.deviceSignedOuteb86c77'))
   } catch (err) {
-    error(localizedApiError(err, '强制下线失败'), legacyT('强制下线失败'))
+    error(localizedApiError(err, t('ui.failedToSignOutDevicedc79407')), t('ui.failedToSignOutDevicedc79407'))
   } finally {
     sessionDialogActionLoading.value = null
   }
@@ -1087,10 +1070,10 @@ async function revokeAllSelectedUserSessions() {
     const result = await usersStore.revokeAllUserSessions(selectedUser.value.id)
     userSessions.value = []
     success(result.revoked_count > 0
-      ? legacyT(`已强制下线 ${result.revoked_count} 个设备`)
-      : legacyT('没有可下线的设备'))
+      ? t('ui.signedOutValueDevices', { count: result.revoked_count })
+      : t('ui.noDevicesToSignOut'))
   } catch (err) {
-    error(localizedApiError(err, '强制下线全部设备失败'), legacyT('强制下线全部设备失败'))
+    error(localizedApiError(err, t('ui.failedToSignOutAllDevices')), t('ui.failedToSignOutAllDevices'))
   } finally {
     sessionDialogActionLoading.value = null
   }
@@ -1109,10 +1092,8 @@ async function deleteApiKey(apiKey: ApiKey) {
   const user = selectedUser.value
   if (!user) return
   const confirmed = await confirmDanger(
-    locale.value === 'en-US'
-      ? `Delete this API key?\n\n${apiKey.key_display || '****'}\n\nThis action cannot be undone.`
-      : `确定要删除这个API Key吗？\n\n${apiKey.key_display || '****'}\n\n此操作无法撤销。`,
-    legacyT('删除 API Key')
+    t('users.apiKey.deleteConfirm', { key: apiKey.key_display || '****' }),
+    t('ui.deleteApiKey')
   )
 
   if (!confirmed) return
@@ -1120,9 +1101,9 @@ async function deleteApiKey(apiKey: ApiKey) {
   try {
     await usersStore.deleteApiKey(user.id, apiKey.id)
     if (selectedUser.value?.id === user.id) await loadUserApiKeys(user.id)
-    success(legacyT('API Key已删除'))
+    success(t('ui.apiKeyDeleted66e44ad'))
   } catch (err: unknown) {
-    error(localizedApiError(err, '未知错误'), legacyT('删除 API Key 失败'))
+    error(localizedApiError(err, t('ui.unknownError')), t('ui.failedToDeleteApiKey0130c20'))
   }
 }
 
@@ -1135,10 +1116,10 @@ async function toggleLockApiKey(apiKey: ApiKey) {
     if (index !== -1) {
       userApiKeys.value[index].is_locked = response.is_locked
     }
-    success(legacyT(response.message))
+    success(response.message)
   } catch (err: unknown) {
     log.error('切换密钥锁定状态失败:', err)
-    error(localizedApiError(err, '操作失败'), legacyT('锁定/解锁失败'))
+    error(localizedApiError(err, t('ui.operationFailed')), t('ui.failedToLockUnlock'))
   }
 }
 
@@ -1149,14 +1130,14 @@ async function copyFullKey(apiKey: ApiKey) {
     await copyToClipboard(response.key)
   } catch (err: unknown) {
     log.error('复制密钥失败:', err)
-    error(localizedApiError(err, '未知错误'), legacyT('复制密钥失败'))
+    error(localizedApiError(err, t('ui.unknownError')), t('ui.failedToCopyKey'))
   }
 }
 
 function openWalletActionDialog(user: User) {
   const wallet = getUserWallet(user.id)
   if (!wallet) {
-    error(legacyT('该用户的钱包尚未初始化，暂时无法进行资金操作'))
+    error(t('ui.thisUserWalletIsNotInitializedYetSoWalletOperations'))
     return
   }
 
@@ -1182,10 +1163,8 @@ async function handleWalletDrawerChanged() {
 
 async function deleteUser(user: User) {
   const confirmed = await confirmDanger(
-    locale.value === 'en-US'
-      ? `Delete user ${user.username}?\n\nThis will delete:\n- User account\n- All API keys\n- All usage records\n\nThis action cannot be undone.`
-      : `确定要删除用户 ${user.username} 吗？\n\n此操作将删除：\n• 用户账户\n• 所有API密钥\n• 所有使用记录\n\n此操作无法撤销！`,
-    legacyT('删除用户')
+    t('users.delete.confirmMessage', { username: user.username }),
+    t('ui.deleteUser')
   )
 
   if (!confirmed) return
@@ -1197,9 +1176,9 @@ async function deleteUser(user: User) {
       currentPage.value -= 1
     }
     await refreshUsers()
-    success(legacyT('用户已删除'))
+    success(t('ui.userDeleted'))
   } catch (err: unknown) {
-    error(localizedApiError(err, '未知错误'), legacyT('删除用户失败'))
+    error(localizedApiError(err, t('ui.unknownError')), t('ui.failedToDeleteUser'))
   }
 }
 </script>

@@ -1,12 +1,23 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { BillingEntitlement } from '@/api/billing'
+import { getI18nLocale, setI18nLocale, type Locale } from '@/i18n'
 import {
+  billingEntitlementLabels,
   entitlementReplacementGroups,
   entitlementsWillReplaceExisting,
   isPlanEntitlementReplacementCandidate,
   usagePolicyEntitlementLabels,
 } from '../billingEntitlements'
+
+let previousLocale: Locale
+
+beforeEach(() => {
+  previousLocale = getI18nLocale()
+  setI18nLocale('zh-CN')
+})
+
+afterEach(() => setI18nLocale(previousLocale))
 
 function policy(replacementGroup?: string): BillingEntitlement {
   return {
@@ -96,6 +107,69 @@ describe('billing entitlement replacement', () => {
 })
 
 describe('usage policy entitlement labels', () => {
+  it('updates all entitlement labels when the locale changes and preserves policy names', () => {
+    const items: BillingEntitlement[] = [
+      { type: 'wallet_credit', amount_usd: 5 },
+      { type: 'daily_quota', daily_quota_usd: 10 },
+      { type: 'membership_group', grant_user_groups: ['pro'] },
+      {
+        type: 'usage_policy',
+        name: '  ui.active / 自定义策略  ',
+        rules: [{ metric: 'concurrency', window: { kind: 'concurrent' }, limit: 4 }],
+      },
+    ]
+
+    expect(billingEntitlementLabels(items)).toEqual([
+      '附赠余额 $5.00',
+      '每日额度 $10.00',
+      '会员权益',
+      '使用策略 ui.active / 自定义策略',
+      '并发 4',
+    ])
+
+    setI18nLocale('en-US')
+    expect(billingEntitlementLabels(items)).toEqual([
+      'Gift balance $5.00',
+      'Daily quota $10.00',
+      'Membership benefits',
+      'Usage policy ui.active / 自定义策略',
+      'Concurrency 4',
+    ])
+    expect(usagePolicyEntitlementLabels({ type: 'usage_policy', rules: [] })).toEqual(['Usage limits'])
+  })
+
+  it('localizes calendar, rolling, and subscription windows without Chinese fragments', () => {
+    setI18nLocale('en-US')
+    expect(usagePolicyEntitlementLabels({
+      type: 'usage_policy',
+      rules: [
+        { metric: 'actual_cost_usd', window: { kind: 'rolling', seconds: 86_400 }, limit: 2.5 },
+        { metric: 'request_count', window: { kind: 'rolling', seconds: 7_200 }, limit: 20 },
+        { metric: 'actual_cost_usd', window: { kind: 'rolling', seconds: 60 }, limit: 1 },
+        { metric: 'actual_cost_usd', window: { kind: 'rolling', seconds: 2 }, limit: 0.5 },
+        { metric: 'request_count', window: { kind: 'calendar_day', timezone: ' UTC ' }, limit: 500 },
+        { metric: 'actual_cost_usd', window: { kind: 'calendar_week', week_start: 7 }, limit: 10 },
+        { metric: 'request_count', window: { kind: 'calendar_week', week_start: 0 }, limit: 2_000 },
+        { metric: 'actual_cost_usd', window: { kind: 'calendar_month' }, limit: 20 },
+        { metric: 'actual_cost_usd', window: { kind: 'subscription_period' }, limit: 30 },
+        { metric: 'request_count', window: { kind: 'subscription_period' }, limit: 1_000 },
+        { metric: 'request_count', window: { kind: 'concurrent' }, limit: 5 },
+      ],
+    })).toEqual([
+      'Rolling 1 day $2.5',
+      'Rolling 2 hours 20 requests',
+      'Rolling 1 minute $1',
+      'Rolling 2 seconds $0.5',
+      'Daily 500 requests (UTC)',
+      'Weekly $10 (system timezone, starting Sunday)',
+      'Weekly 2,000 requests (system timezone, starting Monday)',
+      'Monthly $20 (system timezone)',
+      'Subscription period $30',
+      'Subscription period 1,000 requests',
+      'Concurrent window 5 requests',
+    ])
+  })
+
   it('shows calendar reset timezone and week start', () => {
     expect(usagePolicyEntitlementLabels({
       type: 'usage_policy',

@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import client from '../client'
 
 const CLAUDE_COOKIE_AUTHORIZE_TIMEOUT_MS = 4 * 60 * 1000
@@ -189,7 +190,7 @@ function parseImportCredentialLines(
 export function normalizeBatchImportCredentials(text: string): BatchImportCredentialsNormalization {
   const trimmed = text.trim()
   if (!trimmed) {
-    return { ok: false, message: '请输入凭据数据' }
+    return { ok: false, get message() { return translate('ui.enterCredentialData') } }
   }
 
   const firstChar = trimmed[0]

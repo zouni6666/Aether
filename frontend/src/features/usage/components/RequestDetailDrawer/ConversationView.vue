@@ -25,7 +25,7 @@
           class="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground bg-muted/30 rounded-lg w-fit"
         >
           <Zap class="w-4 h-4" />
-          <span>流式响应</span>
+          <span>{{ t('ui.streamingResponse') }}</span>
         </div>
       </template>
 
@@ -43,8 +43,7 @@
             <Settings class="w-4 h-4 text-muted-foreground" />
             <span class="text-xs font-medium text-muted-foreground">System</span>
             <span class="text-xs text-muted-foreground">
-              ({{ groupedConversation.system.length }} 字符)
-            </span>
+              ({{ groupedConversation.system.length }} {{ t('ui.characters') }} </span>
             <component
               :is="systemExpanded ? ChevronDown : ChevronRight"
               class="w-4 h-4 text-muted-foreground ml-auto"
@@ -68,8 +67,7 @@
             class="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/30 rounded-lg border border-dashed border-border transition-colors"
             @click="historyExpanded = !historyExpanded"
           >
-            <span class="text-xs font-medium text-muted-foreground">
-              历史轮次 ({{ historyTurns.length }})
+            <span class="text-xs font-medium text-muted-foreground"> {{ t('ui.previousTurns') }}{{ historyTurns.length }})
             </span>
             <component
               :is="historyExpanded ? ChevronDown : ChevronRight"
@@ -110,7 +108,7 @@
           class="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground bg-muted/30 rounded-lg w-fit"
         >
           <Zap class="w-4 h-4" />
-          <span>流式响应</span>
+          <span>{{ t('ui.streamingResponse') }}</span>
         </div>
       </template>
     </div>
@@ -118,6 +116,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch, nextTick } from 'vue'
 import { AlertCircle, Zap, Settings, ChevronRight, ChevronDown } from 'lucide-vue-next'
 import TurnCard from './TurnCard.vue'
@@ -130,6 +130,8 @@ const props = defineProps<{
   emptyMessage: string
   embedded?: boolean
 }>()
+
+const { t } = useI18n()
 
 // 状态
 const systemExpanded = ref(false)
@@ -194,4 +196,5 @@ watch(() => props.renderResult, () => {
     })
   }
 }, { deep: true, immediate: true })
+
 </script>

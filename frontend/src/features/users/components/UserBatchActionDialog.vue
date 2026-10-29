@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="open"
-    :title="legacyT('用户批量操作')"
-    :description="legacyT('按当前选择批量调整用户状态、角色、额度和钱包余额')"
+    :title="t('ui.userBatchActions')"
+    :description="t('ui.batchUpdateUserStatusRoleQuotaAndWalletBalancesFor')"
     size="2xl"
     persistent
     @update:model-value="handleDialogUpdate"
@@ -48,12 +48,12 @@
             for="user-batch-wallet-amount"
             class="text-sm font-medium"
           >
-            {{ legacyT('调整金额 (USD)') }}
+            {{ t('ui.adjustmentAmountUsd') }}
           </Label>
           <div
             class="inline-flex rounded-md border border-border p-0.5"
             role="group"
-            :aria-label="legacyT('余额调整方式')"
+            :aria-label="t('ui.balanceAdjustmentMode')"
           >
             <Button
               type="button"
@@ -63,7 +63,7 @@
               @click="balanceOperation = 'add'"
             >
               <Plus class="mr-1.5 h-4 w-4" />
-              {{ legacyT('增加') }}
+              {{ t('ui.addbce53fe') }}
             </Button>
             <Button
               type="button"
@@ -73,7 +73,7 @@
               @click="balanceOperation = 'deduct'"
             >
               <Minus class="mr-1.5 h-4 w-4" />
-              {{ legacyT('扣减') }}
+              {{ t('ui.deduct') }}
             </Button>
           </div>
         </div>
@@ -91,10 +91,10 @@
           v-if="balanceAmount !== '' && balancePayload === null"
           class="text-xs text-destructive"
         >
-          {{ legacyT('请输入大于 0 的有限金额') }}
+          {{ t('ui.enterAFiniteAmountGreaterThan0') }}
         </p>
         <p class="text-xs leading-relaxed text-muted-foreground">
-          {{ legacyT('扣减超过单个用户可用余额时，该用户余额将归零。') }}
+          {{ t('ui.deductionsAboveAnIndividualUserSAvailableBalanceWillBe') }}
         </p>
       </div>
 
@@ -104,13 +104,13 @@
         class="space-y-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-3 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100"
       >
         <p>
-          {{ legacyT('存在未决的钱包批量调整') }}：{{ pendingWalletOperationLabel }} {{ pendingWalletBatch.request.payload.amount }} USD。{{ legacyT('结果未知或可能部分完成。请重试原请求，不要开始新的余额调整。') }}
+          {{ t('ui.aWalletBatchAdjustmentIsUnresolved') }}：{{ pendingWalletOperationLabel }} {{ pendingWalletBatch.request.payload.amount }} USD。{{ t('ui.theResultIsUnknownOrMayBePartiallyCompleteRetry') }}
         </p>
         <p
           v-if="walletRequestMismatch"
           class="text-xs"
         >
-          {{ legacyT('当前表单与原请求不同；新钱包调整已禁用，请先重试原请求。') }}
+          {{ t('ui.theCurrentFormDiffersFromTheOriginalRequestNewWallet') }}
         </p>
         <Button
           type="button"
@@ -120,7 +120,7 @@
           @click="retryPendingWalletBatch"
         >
           <RotateCcw class="mr-1.5 h-4 w-4" />
-          {{ legacyT('重试原钱包批次') }}
+          {{ t('ui.retryOriginalWalletBatch') }}
         </Button>
       </div>
       <p
@@ -128,7 +128,7 @@
         role="alert"
         class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100"
       >
-        {{ legacyT('无法读取未决的钱包批量请求。为避免重复扣款，钱包余额调整已禁用；请先核对余额操作结果。') }}
+        {{ t('ui.unableToReadTheUnresolvedWalletBatchRequestWalletBalance') }}
       </p>
 
       <UserBatchResultSummary
@@ -144,13 +144,13 @@
         :disabled="executing"
         @click="emit('close')"
       >
-        {{ legacyT('关闭') }}
+        {{ t('ui.close') }}
       </Button>
       <Button
         :disabled="!canExecute"
         @click="executeBatchAction"
       >
-        {{ executing ? legacyT('执行中...') : executeButtonLabel }}
+        {{ executing ? t('ui.runningfeed25e') : executeButtonLabel }}
       </Button>
     </template>
   </Dialog>
@@ -227,7 +227,7 @@ const walletRetryCoordinator = createUserBatchWalletRetryCoordinator({
   scope: () => authStore.user?.id ?? null,
 })
 const { success, warning, error } = useToast()
-const { legacyT, locale } = useI18n()
+const { t, locale } = useI18n()
 
 const selectedAction = ref<UserBatchAction>('enable')
 const targetRole = ref<UserRole>('user')
@@ -268,40 +268,36 @@ const canExecute = computed(() => (
     || (balancePayload.value !== null && !pendingWalletReadError.value && !walletRequestMismatch.value))
 ))
 const selectedActionLabel = computed(() => (
-  USER_BATCH_ACTION_OPTIONS.find((action) => action.value === selectedAction.value)?.label ?? '批量操作'
+  USER_BATCH_ACTION_OPTIONS.find((action) => action.value === selectedAction.value)?.label ?? t('ui.batchActions')
 ))
-const impactLabel = computed(() => locale.value === 'en-US'
-  ? `Affected users: ${impactCount.value}`
-  : `影响用户：${impactCount.value} 个`)
-const overflowPreviewLabel = computed(() => legacyT(`等 ${impactCount.value} 个用户`))
+const impactLabel = computed(() => t('users.batch.impact', { count: impactCount.value }))
+const overflowPreviewLabel = computed(() => t('ui.andValueUsers', { count: impactCount.value }))
 const targetRoleWarning = computed(() => {
   if (targetRole.value === 'admin') {
-    return legacyT('提示：设置为管理员会授予用户完整后台管理能力。')
+    return t('ui.tipSettingUsersAsAdminsGrantsFullBackendManagementPermissions')
   }
   if (targetRole.value === 'audit_admin') {
-    return legacyT('提示：设置为审计管理员会授予后台只读查看能力。')
+    return t('ui.tipSettingUsersAsAuditAdminsGrantsReadOnlyBackend')
   }
-  return legacyT('提示：设置为普通用户会移除目标用户的管理员权限。')
+  return t('ui.tipSettingUsersAsRegularUsersRemovesAdminPermissionsFrom')
 })
-const executeButtonLabel = computed(() => legacyT(`确认${selectedActionLabel.value}（${impactCount.value}）`))
+const executeButtonLabel = computed(() => t('ui.confirmValueValue', { value: selectedActionLabel.value, count: impactCount.value }))
 const pendingWalletOperationLabel = computed(() => (
   pendingWalletBatch.value?.request.payload.operation === 'deduct'
-    ? legacyT('扣减')
-    : legacyT('增加')
+    ? t('ui.deduct')
+    : t('ui.addbce53fe')
 ))
 const lastResultLabel = computed(() => {
   if (!lastResult.value) return ''
   if (lastResult.value.interrupted) {
-    return legacyT(
-      `批量操作中断：成功 ${lastResult.value.success} 个，结果待确认 ${lastResult.value.uncertain_user_ids?.length ?? 0} 个，尚未执行 ${lastResult.value.unprocessed_user_ids?.length ?? 0} 个`,
-    )
+    return t('ui.batchInterruptedSucceededValueUncertainValueNotProcessedValue', { value: lastResult.value.success, count: lastResult.value.uncertain_user_ids?.length ?? 0, count3: lastResult.value.unprocessed_user_ids?.length ?? 0 })
   }
-  return legacyT(`成功 ${lastResult.value.success} 个，失败 ${lastResult.value.failed} 个`)
+  return t('ui.succeededValueFailedValue', { value: lastResult.value.success, value2: lastResult.value.failed })
 })
 const lastResultFailuresLabel = computed(() => {
   if (!lastResult.value || lastResult.value.failures.length === 0) return ''
   const failures = lastResult.value.failures.slice(0, 3)
-    .map((item) => `${item.user_id} ${legacyT(item.reason)}`)
+    .map((item) => `${item.user_id} ${item.reason}`)
     .join(locale.value === 'en-US' ? '; ' : '；')
   return locale.value === 'en-US' ? `: ${failures}` : `：${failures}`
 })
@@ -375,7 +371,7 @@ async function resolvePreview(): Promise<void> {
   } catch (err) {
     resolvedTotal.value = props.selectedCount
     previewItems.value = []
-    error(parseApiError(err, '解析用户选择失败'), legacyT('解析用户选择失败'))
+    error(parseApiError(err, t('ui.failedToResolveUserSelection')), t('ui.failedToResolveUserSelection'))
   } finally {
     previewLoading.value = false
   }
@@ -404,13 +400,13 @@ async function executeBatchAction(): Promise<void> {
   if (selectedAction.value === 'update_access_control') {
     const payload = buildAccessControlPayload()
     if (payload === null) {
-      warning(legacyT('请选择要修改的额度'))
+      warning(t('ui.selectTheQuotaChangeToApply'))
       return
     }
     request = { selection, action: 'update_access_control', payload }
   } else if (selectedAction.value === 'adjust_wallet_balance') {
     if (walletAdjustmentRequest.value === null) {
-      warning(legacyT('请输入大于 0 的有限金额'))
+      warning(t('ui.enterAFiniteAmountGreaterThan0'))
       return
     }
     walletRequest = walletAdjustmentRequest.value
@@ -434,11 +430,14 @@ async function executeBatchAction(): Promise<void> {
     const result = await usersStore.batchAction(request)
     lastResult.value = result
     if (result.interrupted) {
-      warning(`${lastResultLabel.value}；${legacyT('请核对余额后再重试，勿直接重试整批')}`)
+      warning(t('users.batch.interruptionWarning', {
+        result: lastResultLabel.value,
+        warning: t('ui.verifyBalancesBeforeRetryingDoNotRetryTheEntireBatch'),
+      }))
       emit('completed', result)
       return
     }
-    const message = legacyT(`批量操作完成：成功 ${result.success} 个，失败 ${result.failed} 个`)
+    const message = t('ui.batchActionCompleteSucceededValueFailedValue', { value: result.success, value2: result.failed })
     if (result.failed > 0) {
       warning(message)
     } else {
@@ -449,22 +448,22 @@ async function executeBatchAction(): Promise<void> {
     if (walletRequest) {
       refreshPendingWalletBatch()
       if (err instanceof WalletIdempotencyPersistenceUnavailableError) {
-        warning(legacyT('浏览器无法安全保存钱包批量请求，本次请求未发送。'))
+        warning(t('ui.theBrowserCouldNotSecurelySaveTheWalletBatchRequest'))
       } else if (err instanceof WalletIdempotencyRequestInProgressError) {
-        warning(legacyT('另一个标签页正在处理钱包批量调整，请稍后刷新状态再试。此次未发送新请求。'))
+        warning(t('ui.anotherTabIsProcessingAWalletBatchAdjustmentRefreshThe'))
       } else if (err instanceof WalletIdempotencyCoordinationUnavailableError) {
-        warning(legacyT('当前浏览器无法保护跨标签页的钱包批量请求，请使用支持此功能的浏览器。请求未发送。'))
+        warning(t('ui.thisBrowserCannotProtectWalletBatchRequestsAcrossTabsUse'))
       } else if (
         err instanceof WalletIdempotencyUnavailableError
         || err instanceof WalletIdempotencyScopeUnavailableError
         || err instanceof WalletIdempotencyScopeChangedError
       ) {
-        warning(legacyT('无法确认管理员身份或安全生成钱包批量请求标识，请求未发送。'))
+        warning(t('ui.unableToVerifyTheAdministratorSIdentityOrSecurelyGenerate'))
       } else {
-        warning(legacyT('钱包批量调整结果未知或可能部分完成。请重试原请求，不要开始新的余额调整。'))
+        warning(t('ui.theWalletBatchAdjustmentResultIsUnknownOrMayBe'))
       }
     } else {
-      error(legacyT(parseApiError(err, '批量操作失败')), legacyT('批量操作失败'))
+      error(parseApiError(err, t('ui.batchActionFailed')), t('ui.batchActionFailed'))
     }
   } finally {
     executing.value = false
@@ -483,18 +482,18 @@ async function retryPendingWalletBatch(): Promise<void> {
   } catch (err) {
     refreshPendingWalletBatch()
     if (err instanceof WalletIdempotencyPersistenceUnavailableError) {
-      warning(legacyT('浏览器无法安全保存钱包批量请求，本次请求未发送。'))
+      warning(t('ui.theBrowserCouldNotSecurelySaveTheWalletBatchRequest'))
     } else if (err instanceof WalletIdempotencyRequestInProgressError) {
-      warning(legacyT('另一个标签页正在处理钱包批量调整，请稍后刷新状态再试。此次未发送新请求。'))
+      warning(t('ui.anotherTabIsProcessingAWalletBatchAdjustmentRefreshThe'))
     } else if (err instanceof WalletIdempotencyCoordinationUnavailableError) {
-      warning(legacyT('当前浏览器无法保护跨标签页的钱包批量请求，请使用支持此功能的浏览器。请求未发送。'))
+      warning(t('ui.thisBrowserCannotProtectWalletBatchRequestsAcrossTabsUse'))
     } else if (
       err instanceof WalletIdempotencyScopeUnavailableError
       || err instanceof WalletIdempotencyScopeChangedError
     ) {
-      warning(legacyT('无法确认管理员身份，请求未发送。'))
+      warning(t('ui.unableToVerifyTheAdministratorSIdentityTheRequestWas'))
     } else {
-      warning(legacyT('钱包批量调整结果未知或可能部分完成。请重试原请求，不要开始新的余额调整。'))
+      warning(t('ui.theWalletBatchAdjustmentResultIsUnknownOrMayBe'))
     }
   } finally {
     executing.value = false
@@ -505,9 +504,9 @@ function handleWalletBatchResult(result: UserBatchActionResponse): void {
   lastResult.value = result
   refreshPendingWalletBatch()
   if (result.interrupted) {
-    warning(`${lastResultLabel.value}；${legacyT('结果可能部分完成，请仅重试原请求，不要开始新的余额调整。')}`)
+    warning(`${lastResultLabel.value}；${t('ui.theOperationMayBePartiallyCompleteRetryOnlyTheOriginal')}`)
   } else {
-    const message = legacyT(`批量操作完成：成功 ${result.success} 个，失败 ${result.failed} 个`)
+    const message = t('ui.batchActionCompleteSucceededValueFailedValue', { value: result.success, value2: result.failed })
     if (result.failed > 0) warning(message)
     else success(message)
   }

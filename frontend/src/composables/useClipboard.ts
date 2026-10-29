@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import { useToast } from './useToast'
 import { log } from '@/utils/logger'
 
@@ -8,7 +9,7 @@ export function useClipboard() {
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text)
-        if (showToast) success('已复制到剪贴板')
+        if (showToast) success(translate('ui.copiedToClipboard'))
         return true
       }
 
@@ -25,17 +26,17 @@ export function useClipboard() {
       try {
         const successful = document.execCommand('copy')
         if (successful) {
-          if (showToast) success('已复制到剪贴板')
+          if (showToast) success(translate('ui.copiedToClipboard'))
           return true
         }
-        if (showToast) showError('复制失败，请手动复制')
+        if (showToast) showError(translate('ui.copyFailedPleaseCopyManually'))
         return false
       } finally {
         document.body.removeChild(textArea)
       }
     } catch (err) {
       log.error('复制失败:', err)
-      if (showToast) showError('复制失败，请手动选择文本进行复制')
+      if (showToast) showError(translate('ui.copyFailedSelectTheTextAndCopyItManually'))
       return false
     }
   }

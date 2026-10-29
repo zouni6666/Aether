@@ -7,11 +7,11 @@
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>时间</TableHead>
-            <TableHead>类型</TableHead>
-            <TableHead>金额</TableHead>
-            <TableHead>余额变化</TableHead>
-            <TableHead>说明</TableHead>
+            <TableHead>{{ t('ui.time') }}</TableHead>
+            <TableHead>{{ t('ui.typeba40014') }}</TableHead>
+            <TableHead>{{ t('ui.amount') }}</TableHead>
+            <TableHead>{{ t('ui.balanceChanges') }}</TableHead>
+            <TableHead>{{ t('ui.description') }}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -20,7 +20,7 @@
               colspan="5"
               class="py-10 text-center text-muted-foreground"
             >
-              {{ legacyT('加载中...') }}
+              {{ t('common.loading') }}
             </TableCell>
           </TableRow>
           <TableRow
@@ -55,8 +55,7 @@
                 v-if="tx.recharge_balance_before !== null && tx.recharge_balance_before !== undefined && tx.gift_balance_before !== null && tx.gift_balance_before !== undefined"
                 class="text-[11px] text-muted-foreground mt-0.5"
               >
-                充 {{ formatFixed(tx.recharge_balance_before, 4) }}→{{ formatFixed(tx.recharge_balance_after, 4) }}
-                · 赠 {{ formatFixed(tx.gift_balance_before, 4) }}→{{ formatFixed(tx.gift_balance_after, 4) }}
+                {{ t('ui.paid') }} {{ formatFixed(tx.recharge_balance_before, 4) }}→{{ formatFixed(tx.recharge_balance_after, 4) }} {{ t('ui.gift') }} {{ formatFixed(tx.gift_balance_before, 4) }}→{{ formatFixed(tx.gift_balance_after, 4) }}
               </div>
             </TableCell>
             <TableCell class="text-xs text-muted-foreground max-w-[260px] truncate">
@@ -69,8 +68,8 @@
               class="py-10"
             >
               <EmptyState
-                title="暂无资金流水"
-                description="当前钱包没有资金动作记录"
+                :title="t('ui.noWalletLedgerEntries')"
+                :description="t('ui.noBalanceOperationRecordsForThisWallet')"
               />
             </TableCell>
           </TableRow>
@@ -85,10 +84,10 @@ import { useI18n, getI18nLocale } from '@/i18n'
 import { Badge, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui'
 import { EmptyState } from '@/components/common'
 import type { WalletTransaction } from '@/api/wallet'
-import { walletTransactionCategoryLabel, walletTransactionReasonLabel } from '@/utils/walletDisplay'
+import { walletTransactionCategoryLabel, walletTransactionReasonLabel } from '@/features/wallet/utils/walletDisplay'
 
 const props = defineProps<{ items: WalletTransaction[]; loading?: boolean; timezone?: string }>()
-const { legacyT } = useI18n()
+const { t } = useI18n()
 function formatDateTime(value?: string | null) {
   if (!value) return '-'
   return new Date(value).toLocaleString(getI18nLocale(), {

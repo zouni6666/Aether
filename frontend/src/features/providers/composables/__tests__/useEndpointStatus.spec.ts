@@ -60,6 +60,17 @@ describe('endpoint health display', () => {
 })
 
 describe('getEndpointTooltip', () => {
+  it.each([
+    [{ is_active: false }, 'Endpoint disabled'],
+    [{ active_keys: 0, total_keys: 0 }, 'No keys configured'],
+    [{ active_keys: 0 }, 'No available keys'],
+    [{ health_score: null }, 'No health data'],
+    [{ health_score: 0.85 }, 'Health 85%'],
+  ])('uses the requested language for endpoint status %j', (overrides, expected) => {
+    expect(getEndpointTooltip({ ...availableEndpoint, ...overrides } as EndpointHealthDetail, 'en-US'))
+      .toBe(`OpenAI Chat: ${expected}`)
+  })
+
   it('formats the internal Codex Live id at the user-visible tooltip boundary', () => {
     const tooltip = getEndpointTooltip({
       api_format: 'codex:live',

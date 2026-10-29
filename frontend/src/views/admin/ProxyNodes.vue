@@ -102,6 +102,7 @@ import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
+import { useClientPagination } from '@/composables/useClientPagination'
 import { useI18n } from '@/i18n'
 import { clearModelsDevCache } from '@/api/models-dev'
 import {
@@ -117,32 +118,29 @@ import {
 
 import { Card } from '@/components/ui'
 import { parseApiError } from '@/utils/errorParser'
-import { parseBatchProxyNodeInput } from './proxy-node-batch'
-import { proxyNodeDeleteSuccessMessage } from './proxy-node-delete-feedback'
-import ProxyNodeBatchUpgradeDialog from './components/ProxyNodeBatchUpgradeDialog.vue'
-import ProxyNodeEventsDialog from './components/ProxyNodeEventsDialog.vue'
-import ProxyNodeFormDialog from './components/ProxyNodeFormDialog.vue'
-import ProxyNodeHeader from './components/ProxyNodeHeader.vue'
-import ProxyNodeList from './components/ProxyNodeList.vue'
-import ProxyNodeRemoteConfigDialog from './components/ProxyNodeRemoteConfigDialog.vue'
+import { parseBatchProxyNodeInput } from '@/features/proxy-nodes/utils/proxy-node-batch'
+import { proxyNodeDeleteSuccessMessage } from '@/features/proxy-nodes/utils/proxy-node-delete-feedback'
+import ProxyNodeBatchUpgradeDialog from '@/features/proxy-nodes/components/ProxyNodeBatchUpgradeDialog.vue'
+import ProxyNodeEventsDialog from '@/features/proxy-nodes/components/ProxyNodeEventsDialog.vue'
+import ProxyNodeFormDialog from '@/features/proxy-nodes/components/ProxyNodeFormDialog.vue'
+import ProxyNodeHeader from '@/features/proxy-nodes/components/ProxyNodeHeader.vue'
+import ProxyNodeList from '@/features/proxy-nodes/components/ProxyNodeList.vue'
+import ProxyNodeRemoteConfigDialog from '@/features/proxy-nodes/components/ProxyNodeRemoteConfigDialog.vue'
 import PoolProxyDistributionDialog from '@/features/pool/components/PoolProxyDistributionDialog.vue'
 
 const { success, error: toastError } = useToast()
 const { confirmDanger } = useConfirm()
 const { copyToClipboard } = useClipboard()
-const { legacyT, locale } = useI18n()
+const { t, locale } = useI18n()
 const store = useProxyNodesStore()
 
 const searchQuery = ref('')
 const filterStatus = ref('all')
 const proxyNodeStatusFilterOptions = [
-  { value: 'all', label: '全部状态' },
-  { value: 'online', label: '在线' },
-  { value: 'offline', label: '离线' },
+  { value: 'all', get label() { return t('ui.allStatuses') } },
+  { value: 'online', get label() { return t('vscodex.devices.online') } },
+  { value: 'offline', get label() { return t('vscodex.devices.offline') } },
 ]
-const currentPage = ref(1)
-const pageSize = ref(20)
-
 // 手动添加/编辑对话框
 const showAddDialog = ref(false)
 const showPoolProxyDistributionDialog = ref(false)
@@ -177,12 +175,10 @@ const proxyInstallCommand = computed(() => {
 
 const proxyInstallHint = computed(() => {
   if (!proxyInstallSession.value) {
-    return '脚本会自动安装或更新代理程序，并保留已有配置。'
+    return t('ui.theScriptInstallsOrUpdatesTheProxyProgramAndPreserves')
   }
   const minutes = Math.floor(proxyInstallSession.value.expires_in_seconds / 60)
-  return locale.value === 'en-US'
-    ? `This command is valid for ${minutes} minutes and expires immediately after successful use.`
-    : `这条命令将在 ${minutes} 分钟内有效，成功使用后立即失效。`
+  return t('feedback.proxy.installExpiry', { minutes })
 })
 
 const batchParseResult = computed(() => parseBatchProxyNodeInput(batchForm.value.content))
@@ -242,14 +238,9 @@ const filteredNodes = computed(() => {
   return filtered
 })
 
-const paginatedNodes = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return filteredNodes.value.slice(start, start + pageSize.value)
-})
+const { currentPage, pageSize, pageItems: paginatedNodes, resetPage } = useClientPagination(filteredNodes)
 
-watch([searchQuery, filterStatus], () => {
-  currentPage.value = 1
-})
+watch([searchQuery, filterStatus], resetPage)
 
 watch(() => installForm.value.node_name, () => {
   resetProxyInstallState()
@@ -274,17 +265,17 @@ async function refresh() {
 
 function formatConnectivityTestParts(result: ProxyNodeTestResult): string[] {
   const parts = [
-    `${legacyT('探测')}: ${formatConnectivityProbe(result.probe_url)}`,
-    `${legacyT('超时')}: ${result.timeout_secs}s`,
-    `${legacyT('延迟')}: ${result.latency_ms != null ? `${result.latency_ms}ms` : legacyT('暂无样本')}`,
+    `${t('ui.probe')}: ${formatConnectivityProbe(result.probe_url)}`,
+    `${t('ui.timeoute512cf0')}: ${result.timeout_secs}s`,
+    `${t('ui.latency')}: ${result.latency_ms != null ? `${result.latency_ms}ms` : t('ui.noSample')}`,
   ]
-  if (result.exit_ip) parts.push(`${legacyT('出口 IP')}: ${result.exit_ip}`)
+  if (result.exit_ip) parts.push(`${t('ui.exitIp')}: ${result.exit_ip}`)
   return parts
 }
 
 function formatConnectivityResult(message: string, result: ProxyNodeTestResult): string {
   const separator = locale.value === 'en-US' ? ', ' : '，'
-  return `${legacyT(message)}${separator}${formatConnectivityTestParts(result).join(separator)}`
+  return `${message}${separator}${formatConnectivityTestParts(result).join(separator)}`
 }
 
 function formatConnectivityProbe(probeUrl: string) {
@@ -306,15 +297,13 @@ async function handleTestUrl() {
       password: addForm.value.password || undefined,
     })
     if (result.success) {
-      success(formatConnectivityResult('连通性测试通过', result))
+      success(formatConnectivityResult(t('ui.connectivityTestPassed'), result))
     } else {
       const details = formatConnectivityTestParts(result).join(locale.value === 'en-US' ? ', ' : '，')
-      toastError(locale.value === 'en-US'
-        ? `Connectivity test failed (${details}): ${result.error || legacyT('未知错误')}`
-        : `连通性测试失败（${details}）: ${result.error || legacyT('未知错误')}`)
+      toastError(t('feedback.proxy.connectivityFailure', { details, reason: result.error || t('ui.unknownError') }))
     }
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('测试请求失败')))
+    toastError(parseApiError(err, t('ui.testRequestFailed')))
   } finally {
     testingUrl.value = false
   }
@@ -350,9 +339,9 @@ async function refreshProxyInstallCommand() {
   resetProxyInstallState()
   try {
     proxyInstallSession.value = await store.createInstallSession({ node_name: nodeName })
-    success(legacyT('代理节点安装命令已生成'))
+    success(t('ui.proxyNodeInstallCommandGenerated'))
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('生成代理节点安装命令失败')))
+    toastError(parseApiError(err, t('ui.failedToGenerateProxyNodeInstallCommand')))
   } finally {
     installLoading.value = false
   }
@@ -363,7 +352,7 @@ async function copyProxyInstallCommand() {
   const copied = await copyToClipboard(proxyInstallCommand.value, false)
   if (!copied) return
   installCopied.value = true
-  success(legacyT('安装命令已复制到剪贴板'))
+  success(t('ui.installCommandCopiedToClipboard'))
   clearInstallCopiedResetTimer()
   installCopiedResetTimer = setTimeout(() => {
     installCopied.value = false
@@ -387,7 +376,7 @@ async function handleEdit(node: ProxyNode) {
     resetProxyInstallState()
     showAddDialog.value = true
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('读取代理节点详情失败')))
+    toastError(parseApiError(err, t('ui.failedToReadProxyNodeDetails')))
   }
 }
 
@@ -416,11 +405,11 @@ async function handleUpdateManualNode() {
       password: addForm.value.password || undefined,
       region: addForm.value.region || undefined,
     })
-    success(legacyT('代理节点已更新'))
+    success(t('ui.proxyNodeUpdated'))
     handleDialogClose(false)
     await store.fetchNodes()
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('更新失败')))
+    toastError(parseApiError(err, t('update.error.updateFailed')))
   } finally {
     addingNode.value = false
   }
@@ -438,10 +427,10 @@ async function handleAddManualNode() {
       password: addForm.value.password || undefined,
       region: addForm.value.region || undefined,
     })
-    success(legacyT('代理节点已添加'))
+    success(t('ui.proxyNodeAdded'))
     handleDialogClose(false)
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('添加失败')))
+    toastError(parseApiError(err, t('ui.failedToAdd')))
   } finally {
     addingNode.value = false
   }
@@ -451,11 +440,11 @@ async function handleBatchAddManualNodes() {
   const { nodes, errors } = batchParseResult.value
   if (!batchForm.value.content.trim() || addingNode.value) return
   if (errors.length > 0) {
-    toastError(legacyT(`批量输入存在 ${errors.length} 条格式错误，请先修正后再添加`))
+    toastError(t('ui.batchInputHasValueFormatErrorsFixThemBeforeAdding', { count: errors.length }))
     return
   }
   if (nodes.length === 0) {
-    toastError(legacyT('请先输入至少一条代理地址'))
+    toastError(t('ui.enterAtLeastOneProxyAddressFirst'))
     return
   }
 
@@ -469,27 +458,27 @@ async function handleBatchAddManualNodes() {
         await proxyNodesApi.createManualNode(node)
         successCount += 1
       } catch (err: unknown) {
-        failures.push(`${node.name}: ${parseApiError(err, legacyT('添加失败'))}`)
+        failures.push(`${node.name}: ${parseApiError(err, t('ui.failedToAdd'))}`)
       }
     }
 
     await store.fetchNodes()
 
     if (successCount > 0 && failures.length === 0) {
-      success(legacyT(`已添加 ${successCount} 个代理节点`))
+      success(t('ui.addedValueProxyNodes', { count: successCount }))
       handleDialogClose(false)
       return
     }
 
     if (successCount > 0) {
-      success(legacyT(`已添加 ${successCount} 个代理节点，${failures.length} 个失败`))
+      success(t('ui.addedValueProxyNodesValueFailed', { count: successCount, count2: failures.length }))
     }
 
     if (failures.length > 0) {
       toastError(failures.slice(0, 3).join('；'))
     }
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('批量添加失败')))
+    toastError(parseApiError(err, t('ui.batchAddFailed')))
   } finally {
     addingNode.value = false
   }
@@ -545,11 +534,11 @@ async function handleSaveConfig() {
       data.upgrade_to = null
     }
     await proxyNodesApi.updateNodeConfig(configNode.value.id, data)
-    success(legacyT('远程配置已保存，将在下次心跳时生效'))
+    success(t('ui.remoteConfigSavedItWillTakeEffectOnTheNext'))
     handleConfigDialogClose(false)
     await store.fetchNodes()
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('保存失败')))
+    toastError(parseApiError(err, t('ui.failedToSave')))
   } finally {
     savingConfig.value = false
   }
@@ -562,14 +551,14 @@ async function handleBatchUpgrade() {
   try {
     const result = await proxyNodesApi.batchUpgrade(version)
     if (result.updated > 0) {
-      success(legacyT(`已向 ${result.updated} 个节点写入升级目标 ${result.version}，${result.skipped} 个节点无需变更`))
+      success(t('ui.wroteUpgradeTargetValueToValueNodesValueNodesDid', { value: result.updated, version: result.version, value3: result.skipped }))
     } else {
-      success(legacyT(`当前没有需要变更的 tunnel 节点，目标版本仍为 ${result.version}`))
+      success(t('ui.noTunnelNodesNeedChangesTargetVersionRemainsValue', { version: result.version }))
     }
     resetBatchUpgradeDialog()
     await store.fetchNodes()
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('批量升级下发失败')))
+    toastError(parseApiError(err, t('ui.failedToDispatchBatchUpgrade')))
   } finally {
     batchUpgrading.value = false
   }
@@ -591,10 +580,8 @@ function handleBatchUpgradeDialogOpen(open: boolean) {
 async function handleDelete(node: ProxyNode) {
   const address = node.tunnel_mode ? node.ip : `${node.ip}:${node.port}`
   const confirmed = await confirmDanger(
-    locale.value === 'en-US'
-      ? `Delete proxy node "${node.name}" (${address})?`
-      : `确定要删除代理节点 "${node.name}" (${address}) 吗？`,
-    legacyT('删除节点')
+    t('feedback.proxy.deleteConfirm', { name: node.name, address }),
+    t('ui.deleteNode')
   )
   if (!confirmed) return
 
@@ -604,12 +591,12 @@ async function handleDelete(node: ProxyNode) {
       clearModelsDevCache()
     }
     await store.fetchNodes()
-    success(legacyT(proxyNodeDeleteSuccessMessage(
+    success(proxyNodeDeleteSuccessMessage(
       result.cleared_system_proxy,
       result.cleared_external_models_proxy,
-    )))
+    ))
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('删除失败')))
+    toastError(parseApiError(err, t('ui.deletionFailed')))
   }
 }
 
@@ -620,15 +607,13 @@ async function handleTest(node: ProxyNode) {
   try {
     const result = await proxyNodesApi.testNode(node.id)
     if (result.success) {
-      success(formatConnectivityResult('连通性测试通过', result))
+      success(formatConnectivityResult(t('ui.connectivityTestPassed'), result))
     } else {
       const details = formatConnectivityTestParts(result).join(locale.value === 'en-US' ? ', ' : '，')
-      toastError(locale.value === 'en-US'
-        ? `Connectivity test failed (${details}): ${result.error || legacyT('未知错误')}`
-        : `连通性测试失败（${details}）: ${result.error || legacyT('未知错误')}`)
+      toastError(t('feedback.proxy.connectivityFailure', { details, reason: result.error || t('ui.unknownError') }))
     }
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('测试请求失败')))
+    toastError(parseApiError(err, t('ui.testRequestFailed')))
   } finally {
     testingNodes.value.delete(node.id)
   }
@@ -695,7 +680,7 @@ async function loadNodeDetails(node: ProxyNode) {
   } catch (err: unknown) {
     updateNodeDetailState(node.id, {
       loading: false,
-      error: parseApiError(err, legacyT('加载节点数据失败')),
+      error: parseApiError(err, t('ui.failedToLoadNodeData')),
     })
   }
 }
@@ -708,7 +693,7 @@ async function handleViewEvents(node: ProxyNode) {
     const res = await proxyNodesApi.listNodeEvents(node.id, { limit: 50 })
     nodeEvents.value = res.items
   } catch (err: unknown) {
-    toastError(parseApiError(err, legacyT('加载事件失败')))
+    toastError(parseApiError(err, t('ui.failedToLoadEvents')))
   } finally {
     loadingEvents.value = false
   }

@@ -1,3 +1,5 @@
+
+import { translate as t } from '@/i18n'
 export interface ProviderKeyBatchImportItem {
   lineNumber: number
   name: string
@@ -38,29 +40,29 @@ export function parseProviderKeyBatchImport(input: string): ProviderKeyBatchImpo
 
     const named = splitNamedKey(line)
     if (!named) {
-      errors.push({ lineNumber, message: `格式应为 名称${PROVIDER_KEY_BATCH_SEPARATOR}Key` })
+      errors.push({ lineNumber, message: t('providers.migration.expectedFormatNamekeye6fde4', { value: String(PROVIDER_KEY_BATCH_SEPARATOR) }) })
       continue
     }
     const name = named.name.trim()
     const apiKey = named.apiKey.trim()
     if (!name) {
-      errors.push({ lineNumber, message: '名称不能为空' })
+      errors.push({ lineNumber, message: t('ui.nameIsRequired') })
       continue
     }
     if (!apiKey) {
-      errors.push({ lineNumber, message: 'Key 不能为空' })
+      errors.push({ lineNumber, message: t('ui.keyIsRequired') })
       continue
     }
     if (name.length > 100) {
-      errors.push({ lineNumber, message: '名称不能超过 100 个字符' })
+      errors.push({ lineNumber, message: t('ui.nameMustBe100CharactersOrFewer') })
       continue
     }
     if (seenKeys.has(apiKey)) {
-      errors.push({ lineNumber, message: 'Key 与前面行重复' })
+      errors.push({ lineNumber, message: t('providers.migration.keyDuplicatesAPreviousLine27c033') })
       continue
     }
     if (seenNames.has(name)) {
-      errors.push({ lineNumber, message: '名称与前面行重复' })
+      errors.push({ lineNumber, message: t('providers.migration.nameDuplicatesAPreviousLinea01e91') })
       continue
     }
 

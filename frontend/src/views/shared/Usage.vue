@@ -8,7 +8,7 @@
       <button
         v-if="!hasScopedRecordFilters"
         class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-        :title="statsExpanded ? '收起用量分析' : '展开用量分析'"
+        :title="statsExpanded ? t('ui.collapseUsageAnalysis') : t('ui.expandUsageAnalysis')"
         @click="statsExpanded = !statsExpanded"
       >
         <PanelTopClose
@@ -34,7 +34,7 @@
       >
         <ActivityHeatmapCard
           :data="activityHeatmapData"
-          title="我的活跃天数"
+          :title="t('ui.myActiveDays')"
           :is-loading="isLoadingHeatmap"
           :has-error="heatmapError"
         />
@@ -169,6 +169,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { mergeUsageBillingSnapshot } from '@/features/usage/utils/usageBilling'
 import { useRoute, useRouter } from 'vue-router'
@@ -180,19 +183,15 @@ import { usersApi } from '@/api/users'
 import { meApi } from '@/api/me'
 import { dashboardApi } from '@/api/dashboard'
 import { PanelTopClose, PanelTopOpen, X } from 'lucide-vue-next'
-import {
-  UsageModelTable,
-  UsageProviderTable,
-  UsageApiFormatTable,
-  UsageRecordsTable,
-  ActivityHeatmapCard,
-  RequestDetailDrawer,
-  IntervalTimelineCard
-} from '@/features/usage/components'
-import {
-  useUsageData,
-  getDateRangeFromPeriod
-} from '@/features/usage/composables'
+import UsageModelTable from '@/features/usage/components/UsageModelTable.vue'
+import UsageProviderTable from '@/features/usage/components/UsageProviderTable.vue'
+import UsageApiFormatTable from '@/features/usage/components/UsageApiFormatTable.vue'
+import UsageRecordsTable from '@/features/usage/components/UsageRecordsTable.vue'
+import ActivityHeatmapCard from '@/features/usage/components/ActivityHeatmapCard.vue'
+import RequestDetailDrawer from '@/features/usage/components/RequestDetailDrawer.vue'
+import IntervalTimelineCard from '@/features/usage/components/IntervalTimelineCard.vue'
+import { useUsageData } from '@/features/usage/composables/useUsageData'
+import { getDateRangeFromPeriod } from '@/features/usage/composables/useDateRange'
 import { reconcileActiveRequestDiscovery } from '@/features/usage/utils/activeRequestDiscovery'
 import {
   mergeUsageRecordErrorMessage,
@@ -206,15 +205,25 @@ import {
   isUsageRecordFailed,
   isUsageUpstreamStream,
   isUsageWebSocket,
-  normalizeRequestStatus,
   resolveDisplayRequestStatus,
 } from '@/features/usage/utils/status'
 import { matchesUsageRecordSearch } from '@/features/usage/utils/recordSearch'
 import {
+  sameImageProgress,
+  resolveDetailUpdateStatus,
+} from '@/features/usage/utils/detailRequestState'
+import {
+  hasUnknownModelOrProvider,
+} from '@/features/usage/utils/recordFilterPolicy'
+import {
+  getIntervalTimelineHours,
+  formatIntervalTimelineWindow,
+} from '@/features/usage/utils/intervalTimeline'
+import {
   isUserLocalOnlyRecordStatus,
   shouldUseServerUserRecordFilters,
 } from '@/features/usage/utils/recordFilterPolicy'
-import type { DateRangeParams, FilterStatusValue, RequestStatus, UsageRecord } from '@/features/usage/types'
+import type { DateRangeParams, FilterStatusValue, RequestStatus } from '@/features/usage/types'
 import type { UserOption } from '@/features/usage/components/UsageRecordsTable.vue'
 import { log } from '@/utils/logger'
 import type { ActivityHeatmap } from '@/types/activity'
@@ -246,44 +255,6 @@ const timeRange = ref<DateRangeParams>(
 const currentPage = ref(1)
 const pageSize = ref(20)
 const pageSizeOptions = [10, 20, 50, 100]
-
-function clampIntervalTimelineHours(hours: number): number {
-  return Math.min(720, Math.max(1, Math.ceil(hours)))
-}
-
-function getIntervalTimelineHours(dateRange: DateRangeParams): number {
-  switch (dateRange.preset) {
-    case 'yesterday':
-      return 48
-    case 'last7days':
-      return 24 * 7
-    case 'last30days':
-      return 24 * 30
-    case 'last90days':
-      return 24 * 30
-    case 'today':
-      return 24
-    default:
-      break
-  }
-
-  if (dateRange.start_date && dateRange.end_date) {
-    const start = new Date(`${dateRange.start_date}T00:00:00`)
-    const end = new Date(`${dateRange.end_date}T23:59:59`)
-    const diffMs = end.getTime() - start.getTime()
-    if (!Number.isNaN(diffMs) && diffMs >= 0) {
-      return clampIntervalTimelineHours(diffMs / (1000 * 60 * 60))
-    }
-  }
-
-  return 24
-}
-
-function formatIntervalTimelineWindow(hours: number): string {
-  if (hours === 24) return '最近24小时'
-  if (hours % 24 === 0) return `最近${hours / 24}天`
-  return `最近${hours}小时`
-}
 
 // 筛选状态
 const filterSearch = ref('')
@@ -407,14 +378,14 @@ async function refreshAdminAnalytics(options: { force?: boolean; preserveOnFailu
       }
       hasSuccessfulRefresh = !hadFailure
       if (hadFailure) {
-        warning('统计数据加载失败，请刷新重试')
+        warning(t('ui.failedToLoadStatisticsRefreshToTryAgain'))
       }
     } catch (error) {
       if (refreshGeneration !== adminAnalyticsRefreshGeneration) {
         return
       }
       log.error('加载统计数据失败:', error)
-      warning('统计数据加载失败，请刷新重试')
+      warning(t('ui.failedToLoadStatisticsRefreshToTryAgain'))
     }
 
     if (hasSuccessfulRefresh && refreshGeneration === adminAnalyticsRefreshGeneration) {
@@ -445,18 +416,6 @@ function getCurrentStatsFilters() {
 async function refreshAdminAnalyticsForSelectionChange() {
   if (!isAdminPage.value) return
   await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
-}
-
-function isUnknownUsageLabel(value: unknown): boolean {
-  if (typeof value !== 'string') return false
-  const normalized = value.trim().toLowerCase()
-  return normalized === 'unknown' || normalized === 'unknow'
-}
-
-function hasUnknownModelOrProvider(record: UsageRecord): boolean {
-  if (isUnknownUsageLabel(record.model)) return true
-  if (isUnknownUsageLabel(record.provider)) return true
-  return false
 }
 
 // 用户页面需要前端筛选；隐藏 unknown 的开关对管理员当前页也生效。
@@ -972,7 +931,6 @@ const availableClientFamilies = computed(() => {
   return Array.from(families).sort()
 })
 
-
 // 详情弹窗状态
 const detailModalOpen = ref(false)
 const selectedRequestId = ref<string | null>(null)
@@ -1063,7 +1021,7 @@ onMounted(async () => {
     await Promise.allSettled([
       loadStats(timeRange.value).catch(err => {
         log.error('加载统计数据失败:', err)
-        warning('统计数据加载失败，请刷新重试')
+        warning(t('ui.failedToLoadStatisticsRefreshToTryAgain'))
       }),
       loadHeatmapData().catch(err => {
         log.error('加载热力图数据失败:', err)
@@ -1251,21 +1209,6 @@ function showRequestDetail(id: string) {
 function closeRequestDetail() {
   detailModalOpen.value = false
   void router.replace({ query: { ...route.query, detail_id: undefined } })
-}
-
-function sameImageProgress(left?: ImageProgress | null, right?: ImageProgress | null): boolean {
-  if (!left && !right) return true
-  if (!left || !right) return false
-  return left.phase === right.phase &&
-    left.upstream_ttfb_ms === right.upstream_ttfb_ms &&
-    left.upstream_sse_frame_count === right.upstream_sse_frame_count &&
-    left.last_upstream_event === right.last_upstream_event &&
-    left.last_upstream_frame_at_unix_ms === right.last_upstream_frame_at_unix_ms &&
-    left.partial_image_count === right.partial_image_count &&
-    left.last_client_visible_event === right.last_client_visible_event &&
-    left.downstream_heartbeat_count === right.downstream_heartbeat_count &&
-    left.last_downstream_heartbeat_at_unix_ms === right.last_downstream_heartbeat_at_unix_ms &&
-    left.downstream_heartbeat_interval_ms === right.downstream_heartbeat_interval_ms
 }
 
 function handleDetailRequestState(update: {
@@ -1471,24 +1414,6 @@ function handleDetailRequestState(update: {
       record.image_progress = nextProgress
     }
   }
-}
-
-function resolveDetailUpdateStatus(update: {
-  status?: RequestStatus
-  statusCode?: number | null
-  imageProgress?: ImageProgress | null
-  errorMessage?: string | null
-}): RequestStatus | undefined {
-  const status = normalizeRequestStatus(update.status)
-  const hasFailureSignal =
-    (typeof update.statusCode === 'number' && update.statusCode >= 400) ||
-    (typeof update.errorMessage === 'string' && update.errorMessage.trim().length > 0) ||
-    update.imageProgress?.phase === 'failed'
-
-  if ((status == null || status === 'pending' || status === 'streaming') && hasFailureSignal) {
-    return 'failed'
-  }
-  return status
 }
 
 function prefetchRequestDetail(id: string) {

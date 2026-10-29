@@ -4,8 +4,8 @@
     size="icon"
     class="h-8 w-5 touch-none select-none cursor-grab text-muted-foreground/50 hover:text-primary active:cursor-grabbing disabled:cursor-default"
     :disabled="disabled"
-    :title="legacyT('拖动调整当前分组调度优先级，也可使用方向键移动')"
-    :aria-label="`${legacyT('调整调度优先级')}: ${providerName}`"
+    :title="t('ui.dragToChangeSchedulingPriorityInThisGroupOrUse')"
+    :aria-label="`${t('ui.adjustSchedulingPriority')}: ${providerName}`"
     data-provider-drag-handle
     @pointerdown.stop="$emit('pointerdown', $event)"
     @keydown.stop="$emit('keydown', $event)"
@@ -32,5 +32,6 @@ defineEmits<{
   keydown: [event: KeyboardEvent]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
+
 </script>

@@ -1,8 +1,8 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="OAuth 配置"
-      description="配置 OAuth Providers（登录/绑定）"
+      :title="t('ui.oauthConfiguration')"
+      :description="t('ui.configureOauthProvidersForSignInAndAccountLinking')"
     >
       <template #actions>
         <Button
@@ -10,7 +10,7 @@
           :disabled="loading"
           @click="loadAll"
         >
-          刷新
+          {{ t('ui.refresh') }}
         </Button>
       </template>
     </PageHeader>
@@ -22,15 +22,14 @@
           class="flex items-center justify-center gap-1.5 w-full px-3 py-2 rounded-lg border border-dashed border-border text-sm text-muted-foreground hover:border-primary/50 hover:text-primary transition-colors"
           @click="handleClickAdd"
         >
-          <Plus class="w-3.5 h-3.5" />
-          添加配置
+          <Plus class="w-3.5 h-3.5" /> {{ t('ui.addConfiguration') }}
         </button>
 
         <div
           v-if="configuredList.length === 0 && !loading"
           class="text-sm text-muted-foreground px-2 py-4 text-center"
         >
-          暂无配置
+          {{ t('ui.noConfigurations') }}
         </div>
 
         <div class="space-y-0.5">
@@ -49,10 +48,10 @@
             </div>
             <div class="flex-1 min-w-0 text-left">
               <div class="truncate font-medium text-sm">
-                新配置
+                {{ t('ui.newConfiguration') }}
               </div>
               <div class="text-[10px] text-muted-foreground">
-                未保存
+                {{ t('ui.unsaved') }}
               </div>
             </div>
           </button>
@@ -84,7 +83,7 @@
                 {{ item.display_name }}
               </div>
               <div class="text-[10px] text-muted-foreground">
-                {{ item.configured ? (item.is_enabled ? '已启用' : '已禁用') : '未配置' }}
+                {{ item.configured ? (item.is_enabled ? t('ui.enableddfb8022') : t('ui.disabledbc5a87a')) : t('ui.notConfigured') }}
               </div>
             </div>
             <!-- 开关 -->
@@ -108,8 +107,8 @@
         <!-- 配置表单 -->
         <CardSection
           v-if="selectedType"
-          :title="selectedType === '__new__' ? '新建配置' : (selectedTypeMeta?.display_name || selectedType)"
-          :description="selectedType === '__new__' ? '填写后点击保存' : (configs[selectedType]?.is_enabled ? '已启用' : '已禁用')"
+          :title="selectedType === '__new__' ? t('ui.createConfiguration') : (selectedTypeMeta?.display_name || selectedType)"
+          :description="selectedType === '__new__' ? t('ui.completeTheConfigurationThenSave') : (configs[selectedType]?.is_enabled ? t('ui.enableddfb8022') : t('ui.disabledbc5a87a'))"
         >
           <template #actions>
             <div class="flex gap-2">
@@ -119,14 +118,14 @@
                 :disabled="saving || testing"
                 @click="handleTest"
               >
-                {{ testing ? '测试中...' : '测试' }}
+                {{ testing ? t('ui.testing7b6187c') : t('ui.test') }}
               </Button>
               <Button
                 size="sm"
                 :disabled="saving"
                 @click="handleSave"
               >
-                {{ saving ? '保存中...' : '保存' }}
+                {{ saving ? t('ui.saving') : t('ui.save') }}
               </Button>
             </div>
           </template>
@@ -138,16 +137,16 @@
               class="grid grid-cols-1 md:grid-cols-2 gap-4"
             >
               <div>
-                <Label class="block text-sm font-medium">显示名称</Label>
+                <Label class="block text-sm font-medium">{{ t('ui.displayName') }}</Label>
                 <Input
                   v-model="form.new_display_name"
                   class="mt-1"
-                  placeholder="例如：My OIDC Provider"
+                  :placeholder="t('ui.forExampleMyOidcProvider')"
                   autocomplete="off"
                 />
               </div>
               <div>
-                <Label class="block text-sm font-medium">配置标识</Label>
+                <Label class="block text-sm font-medium">{{ t('ui.configurationIdentifier') }}</Label>
                 <Input
                   v-model="form.new_provider_type"
                   class="mt-1"
@@ -175,7 +174,7 @@
                   v-model="form.client_secret"
                   masked
                   class="mt-1"
-                  :placeholder="hasSecret ? '已设置（留空保持不变）' : '请输入 secret'"
+                  :placeholder="hasSecret ? t('ui.setLeaveEmptyToKeepUnchanged') : t('ui.enterTheSecret')"
                 />
               </div>
             </div>
@@ -183,7 +182,7 @@
             <!-- 回调地址 -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <Label class="block text-sm font-medium">Redirect URI（后端回调）</Label>
+                <Label class="block text-sm font-medium">{{ t('ui.redirectUriServerCallback') }}</Label>
                 <Input
                   v-model="form.redirect_uri"
                   class="mt-1"
@@ -192,7 +191,7 @@
                 />
               </div>
               <div>
-                <Label class="block text-sm font-medium">前端回调页</Label>
+                <Label class="block text-sm font-medium">{{ t('ui.frontendCallbackPage') }}</Label>
                 <Input
                   v-model="form.frontend_callback_url"
                   class="mt-1"
@@ -238,7 +237,7 @@
 
             <!-- 图标 URL -->
             <div>
-              <Label class="block text-sm font-medium">图标 URL</Label>
+              <Label class="block text-sm font-medium">{{ t('ui.iconUrl') }}</Label>
               <Input
                 v-model="form.icon_url"
                 class="mt-1"
@@ -246,14 +245,14 @@
                 autocomplete="off"
               />
               <p class="mt-1 text-xs text-muted-foreground">
-                登录页显示的 Provider 图标，留空使用默认图标
+                {{ t('ui.providerIconShownOnTheSignInPageLeaveEmpty') }}
               </p>
             </div>
 
             <!-- 高级选项（折叠） -->
             <details class="group">
               <summary class="cursor-pointer text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">
-                高级选项
+                {{ t('ui.advancedOptions') }}
               </summary>
               <div class="mt-4 space-y-4 pl-4 border-l-2 border-border">
                 <div>
@@ -261,11 +260,11 @@
                   <Input
                     v-model="form.scopes_input"
                     class="mt-1"
-                    :placeholder="selectedTypeMeta?.default_scopes?.join(' ') || '留空使用默认值'"
+                    :placeholder="selectedTypeMeta?.default_scopes?.join(' ') || t('ui.leaveEmptyToUseTheDefaultValue')"
                     autocomplete="off"
                   />
                   <p class="mt-1 text-xs text-muted-foreground">
-                    空格/逗号分隔；留空使用默认值
+                    {{ t('ui.separateValuesWithSpacesOrCommasLeaveEmptyToUse') }}
                   </p>
                 </div>
 
@@ -279,7 +278,7 @@
                     <Input
                       v-model="form.authorization_url_override"
                       class="mt-1"
-                      :placeholder="selectedTypeMeta?.default_authorization_url || '默认'"
+                      :placeholder="selectedTypeMeta?.default_authorization_url || t('ui.default844b8cc')"
                       autocomplete="off"
                     />
                   </div>
@@ -288,7 +287,7 @@
                     <Input
                       v-model="form.token_url_override"
                       class="mt-1"
-                      :placeholder="selectedTypeMeta?.default_token_url || '默认'"
+                      :placeholder="selectedTypeMeta?.default_token_url || t('ui.default844b8cc')"
                       autocomplete="off"
                     />
                   </div>
@@ -297,7 +296,7 @@
                     <Input
                       v-model="form.userinfo_url_override"
                       class="mt-1"
-                      :placeholder="selectedTypeMeta?.default_userinfo_url || '默认'"
+                      :placeholder="selectedTypeMeta?.default_userinfo_url || t('ui.default844b8cc')"
                       autocomplete="off"
                     />
                   </div>
@@ -327,7 +326,7 @@
                       v-if="isSelectedCustomProvider"
                       class="mt-1 text-xs text-muted-foreground"
                     >
-                      自定义 OIDC 必填；填写 Authorization / Token / Userinfo URL 所属域名。
+                      {{ t('ui.requiredForCustomOidcEnterTheDomainsUsedByThe') }}
                     </p>
                   </div>
                 </div>
@@ -339,7 +338,7 @@
             class="mt-6 rounded-lg border border-border p-4 text-sm"
           >
             <div class="font-medium mb-2">
-              测试结果
+              {{ t('ui.testResults') }}
             </div>
             <div class="flex flex-wrap gap-4 text-xs">
               <div class="flex items-center gap-2">
@@ -378,6 +377,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { computed, onMounted, ref } from 'vue'
 import { Plus } from 'lucide-vue-next'
 import { oauthApi, type OAuthProviderAdminConfig, type OAuthProviderTestResponse, type SupportedOAuthType } from '@/api/oauth'
@@ -632,7 +634,6 @@ function parseJsonOrNull(input: string): Record<string, unknown> | null {
   return JSON.parse(raw)
 }
 
-
 function syncFormFromSelected() {
   lastTestResult.value = null
   const cfg = configs.value[selectedType.value]
@@ -679,7 +680,7 @@ async function toggleProviderEnabled(providerType: string, enabled: boolean, for
       force,
     }
     await oauthApi.admin.upsertProviderConfig(providerType, payload)
-    success(enabled ? '已启用' : '已禁用')
+    success(enabled ? t('ui.enableddfb8022') : t('ui.disabledbc5a87a'))
     await loadAll()
   } catch (err: unknown) {
     // 检查是否是需要确认的冲突错误
@@ -689,7 +690,7 @@ async function toggleProviderEnabled(providerType: string, enabled: boolean, for
         const affectedCount = errorData.details?.affected_count ?? 0
         const confirmed = await confirmWarning(
           `禁用该 Provider 会导致 ${affectedCount} 个用户无法登录，是否继续？`,
-          '确认禁用'
+          t('ui.confirmDisabling')
         )
         if (confirmed) {
           await toggleProviderEnabled(providerType, enabled, true)
@@ -754,7 +755,7 @@ async function handleSave() {
     }
 
     await oauthApi.admin.upsertProviderConfig(providerType, payload)
-    success('保存成功')
+    success(t('ui.saved'))
     const savedType = providerType
     await loadAll()
     selectedType.value = savedType
@@ -799,4 +800,5 @@ async function handleTest() {
 onMounted(async () => {
   await loadAll()
 })
+
 </script>

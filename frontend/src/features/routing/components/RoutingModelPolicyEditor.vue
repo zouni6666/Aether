@@ -2,14 +2,14 @@
   <div class="space-y-3">
     <div class="flex items-center justify-between gap-3">
       <h3 class="text-sm font-medium">
-        模型策略
+        {{ t('ui.modelPolicy') }}
       </h3>
       <button
         type="button"
         class="rounded-md border border-border px-3 py-1.5 text-xs"
         @click="addPolicy"
       >
-        添加
+        {{ t('ui.add') }}
       </button>
     </div>
 
@@ -21,13 +21,13 @@
       <input
         v-model="policy.model"
         class="h-9 rounded-md border border-border bg-background px-3 text-sm"
-        placeholder="模型"
+        :placeholder="t('ui.model')"
         @change="commit"
       >
       <input
         :value="policy.allowed_providers.join(', ')"
         class="h-9 rounded-md border border-border bg-background px-3 text-sm"
-        placeholder="允许 Provider"
+        :placeholder="t('ui.allowedProviderscd4dd1b')"
         @change="event => updateProviders(index, event)"
       >
       <button
@@ -35,13 +35,15 @@
         class="rounded-md border border-border px-3 text-xs text-muted-foreground"
         @click="removePolicy(index)"
       >
-        删除
+        {{ t('ui.delete') }}
       </button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, watch } from 'vue'
 
 import { createEmptyModelPolicy, type RoutingModelPolicy } from '../utils/routingPolicy'
@@ -53,6 +55,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:model-policies': [value: RoutingModelPolicy[]]
 }>()
+
+const { t } = useI18n()
 
 const draftPolicies = ref<RoutingModelPolicy[]>(props.modelPolicies.map(policy => ({ ...policy })))
 
@@ -79,4 +83,5 @@ function updateProviders(index: number, event: Event) {
 function commit() {
   emit('update:model-policies', draftPolicies.value.map(policy => ({ ...policy })))
 }
+
 </script>

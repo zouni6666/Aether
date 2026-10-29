@@ -93,21 +93,21 @@ interface Emits {
 
 const props = withDefaults(defineProps<Props>(), {
   type: 'warning',
-  confirmText: '确认',
-  cancelText: '取消',
+  confirmText: undefined,
+  cancelText: undefined,
   loading: false
 })
 
 const emit = defineEmits<Emits>()
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
-const displayTitle = computed(() => legacyT(props.title))
-const displayConfirmText = computed(() => legacyT(props.confirmText))
-const displayCancelText = computed(() => legacyT(props.cancelText))
+const displayTitle = computed(() => props.title)
+const displayConfirmText = computed(() => props.confirmText ?? t('ui.confirm'))
+const displayCancelText = computed(() => props.cancelText ?? t('common.cancel'))
 
 // 解析描述文本为多行
 const descriptionLines = computed(() => {
-  return legacyT(props.description).split('\n').filter(line => line.trim())
+  return props.description.split('\n').filter(line => line.trim())
 })
 
 function escapeHtml(raw: string): string {

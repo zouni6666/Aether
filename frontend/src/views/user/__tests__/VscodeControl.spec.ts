@@ -21,7 +21,7 @@ vi.mock('@/i18n', async (importOriginal) => {
     useI18n: () => ({
       locale,
       t: (key: string) => key,
-      legacyT: (value: string) => value,
+
     }),
   }
 })

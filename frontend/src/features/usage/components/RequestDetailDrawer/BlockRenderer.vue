@@ -61,7 +61,7 @@
         <img
           v-if="block.src"
           :src="block.src"
-          :alt="block.alt || '图片'"
+          :alt="block.alt || t('ui.image')"
           class="max-w-full max-h-[400px] rounded-lg"
         >
         <div
@@ -69,7 +69,7 @@
           class="flex items-center gap-2 text-muted-foreground text-xs"
         >
           <ImageIcon class="w-4 h-4" />
-          <span>{{ block.mimeType || block.alt || '图片' }}</span>
+          <span>{{ block.mimeType || block.alt || t('ui.image') }}</span>
         </div>
       </div>
 
@@ -155,12 +155,12 @@
       >
         <div class="flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground">
           <FileText class="w-4 h-4" />
-          <span>工具结果</span>
+          <span>{{ t('ui.toolResult') }}</span>
           <Badge
             v-if="block.isError"
             variant="destructive"
           >
-            错误
+            {{ t('ui.error') }}
           </Badge>
         </div>
         <pre class="m-0 p-3 bg-muted/50 font-mono text-xs max-h-[200px] overflow-y-auto whitespace-pre-wrap break-words">{{ block.content }}</pre>
@@ -185,6 +185,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { User, Bot, Settings, Wrench, AlertCircle, ChevronRight, FileText, Image as ImageIcon } from 'lucide-vue-next'
 import Badge from '@/components/ui/badge.vue'
 import type { RenderBlock } from '../../conversation'
@@ -192,6 +194,8 @@ import type { RenderBlock } from '../../conversation'
 defineProps<{
   blocks: RenderBlock[]
 }>()
+
+const { t } = useI18n()
 
 const messageBlockClasses: Record<string, string> = {
   user: 'bg-primary/[0.08] border border-primary/20',
@@ -228,4 +232,5 @@ const getRoleLabel = (role: string) => {
     default: return role
   }
 }
+
 </script>

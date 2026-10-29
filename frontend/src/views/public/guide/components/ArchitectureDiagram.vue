@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useDarkMode } from '@/composables/useDarkMode'
 
@@ -84,6 +87,7 @@ const shadows = computed(() => {
  *   2x Sources->dashed box | 2x Route->Engines
  *   2x Engines->merge/exit | 2x exit->outputs
  */
+
 </script>
 
 <template>
@@ -314,39 +318,39 @@ const shadows = computed(() => {
             class="w-full h-[26px] rounded-xl flex items-center justify-center font-sans text-[10px] font-semibold"
             :style="{ border: `1px solid ${colors.cardBorder}`, color: colors.textMain }"
           >
-            统一模型规范 / 协议聚合
+            {{ t('ui.unifiedModelsProtocolAggregation') }}
           </div>
           <div class="w-full flex gap-1.5">
             <div
               class="flex-1 rounded-full flex items-center justify-center h-[26px] font-sans font-semibold text-[10px]"
               :style="{ backgroundColor: colors.brandSoft, color: colors.textMain }"
             >
-              多端鉴权
+              {{ t('ui.multiClientAuthentication') }}
             </div>
             <div
               class="flex-1 rounded-full flex items-center justify-center h-[26px] font-sans font-semibold text-[10px]"
               :style="{ backgroundColor: colors.brandSoft, color: colors.textMain }"
             >
-              配额管控
+              {{ t('ui.quotaControls') }}
             </div>
             <div
               class="flex-1 rounded-full flex items-center justify-center h-[26px] font-sans font-semibold text-[10px]"
               :style="{ backgroundColor: colors.brandSoft, color: colors.textMain }"
             >
-              全局并发
+              {{ t('ui.globalConcurrency') }}
             </div>
             <div
               class="flex-1 rounded-full flex items-center justify-center h-[26px] font-sans font-semibold text-[10px]"
               :style="{ backgroundColor: colors.brandSoft, color: colors.textMain }"
             >
-              缓存亲和
+              {{ t('ui.cacheAffinity951ca1e') }}
             </div>
           </div>
           <div
             class="w-full h-[28px] rounded-xl flex items-center justify-center font-sans text-[10px] font-semibold"
             :style="{ border: `1px solid ${colors.cardBorder}`, color: colors.textMain }"
           >
-            智能调度 / 故障转移
+            {{ t('ui.smartRoutingFailover') }}
           </div>
         </div>
 
@@ -362,7 +366,7 @@ const shadows = computed(() => {
           <span
             class="font-sans text-[10px] font-bold"
             :style="{ color: colors.textMain }"
-          >格式转换</span>
+          >{{ t('guide.nav.advanced.formatConversion') }}</span>
         </div>
         <div
           class="absolute left-[295px] top-[250px] w-[170px] h-[28px] rounded-full flex items-center justify-center gap-1.5 z-20"
@@ -375,7 +379,7 @@ const shadows = computed(() => {
           <span
             class="font-sans text-[10px] font-bold"
             :style="{ color: colors.textMain }"
-          >反向代理</span>
+          >{{ t('guide.nav.overview.reverseProxy') }}</span>
         </div>
         <div
           class="absolute left-[487px] top-[250px] w-[170px] h-[28px] rounded-full flex items-center justify-center gap-1.5 z-20"
@@ -388,7 +392,7 @@ const shadows = computed(() => {
           <span
             class="font-sans text-[10px] font-bold"
             :style="{ color: colors.textMain }"
-          >原生直通</span>
+          >{{ t('ui.nativePassthrough') }}</span>
         </div>
 
         <!-- Junction dots (z-40, above SVG lines) -->
@@ -436,7 +440,7 @@ const shadows = computed(() => {
             <span
               class="font-sans text-[10px] font-bold"
               :style="{ color: colors.textMain }"
-            >Claude 响应</span>
+            >{{ t('ui.claudeResponse') }}</span>
           </div>
           <div
             class="absolute left-[320px] w-[120px] h-[36px] rounded-full flex items-center justify-center gap-2"
@@ -449,7 +453,7 @@ const shadows = computed(() => {
             <span
               class="font-sans text-[10px] font-bold"
               :style="{ color: colors.textMain }"
-            >OpenAI 响应</span>
+            >{{ t('ui.openaiResponse') }}</span>
           </div>
           <div
             class="absolute left-[512px] w-[120px] h-[36px] rounded-full flex items-center justify-center gap-2"
@@ -462,7 +466,7 @@ const shadows = computed(() => {
             <span
               class="font-sans text-[10px] font-bold"
               :style="{ color: colors.textMain }"
-            >Gemini 响应</span>
+            >{{ t('ui.geminiResponse') }}</span>
           </div>
         </div>
       </div>

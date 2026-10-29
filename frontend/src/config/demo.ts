@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 /**
  * Demo Mode Configuration
  * 用于 GitHub Pages 等静态托管环境的演示模式
@@ -25,13 +26,13 @@ export const DEMO_ACCOUNTS = {
   user: {
     email: 'user@demo.aether.io',
     password: 'demo123',
-    hint: '普通用户'
+    get hint() { return translate('ui.user') }
   }
 } as const
 
 // Demo 模式提示信息
 export const DEMO_MODE_INFO = {
-  title: '演示模式',
+  get title() { return translate('demo.mode') },
   description: '当前处于演示模式，所有数据均为模拟数据，不会产生实际调用。',
   accountHint: '可使用以下演示账号登录：'
 } as const

@@ -1,13 +1,13 @@
 <template>
   <div class="flex flex-col items-center justify-center py-16 text-center">
     <div class="mb-2 text-muted-foreground">
-      {{ legacyT(hasActiveFilters ? '未找到匹配当前筛选条件的提供商' : title || '暂无提供商，点击右上角添加') }}
+      {{ hasActiveFilters ? t('ui.noProvidersMatchTheCurrentFilters') : (title || t('ui.noProvidersYetAddOneFromTheTopRight')) }}
     </div>
     <p
       v-if="!hasActiveFilters && description"
       class="px-4 text-xs text-muted-foreground"
     >
-      {{ legacyT(description) }}
+      {{ description }}
     </p>
     <Button
       v-if="hasActiveFilters"
@@ -15,7 +15,7 @@
       size="sm"
       @click="$emit('resetFilters')"
     >
-      {{ legacyT('清除筛选') }}
+      {{ t('ui.clearFilters') }}
     </Button>
   </div>
 </template>
@@ -34,5 +34,6 @@ defineEmits<{
   resetFilters: []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
+
 </script>

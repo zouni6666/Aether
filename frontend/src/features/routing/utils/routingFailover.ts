@@ -1,3 +1,5 @@
+import { translate as t } from '@/i18n'
+
 export const MAX_ROUTING_FAILOVER_RULES = 64
 export const MAX_ROUTING_FAILOVER_PATTERN_BYTES = 4096
 
@@ -37,25 +39,27 @@ export function normalizeRoutingFailoverPolicy(value?: Partial<RoutingFailoverPo
 
 export function validateRoutingFailoverPolicy(policy: RoutingFailoverPolicy): string | null {
   for (const [name, value] of [
-    ['全局最大转移次数', policy.max_transfer_count],
-    ['全局最大转移时间', policy.max_transfer_timeout_seconds],
+    [t('ui.globalMaximumFailovers'), policy.max_transfer_count],
+    [t('ui.globalMaximumFailoverTime'), policy.max_transfer_timeout_seconds],
   ] as const) {
-    if (!Number.isSafeInteger(value) || value < 0) return `${name}必须是非负整数`
+    if (!Number.isSafeInteger(value) || value < 0) return t('routing.validation.nonnegative', { name })
   }
   for (const [name, entries, success] of [
-    ['成功转移规则', policy.failover_rules.success_failover_patterns, true],
-    ['错误终止规则', policy.failover_rules.error_stop_patterns, false],
+    [t('ui.successfulResponseFailoverRules'), policy.failover_rules.success_failover_patterns, true],
+    [t('ui.errorTerminationRules'), policy.failover_rules.error_stop_patterns, false],
   ] as const) {
-    if (entries.length > MAX_ROUTING_FAILOVER_RULES) return `${name}最多 ${MAX_ROUTING_FAILOVER_RULES} 条`
+    if (entries.length > MAX_ROUTING_FAILOVER_RULES) return t('routing.validation.tooManyRules', { name, count: MAX_ROUTING_FAILOVER_RULES })
     for (const [index, rule] of entries.entries()) {
       if (!rule.pattern.trim() && (success || rule.status_codes.length === 0)) {
-        return `${name}第 ${index + 1} 条需要${success ? '正则表达式' : '状态码或正则表达式'}`
+        return success
+          ? t('routing.validation.patternRequired', { name, index: index + 1 })
+          : t('routing.validation.statusOrPatternRequired', { name, index: index + 1 })
       }
       if (new TextEncoder().encode(rule.pattern.trim()).length > MAX_ROUTING_FAILOVER_PATTERN_BYTES) {
-        return `${name}第 ${index + 1} 条正则过长`
+        return t('routing.validation.patternTooLong', { name, index: index + 1 })
       }
       if (rule.status_codes.some(status => !Number.isInteger(status) || (success ? status !== 200 : status < 400 || status > 599))) {
-        return `${name}第 ${index + 1} 条状态码必须为${success ? ' 200' : ' 400–599'}`
+        return t('routing.validation.invalidStatusCodes', { name, index: index + 1, statuses: success ? '200' : '400–599' })
       }
     }
   }

@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import {
@@ -74,7 +75,7 @@ export const useProxyNodesStore = defineStore('proxy-nodes', () => {
     try {
       return await proxyNodesApi.createInstallSession(data)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '生成代理节点安装命令失败')
+      error.value = parseApiError(err, translate('ui.failedToGenerateProxyNodeInstallCommand'))
       throw err
     }
   }

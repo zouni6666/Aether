@@ -12,12 +12,12 @@
       class="mt-2 border-t border-border/60 pt-2"
     >
       <summary class="cursor-pointer select-none">
-        {{ legacyT('查看批次中断详情') }}
+        {{ t('ui.viewInterruptedBatchDetails') }}
       </summary>
       <div class="mt-2 max-h-32 space-y-1 overflow-auto break-all">
-        <p>{{ legacyT('已完成用户 ID') }}：{{ userIds(result.completed_user_ids) }}</p>
-        <p>{{ legacyT('结果待核对用户 ID') }}：{{ userIds(result.uncertain_user_ids) }}</p>
-        <p>{{ legacyT('尚未执行用户 ID') }}：{{ userIds(result.unprocessed_user_ids) }}</p>
+        <p>{{ t('ui.completedUserIds') }}：{{ userIds(result.completed_user_ids) }}</p>
+        <p>{{ t('ui.userIdsWithUncertainResults') }}：{{ userIds(result.uncertain_user_ids) }}</p>
+        <p>{{ t('ui.unprocessedUserIds') }}：{{ userIds(result.unprocessed_user_ids) }}</p>
       </div>
     </details>
   </div>
@@ -33,7 +33,7 @@ defineProps<{
   failuresLabel: string
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 function userIds(ids?: string[]): string {
   return ids && ids.length > 0 ? ids.join(', ') : '-'

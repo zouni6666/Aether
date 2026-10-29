@@ -1,8 +1,8 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="套餐中心"
-      description="购买额度、会员或使用限制套餐"
+      :title="t('nav.billingCenter')"
+      :description="t('ui.buyCreditMembershipOrUsagePlans')"
     />
 
     <div class="mt-6 space-y-6">
@@ -10,13 +10,13 @@
         v-if="loading"
         class="py-16"
       >
-        <LoadingState message="正在加载套餐..." />
+        <LoadingState :message="t('ui.loadingPlans')" />
       </div>
 
       <template v-else>
         <CardSection
-          title="当前权益"
-          description="只展示仍在有效期内的套餐权益"
+          :title="t('ui.currentBenefits')"
+          :description="t('ui.onlyActivePlanBenefitsAreShown')"
         >
           <div
             v-if="activeEntitlements.length"
@@ -33,11 +33,11 @@
                     {{ planTitle(item.plan_id) }}
                   </div>
                   <div class="mt-1 text-xs text-muted-foreground">
-                    {{ formatDate(item.starts_at) }} - {{ formatDate(item.expires_at) }}
+                    {{ formatDateShort(item.starts_at) }} - {{ formatDateShort(item.expires_at) }}
                   </div>
                 </div>
                 <Badge variant="success">
-                  生效中
+                  {{ t('ui.active') }}
                 </Badge>
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">
@@ -53,14 +53,14 @@
           </div>
           <EmptyState
             v-else
-            title="暂无有效套餐"
-            description="购买套餐后，有效权益会显示在这里"
+            :title="t('ui.noActivePlans')"
+            :description="t('ui.activeBenefitsWillAppearHereAfterYouPurchaseAPlan')"
           />
         </CardSection>
 
         <CardSection
-          title="可购买套餐"
-          description="支付成功后由回调自动发放权益"
+          :title="t('ui.availablePlans')"
+          :description="t('ui.benefitsAreIssuedAutomaticallyByCallbackAfterSuccessfulPayment')"
         >
           <div class="grid grid-cols-1 gap-4 xl:grid-cols-3">
             <Card
@@ -74,11 +74,11 @@
                     {{ plan.title }}
                   </h3>
                   <p class="mt-1 min-h-[32px] text-xs text-muted-foreground">
-                    {{ plan.description || '标准套餐' }}
+                    {{ plan.description || t('ui.standardPlan') }}
                   </p>
                 </div>
                 <Badge variant="outline">
-                  {{ formatDuration(plan.duration_unit, plan.duration_value) }}
+                  {{ formatBillingPlanDuration(plan.duration_unit, plan.duration_value) }}
                 </Badge>
               </div>
 
@@ -114,7 +114,7 @@
                 <Select v-model="selectedChannel">
                   <SelectTrigger>
                     <SelectValue
-                      :placeholder="checkoutOptions.length ? '选择支付通道' : '暂无可用支付通道'"
+                      :placeholder="checkoutOptions.length ? t('ui.selectPaymentChannel') : t('ui.noPaymentChannelsAvailable')"
                     />
                   </SelectTrigger>
                   <SelectContent>
@@ -137,7 +137,7 @@
                   @click="checkoutPlan(plan)"
                 >
                   <CreditCard class="mr-2 h-4 w-4" />
-                  {{ checkoutLoadingPlanId === plan.id ? '创建订单中...' : '购买套餐' }}
+                  {{ checkoutLoadingPlanId === plan.id ? t('ui.creatingOrder') : t('ui.buyPlan') }}
                 </Button>
               </div>
             </Card>
@@ -147,8 +147,8 @@
               class="xl:col-span-3"
             >
               <EmptyState
-                title="暂无可购买套餐"
-                description="管理员上架套餐后会显示在这里"
+                :title="t('ui.noPlansAvailableForPurchase')"
+                :description="t('ui.plansWillAppearHereAfterAnAdministratorPublishesThem')"
               />
             </div>
           </div>
@@ -161,10 +161,10 @@
           <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <div class="text-sm font-medium">
-                最新订单：<span class="font-mono">{{ latestCheckout.order.order_no }}</span>
+                {{ t('ui.latestOrder') }}<span class="font-mono">{{ latestCheckout.order.order_no }}</span>
               </div>
               <div class="mt-1 text-xs text-muted-foreground">
-                应付 {{ latestCheckout.order.pay_amount ?? '-' }} {{ latestCheckout.order.pay_currency || '' }}
+                {{ t('ui.amountDue') }} {{ latestCheckout.order.pay_amount ?? '-' }} {{ latestCheckout.order.pay_currency || '' }}
               </div>
             </div>
             <Button
@@ -182,9 +182,9 @@
     <StripePaymentDialog
       v-model:open="stripeDialogOpen"
       :instructions="stripePaymentInstructions"
-      title="套餐 Stripe 支付"
-      description="完成支付后，套餐权益会由 Stripe Webhook 自动发放。"
-      confirm-text="支付套餐"
+      :title="t('ui.planStripePayment')"
+      :description="t('ui.afterPaymentPlanBenefitsAreIssuedAutomaticallyByTheStripe')"
+      :confirm-text="t('ui.payForPlan')"
       @success="handleStripePaymentSuccess"
     />
   </PageContainer>
@@ -195,7 +195,6 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { CreditCard } from 'lucide-vue-next'
 import {
   billingApi,
-  type BillingDurationUnit,
   type BillingEntitlement,
   type BillingCheckoutResponse,
   type BillingPlan,
@@ -212,27 +211,30 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui'
-import { EmptyState, LoadingState, StripePaymentDialog } from '@/components/common'
+import { EmptyState, LoadingState } from '@/components/common'
+import StripePaymentDialog from '@/features/wallet/components/StripePaymentDialog.vue'
 import { CardSection, PageContainer, PageHeader } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
-import { getI18nLocale, useI18n } from '@/i18n'
+import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
 import {
   entitlementReplacementGroups,
   entitlementsWillReplaceExisting,
   isPlanEntitlementReplacementCandidate,
   usagePolicyEntitlementLabels,
+  formatBillingPlanDuration,
 } from '@/utils/billingEntitlements'
 import { log } from '@/utils/logger'
-import { safePaymentTargetUrl } from '@/utils/paymentUrl'
+import { safePaymentTargetUrl } from '@/features/wallet/utils/paymentUrl'
 import {
   getPaymentInstructionString,
   getStripePaymentInstructions,
   type PaymentInstructionMap,
-} from '@/utils/paymentInstructions'
+} from '@/features/wallet/utils/paymentInstructions'
+import { formatDateShort } from '@/utils/format'
 
 const { success, error: showError } = useToast()
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 const loading = ref(true)
 const plans = ref<BillingPlan[]>([])
@@ -289,8 +291,8 @@ const latestPaymentUrl = computed(() => {
 
 const latestCheckoutActionLabel = computed(() => {
   const instructions = latestCheckout.value?.payment_instructions
-  if (getStripePaymentInstructions(instructions)) return '打开 Stripe 支付'
-  if (latestPaymentUrl.value) return '打开支付链接'
+  if (getStripePaymentInstructions(instructions)) return t('ui.openStripeCheckout')
+  if (latestPaymentUrl.value) return t('ui.openPaymentLink')
   return ''
 })
 
@@ -316,7 +318,7 @@ async function loadPlans() {
     plans.value = response.items
   } catch (err) {
     log.error('加载套餐失败:', err)
-    showError(parseApiError(err, '加载套餐失败'))
+    showError(parseApiError(err, t('ui.failedToLoadPlans')))
   }
 }
 
@@ -326,7 +328,7 @@ async function loadEntitlements() {
     entitlements.value = response.items
   } catch (err) {
     log.error('加载套餐权益失败:', err)
-    showError(parseApiError(err, '加载套餐权益失败'))
+    showError(parseApiError(err, t('ui.failedToLoadPlanBenefits')))
   }
 }
 
@@ -339,23 +341,23 @@ async function loadRechargeOptions() {
     }
   } catch (err) {
     log.error('加载支付通道失败:', err)
-    showError(parseApiError(err, '加载支付通道失败'))
+    showError(parseApiError(err, t('ui.failedToLoadPaymentChannels')))
   }
 }
 
 async function checkoutPlan(plan: BillingPlan) {
   if (hasMatchingActivePlan(plan)) {
-    const confirmed = window.confirm(legacyT('购买成功后，冲突的旧套餐及其组合权益会整体失效。确定继续购买吗？'))
+    const confirmed = window.confirm(t('ui.thisPurchaseWillReplaceConflictingPlansAndAllTheirBundled'))
     if (!confirmed) return
   }
   const option = selectedCheckoutOption.value
   if (!option) {
-    showError('请选择支付方式')
+    showError(t('ui.selectAPaymentMethod'))
     return
   }
   const provider = paymentOptionProvider(option)
   if (!provider) {
-    showError('支付方式配置无效')
+    showError(t('ui.invalidPaymentMethodConfiguration'))
     return
   }
   checkoutLoadingPlanId.value = plan.id
@@ -368,13 +370,13 @@ async function checkoutPlan(plan: BillingPlan) {
     latestCheckout.value = response
     success(
       response.reused_pending_order
-        ? '已有待支付订单，已打开原支付链接'
-        : '套餐订单已创建'
+        ? t('ui.aPendingPaymentOrderAlreadyExistsOpenedTheExistingPayment')
+        : t('ui.planOrderCreated')
     )
     submitPaymentInstructions(response.payment_instructions)
   } catch (err) {
     log.error('创建套餐订单失败:', err)
-    showError(parseApiError(err, '创建套餐订单失败'))
+    showError(parseApiError(err, t('ui.failedToCreatePlanOrder')))
   } finally {
     checkoutLoadingPlanId.value = null
   }
@@ -396,7 +398,7 @@ function submitPaymentInstructions(instructions: Record<string, unknown> | null 
   if (!paymentUrl) return
   const safePaymentUrl = safePaymentTargetUrl(paymentUrl)
   if (!safePaymentUrl) {
-    showError('支付网关返回了不安全的支付地址')
+    showError(t('ui.thePaymentGatewayReturnedAnUnsafePaymentUrl'))
     return
   }
   const paymentParams = instructions.payment_params
@@ -413,7 +415,7 @@ function submitPaymentInstructions(instructions: Record<string, unknown> | null 
 function submitPaymentForm(url: string, params: Record<string, unknown>) {
   const safeUrl = safePaymentTargetUrl(url)
   if (!safeUrl) {
-    showError('支付网关返回了不安全的支付地址')
+    showError(t('ui.thePaymentGatewayReturnedAnUnsafePaymentUrl'))
     return
   }
   const form = document.createElement('form')
@@ -440,7 +442,7 @@ function isSafariBrowser(): boolean {
 }
 
 async function handleStripePaymentSuccess() {
-  success('支付已完成，正在刷新套餐状态')
+  success(t('ui.paymentCompleteRefreshingPlanStatus'))
   await Promise.all([loadEntitlements(), loadPlans()])
 }
 
@@ -462,7 +464,7 @@ function replacementNotice(plan: BillingPlan): string {
   const labels = replacementClassLabels(plan.entitlements)
   if (labels.length === 0) return ''
   if (hasMatchingActivePlan(plan)) {
-    return '你已有与本套餐冲突的有效套餐，购买成功后旧套餐会整包失效。'
+    return t('ui.youHaveAnActivePlanThatConflictsWithThisOne')
   }
   return `若已有冲突的有效${labels.join('和')}，购买成功后旧套餐会整体失效。`
 }
@@ -509,18 +511,4 @@ function replacementClassLabels(items: BillingEntitlement[] | undefined): string
   return labels
 }
 
-function formatDuration(unit: BillingDurationUnit, value: number): string {
-  const labels: Record<BillingDurationUnit, string> = {
-    day: '天',
-    month: '个月',
-    year: '年',
-    custom: '天',
-  }
-  return `${value}${labels[unit]}`
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return '-'
-  return new Date(value).toLocaleDateString(getI18nLocale())
-}
 </script>

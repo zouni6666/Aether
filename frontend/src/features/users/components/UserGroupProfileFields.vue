@@ -1,25 +1,25 @@
 <template>
   <div class="space-y-4">
     <div class="space-y-2">
-      <Label class="text-sm font-medium">{{ legacyT('名称') }}</Label>
+      <Label class="text-sm font-medium">{{ t('stats.column.name') }}</Label>
       <Input
         :model-value="name"
         class="h-10"
-        :placeholder="legacyT('例如：生产团队')"
+        :placeholder="t('ui.exampleProductionTeam')"
         @update:model-value="$emit('update:name', $event)"
       />
     </div>
 
     <div class="space-y-2">
-      <Label class="text-sm font-medium">{{ legacyT('成员') }}</Label>
+      <Label class="text-sm font-medium">{{ t('stats.column.members') }}</Label>
       <MultiSelect
         :model-value="memberUserIds"
         :options="userOptions"
         :search-threshold="0"
         :disabled="membersDisabled"
-        :placeholder="legacyT('选择用户')"
-        :empty-text="legacyT('暂无用户')"
-        :no-results-text="legacyT('未找到匹配用户')"
+        :placeholder="t('userStats.select.user')"
+        :empty-text="t('ui.noUsers')"
+        :no-results-text="t('ui.noMatchingUsersFound8546f1e')"
         @update:model-value="$emit('update:memberUserIds', $event)"
       />
     </div>
@@ -44,5 +44,5 @@ defineEmits<{
   'update:memberUserIds': [value: string[]]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

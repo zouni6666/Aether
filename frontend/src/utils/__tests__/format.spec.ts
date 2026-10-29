@@ -18,7 +18,7 @@ describe('format utils', () => {
   })
 
   it('formats byte sizes with automatic units', () => {
-    expect(formatByteSize(512)).toBe('0.5 KB')
+    expect(formatByteSize(512)).toBe('512 B')
     expect(formatByteSize(1024)).toBe('1 KB')
     expect(formatByteSize(12.5 * 1024 * 1024)).toBe('12.5 MB')
     expect(formatByteSize(2 * 1024 * 1024 * 1024)).toBe('2 GB')

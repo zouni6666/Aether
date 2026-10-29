@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="isOpen"
-    :title="legacyT(isEditMode ? '编辑密钥' : '添加密钥')"
-    :description="legacyT(isEditMode ? '修改 API 密钥配置' : '为提供商添加新的 API 密钥')"
+    :title="isEditMode ? t('ui.editKey') : t('guide.nav.concepts.addKey')"
+    :description="isEditMode ? t('ui.modifyApiKeyConfiguration') : t('ui.addANewApiKeyForTheProvider')"
     :icon="isEditMode ? SquarePen : Key"
     size="xl"
     @update:model-value="handleDialogUpdate"
@@ -15,13 +15,13 @@
       <!-- 基本信息 -->
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <Label :for="keyNameInputId">{{ legacyT('密钥名称 *') }}</Label>
+          <Label :for="keyNameInputId">{{ t('ui.keyName18ae866') }}</Label>
           <Input
             :id="keyNameInputId"
             v-model="form.name"
             :name="keyNameFieldName"
             required
-            :placeholder="legacyT('例如：主 Key、备用 Key 1')"
+            :placeholder="t('ui.examplePrimaryKeyBackupKey1')"
             maxlength="100"
             autocomplete="off"
             autocapitalize="none"
@@ -33,10 +33,10 @@
           />
         </div>
         <div v-if="showAuthTypeSelector">
-          <Label :for="authTypeSelectId">{{ legacyT('认证类型') }}</Label>
+          <Label :for="authTypeSelectId">{{ t('ui.authType') }}</Label>
           <Select v-model="form.auth_type">
             <SelectTrigger :id="authTypeSelectId">
-              <SelectValue :placeholder="legacyT('选择认证类型')" />
+              <SelectValue :placeholder="t('ui.selectAuthType')" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem
@@ -61,9 +61,9 @@
               :reset-key="formNonce"
               accept=".json,.txt,application/json,text/plain"
               :multiple="false"
-              :drop-title="legacyT('拖入 Service Account JSON 或点击选择')"
-              :drop-hint="legacyT('支持 .json / .txt，单文件导入')"
-              :manual-placeholder="legacyT(editingKey ? '留空表示不修改，或粘贴完整的 Service Account JSON' : '粘贴完整的 Service Account JSON')"
+              :drop-title="t('ui.dropServiceAccountJsonOrClickToSelect')"
+              :drop-hint="t('ui.supportsJsonTxtSingleFileImport')"
+              :manual-placeholder="editingKey ? t('ui.leaveEmptyToKeepUnchangedOrPasteTheFullService') : t('ui.pasteTheFullServiceAccountJson')"
               :manual-description="serviceAccountDescription"
               textarea-class="min-h-[160px] font-mono text-xs break-all !rounded-xl"
               @error="handleServiceAccountImportError"
@@ -83,25 +83,25 @@
             v-if="editingKey && isRawSecretAuthType(form.auth_type)"
             class="text-xs text-muted-foreground mt-1"
           >
-            {{ legacyT('留空表示不修改') }}
+            {{ t('ui.leaveEmptyToKeepUnchanged4527d95') }}
           </p>
         </div>
       </div>
 
       <!-- 备注 -->
       <div>
-        <Label for="note">{{ legacyT('备注') }}</Label>
+        <Label for="note">{{ t('ui.notes') }}</Label>
         <Input
           id="note"
           v-model="form.note"
-          :placeholder="legacyT('可选的备注信息')"
+          :placeholder="t('ui.optionalNotes')"
         />
       </div>
 
       <!-- API 格式 & 认证方式 -->
       <div v-if="visibleApiFormats.length > 0">
         <div class="flex items-center gap-1 mb-1.5">
-          <Label>{{ legacyT('支持的 API 格式 *') }}</Label>
+          <Label>{{ t('ui.supportedApiFormats409848f') }}</Label>
           <span
             class="relative inline-flex"
             @mouseenter="apiFormatHelpHovered = true"
@@ -110,8 +110,8 @@
             <button
               type="button"
               class="inline-flex items-center justify-center rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              :title="legacyT('API 格式说明')"
-              :aria-label="legacyT('API 格式说明')"
+              :title="t('ui.apiFormatHelp')"
+              :aria-label="t('ui.apiFormatHelp')"
               :aria-expanded="apiFormatHelpVisible"
               @click.stop="toggleApiFormatHelp"
               @focus="apiFormatHelpHovered = true"
@@ -125,7 +125,7 @@
               role="tooltip"
               class="absolute left-0 top-full z-[100] mt-1 w-80 rounded-md border bg-popover px-3 py-2 text-xs font-normal normal-case leading-5 tracking-normal text-popover-foreground shadow-md"
             >
-              {{ legacyT('选择此密钥支持的 API 格式及对应认证方式。OpenAI 格式固定使用 Bearer Token；Claude / Gemini 格式可选 API Key 或 Bearer Token（如 Claude Code 应使用 Bearer Token）。') }}
+              {{ t('ui.selectTheApiFormatsThisKeySupportsAndTheirAuth') }}
             </span>
           </span>
         </div>
@@ -183,7 +183,7 @@
               <div
                 v-if="canToggleAuthChannelMismatch(format)"
                 class="flex items-center gap-1"
-                :title="legacyT('允许客户端认证方式不一致时使用')"
+                :title="t('ui.allowWhenTheClientAuthMethodDiffers')"
                 @click.stop
               >
                 <Switch
@@ -203,7 +203,7 @@
           <Label
             for="internal_priority"
             class="text-xs"
-          >{{ legacyT('优先级') }}</Label>
+          >{{ t('ui.priority565d646') }}</Label>
           <Input
             id="internal_priority"
             v-model.number="form.internal_priority"
@@ -212,51 +212,51 @@
             class="h-8"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            {{ legacyT('越小越优先') }}
+            {{ t('ui.lowerValuesHaveHigherPriority') }}
           </p>
         </div>
         <div>
           <Label
             for="rpm_limit"
             class="text-xs"
-          >{{ legacyT('RPM 限制') }}</Label>
+          >{{ t('ui.rpmLimit50b7143') }}</Label>
           <Input
             id="rpm_limit"
             :model-value="form.rpm_limit ?? ''"
             type="number"
             min="1"
             max="10000"
-            :placeholder="legacyT('自适应')"
+            :placeholder="t('ui.adaptive')"
             class="h-8"
             @update:model-value="(v) => form.rpm_limit = parseNullableNumberInput(v, { min: 1, max: 10000 })"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            {{ legacyT('留空自适应') }}
+            {{ t('ui.leaveEmptyForAdaptive') }}
           </p>
         </div>
         <div>
           <Label
             for="concurrent_limit"
             class="text-xs"
-          >{{ legacyT('并发请求上限') }}</Label>
+          >{{ t('ui.concurrentRequestLimit') }}</Label>
           <Input
             id="concurrent_limit"
             :model-value="form.concurrent_limit ?? ''"
             type="number"
             min="0"
-            :placeholder="legacyT('不限制')"
+            :placeholder="t('ui.noRestriction')"
             class="h-8"
             @update:model-value="(v) => form.concurrent_limit = parseNullableNumberInput(v, { min: 0 })"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            {{ legacyT('留空或 0 表示不限制') }}
+            {{ t('ui.leaveEmptyOrEnter0ForNoLimit') }}
           </p>
         </div>
         <div>
           <Label
             for="cache_ttl_minutes"
             class="text-xs"
-          >{{ legacyT('缓存 TTL') }}</Label>
+          >{{ t('ui.cacheTtld8a1617') }}</Label>
           <Input
             id="cache_ttl_minutes"
             :model-value="form.cache_ttl_minutes ?? ''"
@@ -267,14 +267,14 @@
             @update:model-value="(v) => form.cache_ttl_minutes = parseNumberInput(v, { min: 0, max: 60 }) ?? 5"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            {{ legacyT('分钟，0禁用') }}
+            {{ t('ui.minutes0Disables') }}
           </p>
         </div>
         <div>
           <Label
             for="max_probe_interval_minutes"
             class="text-xs"
-          >{{ legacyT('熔断探测') }}</Label>
+          >{{ t('ui.circuitProbe') }}</Label>
           <Input
             id="max_probe_interval_minutes"
             :model-value="form.max_probe_interval_minutes ?? ''"
@@ -286,7 +286,7 @@
             @update:model-value="(v) => form.max_probe_interval_minutes = parseNumberInput(v, { min: 0, max: 32 }) ?? 32"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            {{ legacyT('分钟，0-32') }}
+            {{ t('ui.minutes032') }}
           </p>
         </div>
       </div>
@@ -295,9 +295,9 @@
       <div class="space-y-3 py-2 px-3 rounded-md border border-border/60 bg-muted/30">
         <div class="flex items-center justify-between">
           <div class="space-y-0.5">
-            <Label class="text-sm font-medium">{{ legacyT('自动获取上游可用模型') }}</Label>
+            <Label class="text-sm font-medium">{{ t('ui.autoFetchUpstreamModels') }}</Label>
             <p class="text-xs text-muted-foreground">
-              {{ legacyT('定时更新上游模型, 配合模型映射使用') }}
+              {{ t('ui.periodicallyUpdateUpstreamModelsForUseWithModelMapping') }}
             </p>
             <p
               v-if="showAutoFetchWarning"
@@ -316,15 +316,15 @@
         >
           <div class="grid grid-cols-2 gap-3">
             <div>
-              <Label class="text-xs">{{ legacyT('包含规则') }}</Label>
+              <Label class="text-xs">{{ t('ui.includeRules') }}</Label>
               <Input
                 v-model="form.model_include_patterns_text"
-                :placeholder="legacyT('gpt-*, claude-*, 留空包含全部')"
+                :placeholder="t('ui.gptClaudeLeaveEmptyToIncludeAll')"
                 class="h-8 text-sm"
               />
             </div>
             <div>
-              <Label class="text-xs">{{ legacyT('排除规则') }}</Label>
+              <Label class="text-xs">{{ t('ui.excludeRules') }}</Label>
               <Input
                 v-model="form.model_exclude_patterns_text"
                 placeholder="*-preview, *-beta"
@@ -333,7 +333,7 @@
             </div>
           </div>
           <p class="text-xs text-muted-foreground">
-            {{ legacyT('逗号分隔，支持 * ? 通配符，不区分大小写') }}
+            {{ t('ui.commaSeparatedSupportsAndWildcardsCaseInsensitive') }}
           </p>
         </div>
       </div>
@@ -344,7 +344,7 @@
         variant="outline"
         @click="handleCancel"
       >
-        {{ legacyT('取消') }}
+        {{ t('common.cancel') }}
       </Button>
       <Button
         :disabled="saving || !canSave"
@@ -410,8 +410,9 @@ const emit = defineEmits<{
   saved: [key: EndpointAPIKey]
 }>()
 
+const { t, locale } = useI18n()
+
 const { success, error: showError } = useToast()
-const { legacyT, locale } = useI18n()
 
 function isRawSecretAuthType(authType: string | null | undefined): authType is RawSecretAuthType {
   return authType === 'api_key' || authType === 'bearer'
@@ -551,7 +552,7 @@ function toggleApiFormatHelp() {
 const authSecretLabel = computed(() => {
   if (form.value.auth_type === 'service_account') return 'Service Account JSON'
   if (form.value.auth_type === 'bearer') return 'Bearer Token'
-  return legacyT('API 密钥')
+  return t('nav.apiKeys')
 })
 
 const authSecretPlaceholder = computed(() =>
@@ -564,8 +565,6 @@ const authSecretRequiredMark = computed(() => {
   }
   return ''
 })
-
-
 
 function getFormatAuthType(format: string): ProviderKeyFormAuthType {
   if (!isRawSecretAuthType(form.value.auth_type)) {
@@ -620,16 +619,14 @@ function buildAllowAuthChannelMismatchFormatsPayload(): string[] {
 }
 
 const serviceAccountDescription = computed(() => (
-  legacyT(props.editingKey
-    ? '留空表示不修改；JSON 格式，包含 project_id、private_key 等字段'
-    : 'JSON 格式，包含 project_id、private_key 等字段')
+  props.editingKey ? t('ui.leaveEmptyToKeepUnchangedJsonFormatIncludingProjectId') : t('ui.jsonFormatIncludingProjectIdPrivateKeyAndRelatedFields')
 ))
 
 const submitLabel = computed(() => {
   if (saving.value) {
-    return legacyT(isEditMode.value ? '保存中...' : '添加中...')
+    return isEditMode.value ? t('ui.saving') : t('ui.adding')
   }
-  return legacyT(isEditMode.value ? '保存' : '添加')
+  return isEditMode.value ? t('ui.save') : t('ui.add')
 })
 
 // 默认认证类型
@@ -663,9 +660,7 @@ const autoFetchWarningMessage = computed(() => {
     : []
   if (models.length === 0) return ''
   const formattedModels = models.map(model => locale.value === 'en-US' ? `"${model}"` : `“${model}”`).join(locale.value === 'en-US' ? ', ' : '、')
-  return locale.value === 'en-US'
-    ? `Current key model permissions include these models: ${formattedModels}. Enabling auto fetch will overwrite them.`
-    : `当前 Key 模型权限存在以下模型：${formattedModels}，开启自动获取后将被覆盖`
+  return t('providers.migration.thisKeyCurrentlyAllowsTheseef7e31', { value: String(formattedModels) })
 })
 
 // 检查是否正在切换认证类型
@@ -791,7 +786,6 @@ function toggleApiFormat(format: string) {
   )
 }
 
-
 // 重置表单
 function resetForm() {
   formNonce.value = createFieldNonce()
@@ -908,32 +902,32 @@ function parseAuthConfig(): Record<string, unknown> | null {
 }
 
 function handleServiceAccountImportError(payload: { message: string, title?: string }) {
-  showError(payload.message, payload.title ? legacyT(payload.title) : legacyT('错误'))
+  showError(payload.message, payload.title ? payload.title : t('ui.error'))
 }
 
 async function handleSave() {
   // 必须有 providerId
   if (!props.providerId) {
-    showError(legacyT('无法保存：缺少提供商信息'), legacyT('错误'))
+    showError(t('ui.cannotSaveMissingProviderInformation'), t('ui.error'))
     return
   }
 
   // 验证认证信息
   if (form.value.auth_type === 'service_account') {
     if (!props.editingKey && !form.value.auth_config_text.trim()) {
-      showError(legacyT('请输入 Service Account JSON'), legacyT('验证失败'))
+      showError(t('ui.enterServiceAccountJson'), t('auth.register.verifyFailed'))
       return
     }
     // 验证 JSON 格式
     if (form.value.auth_config_text.trim()) {
       const parsed = parseAuthConfig()
       if (!parsed) {
-        showError(legacyT('Service Account JSON 格式无效'), legacyT('验证失败'))
+        showError(t('ui.serviceAccountJsonFormatIsInvalid'), t('auth.register.verifyFailed'))
         return
       }
       // 验证必要字段
       if (!parsed.client_email || !parsed.private_key || !parsed.project_id) {
-        showError(legacyT('Service Account JSON 缺少必要字段 (client_email, private_key, project_id)'), legacyT('验证失败'))
+        showError(t('ui.serviceAccountJsonIsMissingRequiredFieldsClientEmailPrivate'), t('auth.register.verifyFailed'))
         return
       }
     }
@@ -946,7 +940,7 @@ async function handleSave() {
 
   // 验证至少选择一个 API 格式
   if (form.value.api_formats.length === 0) {
-    showError(legacyT('请至少选择一个 API 格式'), legacyT('验证失败'))
+    showError(t('ui.selectAtLeastOneApiFormat'), t('auth.register.verifyFailed'))
     return
   }
 
@@ -1002,7 +996,7 @@ async function handleSave() {
       }
 
       const updatedKey = await updateProviderKey(props.editingKey.id, updateData)
-      success(legacyT('密钥已更新'), legacyT('成功'))
+      success(t('ui.keyUpdated'), t('ui.success'))
       emit('saved', updatedKey)
     } else {
       // 新增模式
@@ -1026,7 +1020,7 @@ async function handleSave() {
         model_exclude_patterns: parsePatternText(form.value.model_exclude_patterns_text)
       })
 
-      success(legacyT('密钥已添加'), legacyT('成功'))
+      success(t('ui.keyAdded'), t('ui.success'))
       // 添加模式：不关闭对话框，只清除名称和密钥以便继续添加
       emit('saved', createdKey)
       clearForNextAdd()
@@ -1035,8 +1029,8 @@ async function handleSave() {
 
     emit('close')
   } catch (err: unknown) {
-    const errorMessage = parseApiError(err, legacyT('保存密钥失败'))
-    showError(errorMessage, legacyT('错误'))
+    const errorMessage = parseApiError(err, t('ui.failedToSaveKey'))
+    showError(errorMessage, t('ui.error'))
   } finally {
     saving.value = false
   }

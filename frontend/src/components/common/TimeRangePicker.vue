@@ -6,10 +6,10 @@
       <SelectTrigger
         class="h-8 w-40 text-xs border-border/60"
         :class="[presetTriggerClass]"
-        :aria-label="legacyT('时间范围')"
+        :aria-label="t('ui.timeRange')"
       >
-        <SelectValue :placeholder="legacyT('选择时间段')">
-          {{ presetOnly && selectedPreset === 'custom' ? legacyT('已选时段') : presetLabels[selectedPreset] }}
+        <SelectValue :placeholder="t('ui.selectTimeRange')">
+          {{ presetOnly && selectedPreset === 'custom' ? t('ui.selectedRange') : presetLabels[selectedPreset] }}
         </SelectValue>
       </SelectTrigger>
       <SelectContent :searchable="false">
@@ -33,7 +33,7 @@
         :class="precise ? 'w-48' : 'w-36'"
         class="h-8 max-w-full text-xs border-border/60"
       />
-      <span class="text-xs text-muted-foreground">{{ legacyT('至') }}</span>
+      <span class="text-xs text-muted-foreground">{{ t('ui.to') }}</span>
       <Input
         v-model="endDate"
         :type="precise ? 'datetime-local' : 'date'"
@@ -47,23 +47,23 @@
       v-model="selectedGranularity"
     >
       <SelectTrigger class="h-8 w-24 text-xs border-border/60">
-        <SelectValue :placeholder="legacyT('粒度')" />
+        <SelectValue :placeholder="t('ui.granularity')" />
       </SelectTrigger>
       <SelectContent>
         <SelectItem
           v-if="allowHourly && canUseHourly"
           value="hour"
         >
-          {{ legacyT('小时') }}
+          {{ t('ui.hours') }}
         </SelectItem>
         <SelectItem value="day">
-          {{ legacyT('天') }}
+          {{ t('ui.days') }}
         </SelectItem>
         <SelectItem value="week">
-          {{ legacyT('周') }}
+          {{ t('providers.antigravity.quota.period.weekly') }}
         </SelectItem>
         <SelectItem value="month">
-          {{ legacyT('月') }}
+          {{ t('ui.month') }}
         </SelectItem>
       </SelectContent>
     </Select>
@@ -99,19 +99,19 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: DateRangeParams]
 }>()
-const { legacyT } = useI18n()
+const { t } = useI18n()
 const selectablePresets = ['last1hour', 'today', 'yesterday', 'last24hours', 'last7days', 'last30days', 'last90days', 'custom'] as const
 type SelectablePreset = typeof selectablePresets[number]
 
 const presetLabels = computed<Record<SelectablePreset, string>>(() => ({
-  last1hour: legacyT('最近 1 小时'),
-  today: legacyT('今天'),
-  yesterday: legacyT('昨天'),
-  last24hours: legacyT('最近 24 小时'),
-  last7days: legacyT('最近7天'),
-  last30days: legacyT('最近30天'),
-  last90days: legacyT('最近90天'),
-  custom: legacyT('自定义')
+  last1hour: t('ui.lastHour'),
+  today: t('ui.today'),
+  yesterday: t('ui.yesterday'),
+  last24hours: t('ui.last24Hoursab2c188'),
+  last7days: t('ui.last7Days'),
+  last30days: t('ui.last30Days'),
+  last90days: t('ui.last90Days'),
+  custom: t('ui.custom4eafa9e')
 }))
 
 const activePresetOptions = computed<SelectablePreset[]>(() => {

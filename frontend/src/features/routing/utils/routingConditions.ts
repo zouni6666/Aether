@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 export type RoutingConditionOp = 'eq' | 'ne' | 'in' | 'contains' | 'exists' | 'matches'
 
 export interface RoutingConditionLeaf {
@@ -15,19 +16,19 @@ export interface RoutingConditionGroup {
 export type RoutingCondition = RoutingConditionLeaf | RoutingConditionGroup
 
 export const routingConditionFieldLabels: Record<string, string> = {
-  model: '模型',
-  api_format: 'API 格式',
-  user_id: '用户',
+  get model() { return translate('ui.model') },
+  get api_format() { return translate('ui.apiFormat') },
+  get user_id() { return translate('auth.role.user') },
   api_key_id: 'API Key',
 }
 
 export const routingConditionOpLabels: Record<RoutingConditionOp, string> = {
-  eq: '等于',
-  ne: '不等于',
-  in: '包含于',
-  contains: '包含',
-  exists: '存在',
-  matches: '匹配',
+  get eq() { return translate('ui.equals') },
+  get ne() { return translate('ui.doesNotEqual') },
+  get in() { return translate('routing.conditions.in') },
+  get contains() { return translate('ui.contains') },
+  get exists() { return translate('ui.exists') },
+  get matches() { return translate('ui.match') },
 }
 
 export function isConditionLeaf(condition: RoutingCondition): condition is RoutingConditionLeaf {
@@ -42,18 +43,18 @@ export function summarizeRoutingCondition(condition: RoutingCondition): string {
   }
 
   if (condition.all?.length) {
-    return condition.all.map(summarizeRoutingCondition).join(' 且 ')
+    return condition.all.map(summarizeRoutingCondition).join(translate('routing.conditions.andSeparator'))
   }
 
   if (condition.any?.length) {
-    return condition.any.map(summarizeRoutingCondition).join(' 或 ')
+    return condition.any.map(summarizeRoutingCondition).join(translate('routing.conditions.orSeparator'))
   }
 
   if (condition.not) {
-    return `非 ${summarizeRoutingCondition(condition.not)}`
+    return translate('routing.conditions.not', { condition: summarizeRoutingCondition(condition.not) })
   }
 
-  return '无条件'
+  return translate('routing.conditions.unconditional')
 }
 
 function formatConditionValue(value: unknown): string {

@@ -28,7 +28,7 @@
         v-if="!sidebarCollapsed"
         role="separator"
         aria-orientation="vertical"
-        :aria-label="locale === 'zh-CN' ? '调整导航栏宽度' : 'Resize navigation sidebar'"
+        :aria-label="locale === 'zh-CN' ? t('ui.resizeNavigationSidebar') : 'Resize navigation sidebar'"
         :aria-valuenow="sidebarWidth"
         :aria-valuemin="sidebarMinWidth"
         :aria-valuemax="sidebarMaxWidth"
@@ -527,7 +527,7 @@ import { parseApiError } from '@/utils/errorParser'
 import Button from '@/components/ui/button.vue'
 import AppShell from '@/components/layout/AppShell.vue'
 import SidebarNav from '@/components/layout/SidebarNav.vue'
-import HeaderLogo from '@/components/HeaderLogo.vue'
+import HeaderLogo from '@/components/brand/HeaderLogo.vue'
 import LanguageSwitcher from '@/components/common/LanguageSwitcher.vue'
 import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
 import UpdateDialog from '@/components/common/UpdateDialog.vue'
@@ -548,7 +548,7 @@ import {
   PanelLeftOpen,
 } from 'lucide-vue-next'
 
-import GithubIcon from '@/components/icons/GithubIcon.vue'
+import GithubIcon from '@/components/brand/GithubIcon.vue'
 import { prefetchNavigationTarget } from '@/utils/adminNavigationPrefetch'
 import { useI18n, type MessageKey } from '@/i18n'
 import { buildBreadcrumbs, buildNavigation } from './main-layout/navigation'

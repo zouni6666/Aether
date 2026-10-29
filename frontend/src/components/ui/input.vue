@@ -25,7 +25,7 @@
       type="button"
       class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground/20 hover:text-muted-foreground/50 transition-colors"
       tabindex="-1"
-      :aria-label="isVisible ? '隐藏内容' : '显示内容'"
+      :aria-label="isVisible ? t('ui.hideContent') : t('ui.showContent')"
       @click="toggleVisibility"
     >
       <EyeOff
@@ -59,6 +59,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import type { ClassValue } from 'clsx'
 import { computed, useAttrs, ref } from 'vue'
 import { Eye, EyeOff } from 'lucide-vue-next'
@@ -69,6 +71,8 @@ const props = defineProps<Props>()
 const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
+
+const { t } = useI18n()
 
 interface Props {
   modelValue?: string | number | null
@@ -176,4 +180,5 @@ function handleInput(event: Event) {
 }
 
 defineExpose({ inputRef })
+
 </script>

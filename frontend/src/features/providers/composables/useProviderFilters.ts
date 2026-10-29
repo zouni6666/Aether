@@ -11,7 +11,7 @@ export interface FilterOption {
 export function useProviderFilters(
   globalModels: () => { id: string; name: string }[],
 ) {
-  const { legacyT } = useI18n()
+  const { t } = useI18n()
   // 搜索与筛选
   const searchQuery = ref('')
   const filterStatus = ref('all')
@@ -19,13 +19,13 @@ export function useProviderFilters(
   const filterModel = ref('all')
 
   const statusFilters = computed<FilterOption[]>(() => [
-    { value: 'all', label: legacyT('全部状态') },
-    { value: 'active', label: legacyT('活跃') },
-    { value: 'inactive', label: legacyT('停用') },
+    { value: 'all', label: t('ui.allStatuses') },
+    { value: 'active', label: t('ui.activee85e590') },
+    { value: 'inactive', label: t('ui.disable4e6fd0e') },
   ])
 
   const apiFormatFilters = computed<FilterOption[]>(() => [
-    { value: 'all', label: legacyT('全部格式') },
+    { value: 'all', label: t('ui.allFormats') },
     ...API_FORMAT_ORDER.map(value => ({ value, label: formatApiFormat(value) })),
   ])
 
@@ -33,7 +33,7 @@ export function useProviderFilters(
     const items = globalModels()
       .map(m => ({ value: m.id, label: m.name }))
       .sort((a, b) => a.label.localeCompare(b.label))
-    return [{ value: 'all', label: legacyT('全部模型') }, ...items]
+    return [{ value: 'all', label: t('ui.allModels') }, ...items]
   })
 
   const hasActiveFilters = computed(() => {

@@ -4,10 +4,10 @@
       <div class="px-5 py-4 border-b border-border/60 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h3 class="text-base font-semibold">
-            钱包管理
+            {{ t('nav.walletManagement') }}
           </h3>
           <p class="text-xs text-muted-foreground mt-1">
-            统一管理资金流水、退款审批、充值订单与支付回调
+            {{ t('ui.manageWalletLedgerRefundApprovalsTopUpOrdersAndPayment') }}
           </p>
         </div>
       </div>
@@ -20,14 +20,14 @@
           aria-live="polite"
         >
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <span class="text-sm font-semibold">{{ locationLoading ? '正在定位目标...' : locationError ? '定位失败' : '已定位目标' }}</span>
+            <span class="text-sm font-semibold">{{ locationLoading ? t('ui.locatingTarget') : locationError ? t('ui.failedToLocateTarget') : t('ui.targetLocated') }}</span>
             <div class="flex items-center gap-2">
               <Button
                 variant="outline"
                 size="sm"
                 @click="copyLocationId"
               >
-                复制 ID
+                {{ t('ui.copyId') }}
               </Button>
               <Button
                 v-if="locationError"
@@ -35,7 +35,7 @@
                 size="sm"
                 @click="retryLocation"
               >
-                重试定位
+                {{ t('ui.retryLocatingTarget') }}
               </Button>
             </div>
           </div>
@@ -54,18 +54,18 @@
             class="grid gap-2 text-sm sm:grid-cols-4"
           >
             <span>{{ ownerDisplayName(locationTarget.item.owner_name, locationTarget.item.owner_type) }}</span>
-            <span>充值余额 {{ formatCurrency(locationTarget.item.recharge_balance) }}</span>
-            <span>赠款余额 {{ formatCurrency(locationTarget.item.gift_balance) }}</span>
+            <span>{{ t('ui.topUpBalance') }} {{ formatCurrency(locationTarget.item.recharge_balance) }}</span>
+            <span>{{ t('ui.grantBalance') }} {{ formatCurrency(locationTarget.item.gift_balance) }}</span>
             <span>{{ walletStatusLabel(locationTarget.item.status) }}</span>
           </div>
           <div
             v-if="locationTarget?.kind === 'orders'"
             class="grid gap-2 text-sm sm:grid-cols-4"
           >
-            <span class="break-all">订单 {{ locationTarget.item.order_no }}</span>
+            <span class="break-all">{{ t('ui.order') }} {{ locationTarget.item.order_no }}</span>
             <span>{{ formatCurrency(locationTarget.item.amount_usd) }}</span>
             <span>{{ paymentStatusLabel(locationTarget.item.status) }}</span>
-            <span>退款及处理中占用 {{ formatCurrency(locationTarget.item.refunded_amount_usd) }}</span>
+            <span>{{ t('ui.refundsAndProcessingHolds') }} {{ formatCurrency(locationTarget.item.refunded_amount_usd) }}</span>
           </div>
           <Button
             v-if="locationTarget?.kind === 'refunds'"
@@ -73,7 +73,7 @@
             size="sm"
             @click="openRefundDrawer(locationTarget.item)"
           >
-            查看目标退款
+            {{ t('ui.viewTargetRefund') }}
           </Button>
           <Button
             v-if="locationTarget?.kind === 'ledger'"
@@ -81,28 +81,28 @@
             size="sm"
             @click="openLedgerDrawer(locationTarget.item)"
           >
-            查看目标流水
+            {{ t('ui.viewTargetTransaction') }}
           </Button>
           <p class="text-xs text-muted-foreground">
-            目标详情独立于分页；下方仍为全局列表。
+            {{ t('ui.targetDetailsAreIndependentOfPaginationTheGlobalListIs') }}
           </p>
         </div>
         <Tabs v-model="activeTab">
           <TabsList class="tabs-button-list grid w-full max-w-[960px] grid-cols-5">
             <TabsTrigger value="ledger">
-              资金流水
+              {{ t('ui.walletLedger') }}
             </TabsTrigger>
             <TabsTrigger value="orders">
-              充值订单
+              {{ t('ui.topUpOrder') }}
             </TabsTrigger>
             <TabsTrigger value="refunds">
-              退款审批
+              {{ t('ui.refundApprovals') }}
             </TabsTrigger>
             <TabsTrigger value="callbacks">
-              回调日志
+              {{ t('ui.callbackLogs') }}
             </TabsTrigger>
             <TabsTrigger value="redeem_codes">
-              兑换码
+              {{ t('ui.redeemCodeabbb615') }}
             </TabsTrigger>
           </TabsList>
 
@@ -114,34 +114,34 @@
               <div class="flex flex-wrap items-center gap-2">
                 <Select v-model="ledgerCategoryFilter">
                   <SelectTrigger class="w-[170px]">
-                    <SelectValue placeholder="一级分类" />
+                    <SelectValue :placeholder="t('ui.primaryCategory')" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">
-                      全部分类
+                      {{ t('ui.allCategories') }}
                     </SelectItem>
                     <SelectItem value="recharge">
-                      充值
+                      {{ t('ui.topUp') }}
                     </SelectItem>
                     <SelectItem value="gift">
-                      赠款
+                      {{ t('ui.giftCredit') }}
                     </SelectItem>
                     <SelectItem value="adjust">
-                      调账
+                      {{ t('ui.adjustment') }}
                     </SelectItem>
                     <SelectItem value="refund">
-                      退款
+                      {{ t('ui.refundf1c91e1') }}
                     </SelectItem>
                   </SelectContent>
                 </Select>
 
                 <Select v-model="ledgerReasonFilter">
                   <SelectTrigger class="w-[180px]">
-                    <SelectValue placeholder="二级分类" />
+                    <SelectValue :placeholder="t('ui.secondaryCategory')" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">
-                      全部二级
+                      {{ t('ui.allSecondaryCategories') }}
                     </SelectItem>
                     <SelectItem
                       v-for="option in ledgerReasonOptions"
@@ -155,17 +155,17 @@
 
                 <Select v-model="ledgerOwnerFilter">
                   <SelectTrigger class="w-[170px]">
-                    <SelectValue placeholder="归属类型" />
+                    <SelectValue :placeholder="t('ui.ownerType')" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">
-                      全部归属
+                      {{ t('ui.allOwnership') }}
                     </SelectItem>
                     <SelectItem value="user">
-                      用户钱包
+                      {{ t('ui.userWallet') }}
                     </SelectItem>
                     <SelectItem value="api_key">
-                      独立密钥钱包
+                      {{ t('ui.standaloneKeyWallet') }}
                     </SelectItem>
                   </SelectContent>
                 </Select>
@@ -173,7 +173,7 @@
 
               <div class="flex items-center justify-between gap-3">
                 <div class="text-sm text-muted-foreground">
-                  共 {{ ledgerTotal }} 条
+                  {{ t('ui.total76e547a') }} {{ ledgerTotal }} {{ t('ui.itemsf004f1d') }}
                 </div>
                 <RefreshButton
                   :loading="loadingLedger"
@@ -187,14 +187,14 @@
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>时间</TableHead>
-                      <TableHead>归属</TableHead>
-                      <TableHead>类型</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>余额变化</TableHead>
-                      <TableHead>说明</TableHead>
+                      <TableHead>{{ t('ui.time') }}</TableHead>
+                      <TableHead>{{ t('ui.owner1e9b3dc') }}</TableHead>
+                      <TableHead>{{ t('ui.typeba40014') }}</TableHead>
+                      <TableHead>{{ t('ui.amount') }}</TableHead>
+                      <TableHead>{{ t('ui.balanceChanges') }}</TableHead>
+                      <TableHead>{{ t('ui.description') }}</TableHead>
                       <TableHead class="text-right">
-                        操作
+                        {{ t('ui.actionsed31fbb') }}
                       </TableHead>
                     </TableRow>
                   </TableHeader>
@@ -244,8 +244,7 @@
                           v-if="tx.recharge_balance_before !== null && tx.recharge_balance_before !== undefined && tx.gift_balance_before !== null && tx.gift_balance_before !== undefined"
                           class="text-[11px] text-muted-foreground mt-0.5"
                         >
-                          充 {{ Number(tx.recharge_balance_before).toFixed(4) }}→{{ Number(tx.recharge_balance_after ?? 0).toFixed(4) }}
-                          · 赠 {{ Number(tx.gift_balance_before).toFixed(4) }}→{{ Number(tx.gift_balance_after ?? 0).toFixed(4) }}
+                          {{ t('ui.paid') }} {{ Number(tx.recharge_balance_before).toFixed(4) }}→{{ Number(tx.recharge_balance_after ?? 0).toFixed(4) }} {{ t('ui.gift') }} {{ Number(tx.gift_balance_before).toFixed(4) }}→{{ Number(tx.gift_balance_after ?? 0).toFixed(4) }}
                         </div>
                       </TableCell>
                       <TableCell class="text-xs text-muted-foreground max-w-[280px] truncate">
@@ -257,7 +256,7 @@
                           variant="outline"
                           @click="openLedgerDrawer(tx)"
                         >
-                          详情
+                          {{ t('ui.details') }}
                         </Button>
                       </TableCell>
                     </TableRow>
@@ -267,8 +266,8 @@
                         class="py-12"
                       >
                         <EmptyState
-                          title="暂无资金流水"
-                          description="当前筛选条件下没有资金动作记录"
+                          :title="t('ui.noWalletLedgerEntries')"
+                          :description="t('ui.noWalletTransactionsMatchTheCurrentFilters')"
                         />
                       </TableCell>
                     </TableRow>
@@ -294,40 +293,40 @@
               <div class="flex flex-wrap items-center gap-2">
                 <Select v-model="refundStatusFilter">
                   <SelectTrigger class="w-[170px]">
-                    <SelectValue placeholder="退款状态" />
+                    <SelectValue :placeholder="t('ui.refundStatus')" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">
-                      全部状态
+                      {{ t('ui.allStatuses') }}
                     </SelectItem>
                     <SelectItem value="pending_approval">
-                      待审批
+                      {{ t('ui.pendingApproval') }}
                     </SelectItem>
                     <SelectItem value="approved">
-                      已审批
+                      {{ t('ui.approved') }}
                     </SelectItem>
                     <SelectItem value="processing">
-                      处理中
+                      {{ t('ui.processing694b71b') }}
                     </SelectItem>
                     <SelectItem value="succeeded">
-                      已完成
+                      {{ t('site.home.status.completed') }}
                     </SelectItem>
                     <SelectItem value="failed">
-                      已失败
+                      {{ t('ui.failed7e9ef4d') }}
                     </SelectItem>
                   </SelectContent>
                 </Select>
 
                 <Select v-model="refundOwnerFilter">
                   <SelectTrigger class="w-[170px]">
-                    <SelectValue placeholder="归属类型" />
+                    <SelectValue :placeholder="t('ui.ownerType')" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">
-                      全部归属
+                      {{ t('ui.allOwnership') }}
                     </SelectItem>
                     <SelectItem value="user">
-                      用户钱包
+                      {{ t('ui.userWallet') }}
                     </SelectItem>
                   </SelectContent>
                 </Select>
@@ -335,7 +334,7 @@
 
               <div class="flex items-center justify-between gap-3">
                 <div class="text-sm text-muted-foreground">
-                  共 {{ refundTotal }} 条
+                  {{ t('ui.total76e547a') }} {{ refundTotal }} {{ t('ui.itemsf004f1d') }}
                 </div>
                 <RefreshButton
                   :loading="loadingRefunds"
@@ -349,15 +348,15 @@
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>归属</TableHead>
-                      <TableHead>退款单号</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>模式</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>原因</TableHead>
-                      <TableHead>申请时间</TableHead>
+                      <TableHead>{{ t('ui.owner1e9b3dc') }}</TableHead>
+                      <TableHead>{{ t('ui.refundId') }}</TableHead>
+                      <TableHead>{{ t('ui.amount') }}</TableHead>
+                      <TableHead>{{ t('ui.mode') }}</TableHead>
+                      <TableHead>{{ t('ui.status6320b4a') }}</TableHead>
+                      <TableHead>{{ t('ui.reasonf029d9c') }}</TableHead>
+                      <TableHead>{{ t('ui.requestedAt') }}</TableHead>
                       <TableHead class="text-right">
-                        操作
+                        {{ t('ui.actionsed31fbb') }}
                       </TableHead>
                     </TableRow>
                   </TableHeader>
@@ -409,7 +408,7 @@
                             variant="outline"
                             @click="openRefundDrawer(refund)"
                           >
-                            审批
+                            {{ t('ui.approve') }}
                           </Button>
                         </div>
                       </TableCell>
@@ -420,8 +419,8 @@
                         class="py-12"
                       >
                         <EmptyState
-                          title="暂无退款申请"
-                          description="当前筛选条件下没有退款单"
+                          :title="t('ui.noRefundRequests')"
+                          :description="t('ui.noRefundsMatchTheSelectedFilters')"
                         />
                       </TableCell>
                     </TableRow>
@@ -446,55 +445,55 @@
             <div class="flex flex-wrap items-center gap-2">
               <Select v-model="orderStatusFilter">
                 <SelectTrigger class="w-[180px]">
-                  <SelectValue placeholder="订单状态" />
+                  <SelectValue :placeholder="t('ui.orderStatus')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">
-                    全部状态
+                    {{ t('ui.allStatuses') }}
                   </SelectItem>
                   <SelectItem value="pending">
-                    待支付
+                    {{ t('ui.awaitingPayment') }}
                   </SelectItem>
                   <SelectItem value="paid">
-                    已支付
+                    {{ t('ui.paid0a52f8a') }}
                   </SelectItem>
                   <SelectItem value="credited">
-                    已到账
+                    {{ t('ui.credited') }}
                   </SelectItem>
                   <SelectItem value="failed">
-                    支付失败
+                    {{ t('ui.paymentFailed') }}
                   </SelectItem>
                   <SelectItem value="expired">
-                    已过期
+                    {{ t('ui.expired') }}
                   </SelectItem>
                 </SelectContent>
               </Select>
 
               <Select v-model="orderMethodFilter">
                 <SelectTrigger class="w-[180px]">
-                  <SelectValue placeholder="支付方式" />
+                  <SelectValue :placeholder="t('ui.paymentMethod')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">
-                    全部方式
+                    {{ t('ui.allMethods') }}
                   </SelectItem>
                   <SelectItem value="alipay">
-                    支付宝
+                    {{ t('ui.alipay') }}
                   </SelectItem>
                   <SelectItem value="wechat">
-                    微信支付
+                    {{ t('ui.wechatPay') }}
                   </SelectItem>
                   <SelectItem value="admin_manual">
-                    人工充值
+                    {{ t('ui.manualTopUp') }}
                   </SelectItem>
                   <SelectItem value="card_code">
-                    充值卡
+                    {{ t('ui.topUpCard') }}
                   </SelectItem>
                   <SelectItem value="gift_code">
-                    礼品卡
+                    {{ t('ui.giftCard') }}
                   </SelectItem>
                   <SelectItem value="card_recharge">
-                    卡密充值
+                    {{ t('ui.codeTopUp') }}
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -510,14 +509,14 @@
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>订单号</TableHead>
-                      <TableHead>钱包名称</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>支付方式</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>创建时间</TableHead>
+                      <TableHead>{{ t('ui.orderNumber') }}</TableHead>
+                      <TableHead>{{ t('ui.walletName') }}</TableHead>
+                      <TableHead>{{ t('ui.amount') }}</TableHead>
+                      <TableHead>{{ t('ui.paymentMethod') }}</TableHead>
+                      <TableHead>{{ t('ui.status6320b4a') }}</TableHead>
+                      <TableHead>{{ t('ui.createdAt') }}</TableHead>
                       <TableHead class="text-right">
-                        操作
+                        {{ t('ui.actionsed31fbb') }}
                       </TableHead>
                     </TableRow>
                   </TableHeader>
@@ -556,7 +555,7 @@
                             size="sm"
                             @click="openCreditDialog(order)"
                           >
-                            到账
+                            {{ t('ui.credit') }}
                           </Button>
                           <Button
                             v-if="canExpireOrder(order.status)"
@@ -565,7 +564,7 @@
                             :disabled="submittingOrderAction"
                             @click="expireOrder(order.id)"
                           >
-                            过期
+                            {{ t('ui.expired97399bd') }}
                           </Button>
                           <Button
                             v-if="canFailOrder(order.status)"
@@ -574,7 +573,7 @@
                             :disabled="submittingOrderAction"
                             @click="failOrder(order.id)"
                           >
-                            失败
+                            {{ t('ui.failed28384d7') }}
                           </Button>
                         </div>
                       </TableCell>
@@ -585,8 +584,8 @@
                         class="py-10"
                       >
                         <EmptyState
-                          title="暂无支付订单"
-                          description="当前筛选条件下没有数据"
+                          :title="t('ui.noPaymentOrders')"
+                          :description="t('ui.noDataUnderTheCurrentFilters')"
                         />
                       </TableCell>
                     </TableRow>
@@ -611,17 +610,17 @@
             <div class="flex items-center gap-2">
               <Select v-model="callbackMethodFilter">
                 <SelectTrigger class="w-[180px]">
-                  <SelectValue placeholder="支付方式" />
+                  <SelectValue :placeholder="t('ui.paymentMethod')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">
-                    全部方式
+                    {{ t('ui.allMethods') }}
                   </SelectItem>
                   <SelectItem value="alipay">
-                    支付宝
+                    {{ t('ui.alipay') }}
                   </SelectItem>
                   <SelectItem value="wechat">
-                    微信支付
+                    {{ t('ui.wechatPay') }}
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -636,12 +635,12 @@
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>回调键</TableHead>
-                      <TableHead>订单号</TableHead>
-                      <TableHead>方式</TableHead>
-                      <TableHead>验签</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>时间</TableHead>
+                      <TableHead>{{ t('ui.callbackKey') }}</TableHead>
+                      <TableHead>{{ t('ui.orderNumber') }}</TableHead>
+                      <TableHead>{{ t('ui.method') }}</TableHead>
+                      <TableHead>{{ t('ui.signatureVerification') }}</TableHead>
+                      <TableHead>{{ t('ui.status6320b4a') }}</TableHead>
+                      <TableHead>{{ t('ui.time') }}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -658,7 +657,7 @@
                       <TableCell>{{ paymentMethodLabel(callback.payment_method) }}</TableCell>
                       <TableCell>
                         <Badge :variant="callback.signature_valid ? 'success' : 'destructive'">
-                          {{ callback.signature_valid ? '通过' : '失败' }}
+                          {{ callback.signature_valid ? t('ui.passed') : t('ui.failed28384d7') }}
                         </Badge>
                       </TableCell>
                       <TableCell>
@@ -676,8 +675,8 @@
                         class="py-10"
                       >
                         <EmptyState
-                          title="暂无回调日志"
-                          description="当前筛选条件下没有数据"
+                          :title="t('ui.noCallbackLogs')"
+                          :description="t('ui.noDataUnderTheCurrentFilters')"
                         />
                       </TableCell>
                     </TableRow>
@@ -697,718 +696,37 @@
 
           <TabsContent
             value="redeem_codes"
-            class="mt-5 space-y-5"
+            class="mt-5"
           >
-            <div class="rounded-2xl border border-border/60 bg-background p-4 space-y-4">
-              <div class="flex items-center justify-between gap-3">
-                <div>
-                  <h4 class="text-sm font-semibold">
-                    批量生成兑换码
-                  </h4>
-                  <p class="text-xs text-muted-foreground mt-1">
-                    生成后本会话可切换显示明文；页面刷新后仅保留脱敏码。
-                  </p>
-                </div>
-                <RefreshButton
-                  :loading="loadingRedeemBatches || loadingRedeemCodes"
-                  @click="loadRedeemCodeBatches"
-                />
-              </div>
-
-              <div class="grid gap-3 lg:grid-cols-4">
-                <div class="space-y-1.5">
-                  <Label>批次名称</Label>
-                  <Input v-model="redeemBatchForm.name" />
-                </div>
-                <div class="space-y-1.5">
-                  <Label>面额 (USD)</Label>
-                  <Input
-                    v-model.number="redeemBatchForm.amount_usd"
-                    type="number"
-                    min="0.01"
-                    step="0.01"
-                  />
-                </div>
-                <div class="space-y-1.5">
-                  <Label>生成数量</Label>
-                  <Input
-                    v-model.number="redeemBatchForm.total_count"
-                    type="number"
-                    min="1"
-                    step="1"
-                  />
-                </div>
-                <div class="space-y-1.5">
-                  <Label>过期时间（可选）</Label>
-                  <Input
-                    v-model="redeemBatchForm.expires_at"
-                    type="datetime-local"
-                  />
-                </div>
-              </div>
-
-              <div class="space-y-1.5">
-                <Label>备注（可选）</Label>
-                <Textarea
-                  v-model="redeemBatchForm.description"
-                  rows="3"
-                  placeholder="例如：五一活动 / 线下渠道 / KOC 发放"
-                />
-              </div>
-
-              <div class="flex flex-wrap justify-end gap-2">
-                <Button
-                  variant="outline"
-                  :disabled="!canExportLatestGeneratedRedeemCodes"
-                  @click="exportLatestGeneratedRedeemCodes"
-                >
-                  导出最近生成
-                </Button>
-                <Button
-                  :disabled="submittingRedeemBatch"
-                  @click="submitRedeemCodeBatch"
-                >
-                  {{ submittingRedeemBatch ? '生成中...' : '生成兑换码' }}
-                </Button>
-              </div>
-
-              <div
-                v-if="latestGeneratedRedeemBatch"
-                class="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground"
-              >
-                最近生成批次:
-                <span class="font-medium text-foreground">{{ latestGeneratedRedeemBatch.name }}</span>
-                · {{ latestGeneratedRedeemCodes.length }} 个兑换码
-              </div>
-            </div>
-
-            <div class="grid gap-5 xl:grid-cols-[1.1fr_1fr]">
-              <div class="space-y-4">
-                <div class="flex flex-wrap items-center gap-2">
-                  <Select v-model="redeemBatchStatusFilter">
-                    <SelectTrigger class="w-[180px]">
-                      <SelectValue placeholder="批次状态" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">
-                        全部状态
-                      </SelectItem>
-                      <SelectItem value="active">
-                        可用
-                      </SelectItem>
-                      <SelectItem value="disabled">
-                        已停用
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <div class="text-sm text-muted-foreground">
-                    共 {{ redeemBatchTotal }} 个批次
-                  </div>
-                </div>
-
-                <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
-                  <div class="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>批次</TableHead>
-                          <TableHead>面额</TableHead>
-                          <TableHead>数量</TableHead>
-                          <TableHead>状态</TableHead>
-                          <TableHead class="text-right">
-                            操作
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        <TableRow
-                          v-for="batch in redeemBatches"
-                          :key="batch.id"
-                          class="hover:bg-muted/20"
-                          :class="batch.id === selectedRedeemBatchId ? 'bg-muted/30 ring-1 ring-border/60' : ''"
-                        >
-                          <TableCell class="min-w-[220px]">
-                            <div class="text-sm font-medium">
-                              {{ batch.name }}
-                            </div>
-                            <div class="text-xs text-muted-foreground mt-1">
-                              过期: {{ formatDateTime(batch.expires_at) }}
-                            </div>
-                          </TableCell>
-                          <TableCell class="tabular-nums">
-                            {{ formatCurrency(batch.amount_usd) }}
-                          </TableCell>
-                          <TableCell class="text-xs text-muted-foreground">
-                            {{ batch.redeemed_count }} / {{ batch.total_count }} 已使用
-                          </TableCell>
-                          <TableCell>
-                            <Badge :variant="batch.status === 'active' ? 'success' : 'secondary'">
-                              {{ batch.status === 'active' ? '可用' : '已停用' }}
-                            </Badge>
-                          </TableCell>
-                          <TableCell class="text-right">
-                            <div class="flex justify-end gap-2">
-                              <Button
-                                size="sm"
-                                :variant="batch.id === selectedRedeemBatchId ? 'default' : 'outline'"
-                                @click="selectRedeemBatch(batch)"
-                              >
-                                {{ batch.id === selectedRedeemBatchId ? '当前查看' : '查看码' }}
-                              </Button>
-                              <Button
-                                v-if="batch.status === 'active'"
-                                size="sm"
-                                variant="destructive"
-                                @click="disableRedeemBatch(batch.id)"
-                              >
-                                停用批次
-                              </Button>
-                              <Button
-                                v-if="batch.status === 'disabled'"
-                                size="sm"
-                                variant="destructive"
-                                :disabled="batch.redeemed_count > 0"
-                                @click="deleteRedeemBatch(batch)"
-                              >
-                                删除批次
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                        <TableRow v-if="!loadingRedeemBatches && redeemBatches.length === 0">
-                          <TableCell
-                            colspan="5"
-                            class="py-10"
-                          >
-                            <EmptyState
-                              title="暂无兑换码批次"
-                              description="创建批次后会在这里显示"
-                            />
-                          </TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  </div>
-                </div>
-
-                <Pagination
-                  :current="redeemBatchPage"
-                  :total="redeemBatchTotal"
-                  :page-size="redeemBatchPageSize"
-                  @update:current="handleRedeemBatchPageChange"
-                  @update:page-size="handleRedeemBatchPageSizeChange"
-                />
-              </div>
-
-              <div
-                ref="redeemCodesPanelRef"
-                class="space-y-4"
-              >
-                <div class="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h4 class="text-sm font-semibold">
-                      {{ currentRedeemBatch?.name || '兑换码列表' }}
-                    </h4>
-                    <p class="text-xs text-muted-foreground mt-1">
-                      {{ currentRedeemBatch ? `面额 ${formatCurrency(currentRedeemBatch.amount_usd)} · 剩余 ${currentRedeemBatch.active_count}` : '先从左侧选择一个批次' }}
-                    </p>
-                  </div>
-                  <div class="flex flex-wrap items-center gap-3">
-                    <div class="flex items-center gap-2">
-                      <span class="text-xs text-muted-foreground">显示明文</span>
-                      <Switch
-                        :model-value="showPlainRedeemCodes"
-                        :disabled="!canRevealPlainRedeemCodes"
-                        @update:model-value="showPlainRedeemCodes = Boolean($event)"
-                      />
-                    </div>
-                    <Select v-model="redeemCodeStatusFilter">
-                      <SelectTrigger class="w-[180px]">
-                        <SelectValue placeholder="码状态" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">
-                          全部状态
-                        </SelectItem>
-                        <SelectItem value="active">
-                          可用
-                        </SelectItem>
-                        <SelectItem value="disabled">
-                          已停用
-                        </SelectItem>
-                        <SelectItem value="redeemed">
-                          已兑换
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
-                <div class="text-xs text-muted-foreground">
-                  {{
-                    canRevealPlainRedeemCodes
-                      ? '当前批次属于本次生成，已支持明文显示开关。'
-                      : '仅当前会话内最近生成的一批兑换码支持明文显示；其余批次仅显示脱敏码。'
-                  }}
-                </div>
-
-                <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
-                  <div class="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>兑换码</TableHead>
-                          <TableHead>状态</TableHead>
-                          <TableHead>兑换用户</TableHead>
-                          <TableHead>关联订单</TableHead>
-                          <TableHead class="text-right">
-                            操作
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        <TableRow
-                          v-for="code in redeemCodes"
-                          :key="code.id"
-                        >
-                          <TableCell class="font-mono text-xs">
-                            {{ displayRedeemCode(code) }}
-                          </TableCell>
-                          <TableCell>
-                            <Badge :variant="redeemCodeStatusBadge(code.status)">
-                              {{ redeemCodeStatusLabel(code.status) }}
-                            </Badge>
-                          </TableCell>
-                          <TableCell class="text-xs text-muted-foreground">
-                            {{ code.redeemed_by_user_name || code.redeemed_by_user_id || '-' }}
-                          </TableCell>
-                          <TableCell class="font-mono text-xs">
-                            {{ code.redeemed_order_no || code.redeemed_payment_order_id || '-' }}
-                          </TableCell>
-                          <TableCell class="text-right">
-                            <Button
-                              v-if="code.status === 'active'"
-                              size="sm"
-                              variant="outline"
-                              @click="disableRedeemCode(code.id)"
-                            >
-                              停用
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                        <TableRow v-if="!loadingRedeemCodes && redeemCodes.length === 0">
-                          <TableCell
-                            colspan="5"
-                            class="py-10"
-                          >
-                            <EmptyState
-                              title="暂无兑换码"
-                              description="选择左侧批次后会显示兑换码明细"
-                            />
-                          </TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  </div>
-                </div>
-
-                <Pagination
-                  :current="redeemCodePage"
-                  :total="redeemCodeTotal"
-                  :page-size="redeemCodePageSize"
-                  @update:current="handleRedeemCodePageChange"
-                  @update:page-size="handleRedeemCodePageSizeChange"
-                />
-              </div>
-            </div>
+            <WalletRedeemCodesTab ref="redeemCodesTab" />
           </TabsContent>
         </Tabs>
       </div>
     </Card>
 
-    <Teleport to="body">
-      <Transition name="drawer">
-        <div
-          v-if="showLedgerDrawer && currentLedger"
-          class="fixed inset-0 z-[80] flex justify-end"
-        >
-          <div
-            class="absolute inset-0 bg-black/35 backdrop-blur-sm"
-            @click="closeLedgerDrawer"
-          />
-          <div class="drawer-panel relative h-full w-full sm:w-[760px] lg:w-[860px] sm:max-w-[95vw] border-l border-border bg-background shadow-2xl overflow-y-auto">
-            <div class="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur px-4 py-3 sm:px-6 sm:py-4">
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <h3 class="text-lg font-semibold text-foreground leading-tight">
-                    流水详情
-                  </h3>
-                  <p class="text-xs text-muted-foreground">
-                    资金动作审计信息
-                  </p>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-9 w-9 shrink-0"
-                  title="关闭"
-                  @click="closeLedgerDrawer"
-                >
-                  <X class="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
+    <WalletLedgerDetailDrawer
+      :open="showLedgerDrawer"
+      :ledger="currentLedger"
+      @close="closeLedgerDrawer"
+    />
 
-            <div class="p-4 sm:p-6 space-y-5">
-              <div class="rounded-2xl border border-border/60 bg-muted/30 p-4 space-y-3">
-                <div class="flex flex-wrap items-center justify-between gap-2">
-                  <div class="flex items-center gap-2">
-                    <Badge variant="outline">
-                      {{ walletTransactionCategoryLabel(currentLedger.category) }}
-                    </Badge>
-                    <Badge variant="secondary">
-                      {{ walletTransactionReasonLabel(currentLedger.reason_code) }}
-                    </Badge>
-                  </div>
-                  <span
-                    class="text-sm font-semibold tabular-nums"
-                    :class="currentLedger.amount >= 0 ? 'text-emerald-600' : 'text-rose-600'"
-                  >
-                    {{ currentLedger.amount >= 0 ? '+' : '' }}{{ currentLedger.amount.toFixed(4) }}
-                  </span>
-                </div>
-                <div class="text-xs text-muted-foreground">
-                  {{ formatDateTime(currentLedger.created_at) }}
-                </div>
-              </div>
+    <WalletRefundReviewDrawer
+      :open="showRefundDrawer"
+      :refund="currentRefund"
+      :submitting="submittingRefundAction"
+      @close="closeRefundDrawer"
+      @process="processRefund"
+      @fail="submitFailRefund"
+      @complete="submitCompleteRefund"
+    />
 
-              <div class="grid gap-3 sm:grid-cols-2">
-                <div class="rounded-xl border border-border/60 p-3">
-                  <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                    归属
-                  </div>
-                  <div class="mt-1 text-sm font-medium">
-                    {{ ownerDisplayName(currentLedger.owner_name, currentLedger.owner_type) }}
-                  </div>
-                  <div class="mt-1 text-xs text-muted-foreground flex items-center gap-2">
-                    <span>{{ ownerTypeLabel(currentLedger.owner_type) }}</span>
-                    <Badge
-                      v-if="currentLedger.wallet_status"
-                      variant="outline"
-                      class="text-[10px]"
-                    >
-                      {{ walletStatusLabel(currentLedger.wallet_status) }}
-                    </Badge>
-                  </div>
-                </div>
-                <div class="rounded-xl border border-border/60 p-3">
-                  <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                    余额变化
-                  </div>
-                  <div class="mt-1 text-sm font-medium tabular-nums">
-                    {{ currentLedger.balance_before.toFixed(4) }} → {{ currentLedger.balance_after.toFixed(4) }}
-                  </div>
-                  <div
-                    v-if="currentLedger.recharge_balance_before !== null && currentLedger.recharge_balance_before !== undefined && currentLedger.gift_balance_before !== null && currentLedger.gift_balance_before !== undefined"
-                    class="mt-1 text-xs text-muted-foreground tabular-nums"
-                  >
-                    充 {{ Number(currentLedger.recharge_balance_before).toFixed(4) }}→{{ Number(currentLedger.recharge_balance_after ?? 0).toFixed(4) }}
-                    · 赠 {{ Number(currentLedger.gift_balance_before).toFixed(4) }}→{{ Number(currentLedger.gift_balance_after ?? 0).toFixed(4) }}
-                  </div>
-                </div>
-              </div>
-
-              <div class="grid gap-3 sm:grid-cols-2">
-                <div class="rounded-xl border border-border/60 p-3">
-                  <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                    关联类型
-                  </div>
-                  <div class="mt-1 text-sm font-medium break-all">
-                    {{ walletLinkTypeLabel(currentLedger.link_type) }}
-                  </div>
-                </div>
-                <div class="rounded-xl border border-border/60 p-3">
-                  <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                    交易ID
-                  </div>
-                  <div class="mt-1 text-sm font-mono break-all">
-                    {{ currentLedger.id }}
-                  </div>
-                </div>
-              </div>
-
-              <div
-                v-if="currentLedger.link_type === 'payment_order'"
-                class="grid gap-3 sm:grid-cols-2"
-              >
-                <div class="rounded-xl border border-border/60 p-3">
-                  <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                    支付方式
-                  </div>
-                  <div class="mt-1 text-sm font-medium">
-                    <span v-if="loadingLedgerOrderNo">加载中...</span>
-                    <span v-else>{{ ledgerPaymentMethod ? paymentMethodLabel(ledgerPaymentMethod) : '-' }}</span>
-                  </div>
-                </div>
-                <div class="rounded-xl border border-border/60 p-3">
-                  <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                    充值订单号
-                  </div>
-                  <div class="mt-1 text-sm font-mono break-all">
-                    <span v-if="loadingLedgerOrderNo">加载中...</span>
-                    <span v-else>{{ ledgerPaymentOrderNo || '-' }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div class="rounded-xl border border-border/60 p-3">
-                <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                  操作用户
-                </div>
-                <div class="mt-1 text-sm font-medium">
-                  {{ currentLedger.operator_name || (currentLedger.operator_id ? '已删除用户' : '系统自动') }}
-                </div>
-                <div class="mt-1 text-xs text-muted-foreground">
-                  ID: {{ currentLedger.operator_id || '-' }}
-                </div>
-                <div
-                  v-if="currentLedger.operator_email"
-                  class="mt-1 text-xs text-muted-foreground"
-                >
-                  邮箱: {{ currentLedger.operator_email }}
-                </div>
-              </div>
-
-              <div class="rounded-xl border border-border/60 p-3">
-                <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                  说明
-                </div>
-                <div class="mt-1 text-sm text-foreground whitespace-pre-wrap break-words">
-                  {{ currentLedger.description || '-' }}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <Teleport to="body">
-      <Transition name="drawer">
-        <div
-          v-if="showRefundDrawer && currentRefund"
-          class="fixed inset-0 z-[80] flex justify-end"
-        >
-          <div
-            class="absolute inset-0 bg-black/35 backdrop-blur-sm"
-            @click="closeRefundDrawer"
-          />
-          <div class="drawer-panel relative h-full w-full sm:w-[760px] lg:w-[860px] sm:max-w-[95vw] border-l border-border bg-background shadow-2xl overflow-y-auto">
-            <div class="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur px-4 py-3 sm:px-6 sm:py-4">
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <h3 class="text-lg font-semibold text-foreground leading-tight">
-                    退款审批
-                  </h3>
-                  <p class="text-xs text-muted-foreground">
-                    退款单: {{ currentRefund.refund_no }}
-                  </p>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-9 w-9 shrink-0"
-                  title="关闭"
-                  @click="closeRefundDrawer"
-                >
-                  <X class="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-
-            <div class="p-4 sm:p-6 space-y-5">
-              <div class="rounded-2xl border border-border/60 bg-muted/30 p-4">
-                <div class="grid gap-3 sm:grid-cols-2">
-                  <div>
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                      归属
-                    </div>
-                    <div class="mt-1 text-sm font-medium">
-                      {{ ownerDisplayName(currentRefund.owner_name, currentRefund.owner_type) }}
-                    </div>
-                    <div class="mt-1 text-xs text-muted-foreground">
-                      {{ ownerTypeLabel(currentRefund.owner_type) }}
-                    </div>
-                  </div>
-                  <div>
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                      金额
-                    </div>
-                    <div class="mt-1 text-sm font-semibold tabular-nums">
-                      {{ formatCurrency(currentRefund.amount_usd) }}
-                    </div>
-                  </div>
-                  <div>
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                      退款模式
-                    </div>
-                    <div class="mt-1 text-sm">
-                      {{ refundModeLabel(currentRefund.refund_mode) }}
-                    </div>
-                  </div>
-                  <div>
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                      状态
-                    </div>
-                    <div class="mt-1">
-                      <Badge :variant="refundStatusBadge(currentRefund.status)">
-                        {{ refundStatusLabel(currentRefund.status) }}
-                      </Badge>
-                    </div>
-                  </div>
-                  <div class="sm:col-span-2">
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                      申请原因
-                    </div>
-                    <div class="mt-1 text-sm text-foreground whitespace-pre-wrap break-words">
-                      {{ currentRefund.reason || '-' }}
-                    </div>
-                  </div>
-                  <div
-                    v-if="currentRefund.failure_reason"
-                    class="sm:col-span-2"
-                  >
-                    <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                      失败原因
-                    </div>
-                    <div class="mt-1 text-sm text-rose-600 whitespace-pre-wrap break-words">
-                      {{ currentRefund.failure_reason }}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div
-                v-if="canFailRefund(currentRefund)"
-                class="rounded-xl border border-border/60 p-4 space-y-2"
-              >
-                <Label>驳回原因</Label>
-                <Input
-                  id="refund-fail-reason"
-                  v-model="failRefundForm.reason"
-                  placeholder="请填写驳回原因"
-                />
-              </div>
-
-              <div
-                v-if="canCompleteRefund(currentRefund.status)"
-                class="rounded-xl border border-border/60 p-4 space-y-3"
-              >
-                <div class="space-y-1.5">
-                  <Label>网关退款号（可选）</Label>
-                  <Input v-model="completeRefundForm.gateway_refund_id" />
-                </div>
-                <div class="space-y-1.5">
-                  <Label>打款凭证 / 参考号（可选）</Label>
-                  <Input v-model="completeRefundForm.payout_reference" />
-                </div>
-              </div>
-            </div>
-
-            <div class="sticky bottom-0 border-t border-border bg-background/95 backdrop-blur px-4 py-3 sm:px-6 sm:py-4">
-              <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                <Button
-                  variant="outline"
-                  @click="closeRefundDrawer"
-                >
-                  关闭
-                </Button>
-                <Button
-                  v-if="canProcessRefund(currentRefund.status)"
-                  variant="outline"
-                  :disabled="submittingRefundAction"
-                  @click="processRefund(currentRefund)"
-                >
-                  {{ submittingRefundAction ? '处理中...' : '处理退款' }}
-                </Button>
-                <Button
-                  v-if="canCompleteRefund(currentRefund.status)"
-                  :disabled="submittingRefundAction"
-                  @click="submitCompleteRefund"
-                >
-                  {{ submittingRefundAction ? '提交中...' : '确认完成' }}
-                </Button>
-                <Button
-                  v-if="canFailRefund(currentRefund)"
-                  variant="destructive"
-                  :disabled="submittingRefundAction"
-                  @click="submitFailRefund"
-                >
-                  {{ submittingRefundAction ? '提交中...' : '驳回退款' }}
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <Dialog v-model="showCreditDialog">
-      <template #header>
-        <div class="px-6 py-4 border-b border-border">
-          <h3 class="text-lg font-semibold">
-            人工到账
-          </h3>
-          <p class="text-xs text-muted-foreground mt-1">
-            订单: {{ currentOrder?.order_no || '-' }}
-          </p>
-        </div>
-      </template>
-      <div class="space-y-4">
-        <div class="space-y-1.5">
-          <Label>网关订单号（可选）</Label>
-          <Input v-model="creditForm.gateway_order_id" />
-        </div>
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div class="space-y-1.5">
-            <Label>实付金额（可选）</Label>
-            <Input
-              v-model.number="creditForm.pay_amount"
-              type="number"
-              min="0.01"
-              step="0.01"
-            />
-          </div>
-          <div class="space-y-1.5">
-            <Label>币种（可选）</Label>
-            <Input v-model="creditForm.pay_currency" />
-          </div>
-          <div class="space-y-1.5">
-            <Label>汇率（可选）</Label>
-            <Input
-              v-model.number="creditForm.exchange_rate"
-              type="number"
-              min="0.000001"
-              step="0.000001"
-            />
-          </div>
-        </div>
-      </div>
-      <template #footer>
-        <Button
-          variant="outline"
-          @click="showCreditDialog = false"
-        >
-          取消
-        </Button>
-        <Button
-          :disabled="submittingOrderAction"
-          @click="submitCreditOrder"
-        >
-          {{ submittingOrderAction ? '提交中...' : '确认到账' }}
-        </Button>
-      </template>
-    </Dialog>
+    <WalletOrderCreditDialog
+      :open="showCreditDialog"
+      :order="currentOrder"
+      :submitting="submittingOrderAction"
+      @close="showCreditDialog = false"
+      @submit="submitCreditOrder"
+    />
   </div>
   <RefundReferralReview
     ref="referralReview"
@@ -1418,17 +736,23 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import RefundReferralReview from '@/features/wallet/components/RefundReferralReview.vue'
+import WalletLedgerDetailDrawer from '@/features/wallet/components/WalletLedgerDetailDrawer.vue'
+import WalletRefundReviewDrawer from '@/features/wallet/components/WalletRefundReviewDrawer.vue'
+import type { WalletRefundCompletePayload } from '@/features/wallet/components/WalletRefundReviewDrawer.vue'
+import WalletOrderCreditDialog from '@/features/wallet/components/WalletOrderCreditDialog.vue'
+import type { WalletOrderCreditPayload } from '@/features/wallet/components/WalletOrderCreditDialog.vue'
+import WalletRedeemCodesTab from '@/features/wallet/components/WalletRedeemCodesTab.vue'
 import { useWalletLocation } from '@/features/wallet/useWalletLocation'
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   Badge,
   Button,
   Card,
-  Dialog,
-  Input,
-  Label,
   Pagination,
   RefreshButton,
   Select,
@@ -1436,7 +760,6 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Switch,
   Table,
   TableBody,
   TableCell,
@@ -1447,10 +770,8 @@ import {
   TabsContent,
   TabsList,
   TabsTrigger,
-  Textarea,
 } from '@/components/ui'
 import { EmptyState } from '@/components/common'
-import { X } from 'lucide-vue-next'
 import {
   adminWalletApi,
   type AdminGlobalRefund,
@@ -1459,13 +780,10 @@ import {
 import {
   adminPaymentsApi,
   type PaymentCallbackRecord,
-  type RedeemCodeBatch,
-  type RedeemCodeRecord,
 } from '@/api/admin-payments'
 import type { PaymentOrder, RefundRequest } from '@/api/wallet'
 import { parseApiError } from '@/utils/errorParser'
 import { useToast } from '@/composables/useToast'
-import { getI18nLocale, useI18n } from '@/i18n'
 import { log } from '@/utils/logger'
 import {
   callbackStatusBadge,
@@ -1477,11 +795,20 @@ import {
   refundModeLabel,
   refundStatusBadge,
   refundStatusLabel,
-  walletLinkTypeLabel,
   walletStatusLabel,
   walletTransactionCategoryLabel,
   walletTransactionReasonLabel,
-} from '@/utils/walletDisplay'
+  ownerDisplayName,
+  ownerTypeLabel,
+} from '@/features/wallet/utils/walletDisplay'
+import {
+  canCreditOrder,
+  canExpireOrder,
+  canFailOrder,
+  canFailRefund,
+} from '@/features/wallet/utils/refundActions'
+import { formatDateTime } from '@/utils/format'
+import { useClipboard } from '@/composables/useClipboard'
 
 type WalletManagementTab = 'ledger' | 'refunds' | 'orders' | 'callbacks' | 'redeem_codes'
 type LedgerCategory = 'recharge' | 'gift' | 'adjust' | 'refund'
@@ -1492,22 +819,23 @@ type LedgerReasonOption = {
 }
 
 const referralReview = ref<InstanceType<typeof RefundReferralReview> | null>(null)
+const redeemCodesTab = ref<InstanceType<typeof WalletRedeemCodesTab> | null>(null)
 
 const LEDGER_REASON_OPTIONS: LedgerReasonOption[] = [
-  { value: 'topup_admin_manual', label: '人工充值', category: 'recharge' },
-  { value: 'topup_gateway', label: '支付充值', category: 'recharge' },
-  { value: 'topup_card_code', label: '卡密充值', category: 'recharge' },
-  { value: 'gift_initial', label: '初始赠款', category: 'gift' },
-  { value: 'gift_campaign', label: '活动赠款', category: 'gift' },
-  { value: 'gift_expire_reclaim', label: '赠款回收', category: 'gift' },
-  { value: 'adjust_admin', label: '人工调账', category: 'adjust' },
-  { value: 'adjust_system', label: '系统调账', category: 'adjust' },
-  { value: 'refund_out', label: '退款扣减', category: 'refund' },
-  { value: 'refund_revert', label: '退款回补', category: 'refund' },
+  { value: 'topup_admin_manual', get label() { return t('ui.manualTopUp') }, category: 'recharge' },
+  { value: 'topup_gateway', get label() { return t('ui.paymentTopUp') }, category: 'recharge' },
+  { value: 'topup_card_code', get label() { return t('ui.codeTopUp') }, category: 'recharge' },
+  { value: 'gift_initial', get label() { return t('ui.initialGiftCredit') }, category: 'gift' },
+  { value: 'gift_campaign', get label() { return t('ui.promotionalGiftCredit') }, category: 'gift' },
+  { value: 'gift_expire_reclaim', get label() { return t('ui.giftCreditReversal') }, category: 'gift' },
+  { value: 'adjust_admin', get label() { return t('ui.manualAdjustment') }, category: 'adjust' },
+  { value: 'adjust_system', get label() { return t('ui.systemAdjustment') }, category: 'adjust' },
+  { value: 'refund_out', get label() { return t('ui.refundDebit') }, category: 'refund' },
+  { value: 'refund_revert', get label() { return t('ui.refundRecredit') }, category: 'refund' },
 ]
 
 const { success, error: showError } = useToast()
-const { legacyT } = useI18n()
+const { copyToClipboard } = useClipboard()
 const route = useRoute()
 
 const activeTab = ref<WalletManagementTab>('ledger')
@@ -1517,11 +845,8 @@ const loadingLedger = ref(false)
 const loadingRefunds = ref(false)
 const loadingOrders = ref(false)
 const loadingCallbacks = ref(false)
-const loadingRedeemBatches = ref(false)
-const loadingRedeemCodes = ref(false)
 const submittingRefundAction = ref(false)
 const submittingOrderAction = ref(false)
-const submittingRedeemBatch = ref(false)
 
 const ledgerItems = ref<AdminLedgerTransaction[]>([])
 const ledgerTotal = ref(0)
@@ -1557,72 +882,15 @@ const callbackPage = ref(1)
 const callbackPageSize = ref(20)
 const callbackMethodFilter = ref('all')
 
-const redeemBatches = ref<RedeemCodeBatch[]>([])
-const redeemBatchTotal = ref(0)
-const redeemBatchPage = ref(1)
-const redeemBatchPageSize = ref(20)
-const redeemBatchStatusFilter = ref('all')
-
-const redeemCodes = ref<RedeemCodeRecord[]>([])
-const redeemCodeTotal = ref(0)
-const redeemCodePage = ref(1)
-const redeemCodePageSize = ref(20)
-const redeemCodeStatusFilter = ref('all')
-const selectedRedeemBatchId = ref<string | null>(null)
-const currentRedeemBatch = ref<RedeemCodeBatch | null>(null)
-const latestGeneratedRedeemBatch = ref<RedeemCodeBatch | null>(null)
-const latestGeneratedRedeemCodes = ref<Array<{ id: string; code: string; masked_code: string }>>([])
-const showPlainRedeemCodes = ref(false)
-const redeemCodesPanelRef = ref<HTMLElement | null>(null)
-
-const redeemBatchForm = reactive({
-  name: '',
-  amount_usd: 10,
-  total_count: 20,
-  expires_at: '',
-  description: '',
-})
-
-const canRevealPlainRedeemCodes = computed(
-  () =>
-    !!currentRedeemBatch.value &&
-    currentRedeemBatch.value.id === latestGeneratedRedeemBatch.value?.id &&
-    latestGeneratedRedeemCodes.value.length > 0
-)
-
-const canExportLatestGeneratedRedeemCodes = computed(
-  () => !!latestGeneratedRedeemBatch.value && latestGeneratedRedeemCodes.value.length > 0
-)
-
 const walletMetaMap = ref<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>({})
 
 const showLedgerDrawer = ref(false)
 const showRefundDrawer = ref(false)
 const currentLedger = ref<AdminLedgerTransaction | null>(null)
 const currentRefund = ref<AdminGlobalRefund | null>(null)
-const loadingLedgerOrderNo = ref(false)
-const ledgerPaymentOrderNo = ref<string | null>(null)
-const ledgerPaymentMethod = ref<string | null>(null)
-let ledgerDetailSequence = 0
 
 const showCreditDialog = ref(false)
 const currentOrder = ref<PaymentOrder | null>(null)
-
-const failRefundForm = reactive({
-  reason: '',
-})
-
-const completeRefundForm = reactive({
-  gateway_refund_id: '',
-  payout_reference: '',
-})
-
-const creditForm = reactive({
-  gateway_order_id: '',
-  pay_amount: undefined as number | undefined,
-  pay_currency: '',
-  exchange_rate: undefined as number | undefined,
-})
 
 const {
   target: locationTarget, loading: locationLoading, error: locationError,
@@ -1636,13 +904,8 @@ const {
   if (target.kind === 'ledger') openLedgerDrawer(target.item)
 })
 
-async function copyLocationId() {
-  try {
-    await navigator.clipboard.writeText(locationId.value)
-    success('ID 已复制')
-  } catch {
-    showError('复制失败，请手动复制上方 ID')
-  }
+function copyLocationId() {
+  void copyToClipboard(locationId.value)
 }
 
 watch([ledgerCategoryFilter, ledgerReasonFilter, ledgerOwnerFilter], () => {
@@ -1673,22 +936,6 @@ watch([orderStatusFilter, orderMethodFilter], () => {
 watch(callbackMethodFilter, () => {
   callbackPage.value = 1
   void loadCallbacks()
-})
-
-watch(redeemBatchStatusFilter, () => {
-  redeemBatchPage.value = 1
-  void loadRedeemCodeBatches()
-})
-
-watch(redeemCodeStatusFilter, () => {
-  redeemCodePage.value = 1
-  void loadRedeemCodes()
-})
-
-watch(canRevealPlainRedeemCodes, (enabled) => {
-  if (!enabled) {
-    showPlainRedeemCodes.value = false
-  }
 })
 
 watch(
@@ -1731,7 +978,7 @@ function loadActiveTab(): Promise<void> {
       case 'callbacks':
         return loadCallbacks()
       case 'redeem_codes':
-        return loadRedeemCodeBatches()
+        return redeemCodesTab.value?.load() ?? Promise.resolve()
       default:
         return loadLedger()
     }
@@ -1748,7 +995,7 @@ async function loadWalletMetaMap() {
     walletMetaMap.value = wallets.reduce<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>(
       (acc, wallet) => {
         const ownerName =
-          wallet.owner_name || (wallet.owner_type === 'user' ? '未命名用户' : '未命名密钥')
+          wallet.owner_name || (wallet.owner_type === 'user' ? t('ui.unnamedUser') : t('ui.unnamedKey'))
         acc[wallet.id] = {
           ownerName,
           ownerType: wallet.owner_type,
@@ -1845,261 +1092,27 @@ async function loadCallbacks() {
   }
 }
 
-async function loadRedeemCodeBatches() {
-  loadingRedeemBatches.value = true
-  try {
-    const offset = (redeemBatchPage.value - 1) * redeemBatchPageSize.value
-    const resp = await adminPaymentsApi.listRedeemCodeBatches({
-      status: redeemBatchStatusFilter.value !== 'all' ? redeemBatchStatusFilter.value : undefined,
-      limit: redeemBatchPageSize.value,
-      offset,
-    })
-    redeemBatches.value = resp.items
-    redeemBatchTotal.value = resp.total
-
-    if (selectedRedeemBatchId.value) {
-      const latest = resp.items.find(item => item.id === selectedRedeemBatchId.value)
-      if (latest) {
-        currentRedeemBatch.value = latest
-        await loadRedeemCodes(latest.id)
-      } else {
-        selectedRedeemBatchId.value = null
-        currentRedeemBatch.value = null
-        redeemCodes.value = []
-        redeemCodeTotal.value = 0
-      }
-    }
-  } catch (error) {
-    log.error('加载兑换码批次失败:', error)
-    showError(parseApiError(error, '加载兑换码批次失败'))
-  } finally {
-    loadingRedeemBatches.value = false
-  }
-}
-
-async function loadRedeemCodes(batchId = selectedRedeemBatchId.value || undefined) {
-  if (!batchId) {
-    redeemCodes.value = []
-    redeemCodeTotal.value = 0
-    return
-  }
-  loadingRedeemCodes.value = true
-  try {
-    const offset = (redeemCodePage.value - 1) * redeemCodePageSize.value
-    const resp = await adminPaymentsApi.listRedeemCodes(batchId, {
-      status: redeemCodeStatusFilter.value !== 'all' ? redeemCodeStatusFilter.value : undefined,
-      limit: redeemCodePageSize.value,
-      offset,
-    })
-    currentRedeemBatch.value = resp.batch
-    selectedRedeemBatchId.value = resp.batch.id
-    redeemCodes.value = resp.items
-    redeemCodeTotal.value = resp.total
-  } catch (error) {
-    log.error('加载兑换码列表失败:', error)
-    showError(parseApiError(error, '加载兑换码列表失败'))
-  } finally {
-    loadingRedeemCodes.value = false
-  }
-}
-
-async function selectRedeemBatch(batch: RedeemCodeBatch) {
-  currentRedeemBatch.value = batch
-  selectedRedeemBatchId.value = batch.id
-  redeemCodePage.value = 1
-  await loadRedeemCodes(batch.id)
-  await nextTick()
-  redeemCodesPanelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
-
-function exportRedeemCodesCsv(batch: RedeemCodeBatch, codes: Array<{ id: string; code: string; masked_code: string }>) {
-  const header = ['id', 'batch_name', 'code', 'masked_code']
-  const rows = codes.map(code => [code.id, batch.name, code.code, code.masked_code])
-  const csv = [header, ...rows]
-    .map(row => row.map(cell => `"${String(cell).replaceAll('"', '""')}"`).join(','))
-    .join('\n')
-  const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `redeem-codes-${batch.name}-${batch.id}.csv`
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
-}
-
-async function submitRedeemCodeBatch() {
-  if (!redeemBatchForm.name.trim()) {
-    showError('请填写批次名称')
-    return
-  }
-  if (!redeemBatchForm.amount_usd || redeemBatchForm.amount_usd <= 0) {
-    showError('请填写有效面额')
-    return
-  }
-  if (!redeemBatchForm.total_count || redeemBatchForm.total_count <= 0) {
-    showError('请填写有效数量')
-    return
-  }
-
-  submittingRedeemBatch.value = true
-  try {
-    const payload = {
-      name: redeemBatchForm.name.trim(),
-      amount_usd: redeemBatchForm.amount_usd,
-      total_count: redeemBatchForm.total_count,
-      expires_at: redeemBatchForm.expires_at ? new Date(redeemBatchForm.expires_at).toISOString() : undefined,
-      description: redeemBatchForm.description.trim() || undefined,
-    }
-    const resp = await adminPaymentsApi.createRedeemCodeBatch(payload)
-    latestGeneratedRedeemBatch.value = resp.batch
-    latestGeneratedRedeemCodes.value = resp.codes
-    showPlainRedeemCodes.value = true
-    success('兑换码批次已创建')
-    redeemBatchForm.name = ''
-    redeemBatchForm.description = ''
-    redeemBatchForm.expires_at = ''
-    currentRedeemBatch.value = resp.batch
-    selectedRedeemBatchId.value = resp.batch.id
-    await loadRedeemCodeBatches()
-    await loadRedeemCodes(resp.batch.id)
-  } catch (error) {
-    log.error('创建兑换码批次失败:', error)
-    showError(parseApiError(error, '创建兑换码批次失败'))
-  } finally {
-    submittingRedeemBatch.value = false
-  }
-}
-
-function exportLatestGeneratedRedeemCodes() {
-  if (!latestGeneratedRedeemBatch.value || latestGeneratedRedeemCodes.value.length === 0) {
-    showError('当前没有可导出的新生成兑换码')
-    return
-  }
-  exportRedeemCodesCsv(latestGeneratedRedeemBatch.value, latestGeneratedRedeemCodes.value)
-  success('CSV 已导出')
-}
-
-function displayRedeemCode(code: RedeemCodeRecord) {
-  if (!showPlainRedeemCodes.value || !canRevealPlainRedeemCodes.value) {
-    return code.masked_code
-  }
-  return latestGeneratedRedeemCodes.value.find(item => item.id === code.id)?.code || code.masked_code
-}
-
-async function disableRedeemBatch(batchId: string) {
-  try {
-    await adminPaymentsApi.disableRedeemCodeBatch(batchId)
-    success('批次已停用')
-    await loadRedeemCodeBatches()
-  } catch (error) {
-    log.error('停用兑换码批次失败:', error)
-    showError(parseApiError(error, '停用兑换码批次失败'))
-  }
-}
-
-async function deleteRedeemBatch(batch: RedeemCodeBatch) {
-  if (batch.redeemed_count > 0) {
-    showError('已有兑换记录的批次不能删除')
-    return
-  }
-  if (!window.confirm(legacyT(`确认删除批次「${batch.name}」吗？删除后无法恢复。`))) {
-    return
-  }
-
-  try {
-    await adminPaymentsApi.deleteRedeemCodeBatch(batch.id)
-    success('批次已删除')
-    if (selectedRedeemBatchId.value === batch.id) {
-      selectedRedeemBatchId.value = null
-      currentRedeemBatch.value = null
-      redeemCodes.value = []
-      redeemCodeTotal.value = 0
-      showPlainRedeemCodes.value = false
-    }
-    if (latestGeneratedRedeemBatch.value?.id === batch.id) {
-      latestGeneratedRedeemBatch.value = null
-      latestGeneratedRedeemCodes.value = []
-      showPlainRedeemCodes.value = false
-    }
-    await loadRedeemCodeBatches()
-  } catch (error) {
-    log.error('删除兑换码批次失败:', error)
-    showError(parseApiError(error, '删除兑换码批次失败'))
-  }
-}
-
-async function disableRedeemCode(codeId: string) {
-  try {
-    await adminPaymentsApi.disableRedeemCode(codeId)
-    success('兑换码已停用')
-    await Promise.all([loadRedeemCodes(), loadRedeemCodeBatches()])
-  } catch (error) {
-    log.error('停用兑换码失败:', error)
-    showError(parseApiError(error, '停用兑换码失败'))
-  }
-}
-
 function orderWalletName(walletId: string) {
-  return walletMetaMap.value[walletId]?.ownerName || '未知钱包'
+  return walletMetaMap.value[walletId]?.ownerName || t('ui.unknownWallet')
 }
 
 function orderWalletTypeLabel(walletId: string) {
   const ownerType = walletMetaMap.value[walletId]?.ownerType
-  if (!ownerType) return '未知归属'
-  return ownerType === 'user' ? '用户钱包' : '独立密钥钱包'
+  if (!ownerType) return t('ui.unknownOwner')
+  return ownerType === 'user' ? t('ui.userWallet') : t('ui.standaloneKeyWallet')
 }
 
 function openLedgerDrawer(tx: AdminLedgerTransaction) {
   currentLedger.value = tx
-  ledgerPaymentOrderNo.value = null
-  ledgerPaymentMethod.value = null
   showLedgerDrawer.value = true
-  void resolveLedgerRechargeOrderNo(tx)
-}
-
-async function resolveLedgerRechargeOrderNo(tx: AdminLedgerTransaction) {
-  const generation = ++ledgerDetailSequence
-  loadingLedgerOrderNo.value = false
-  if (tx.link_type !== 'payment_order' || !tx.link_id) {
-    ledgerPaymentOrderNo.value = null
-    ledgerPaymentMethod.value = null
-    return
-  }
-
-  if (tx.link_id.startsWith('po_')) {
-    ledgerPaymentOrderNo.value = tx.link_id
-    ledgerPaymentMethod.value = null
-    return
-  }
-
-  loadingLedgerOrderNo.value = true
-  try {
-    const resp = await adminPaymentsApi.getOrder(tx.link_id)
-    if (generation !== ledgerDetailSequence || !showLedgerDrawer.value || currentLedger.value?.id !== tx.id) return
-    ledgerPaymentOrderNo.value = resp.order.order_no || null
-    ledgerPaymentMethod.value = resp.order.payment_method || null
-  } catch (error) {
-    if (generation !== ledgerDetailSequence) return
-    log.error('加载关联充值订单失败:', error)
-    ledgerPaymentOrderNo.value = null
-    ledgerPaymentMethod.value = null
-  } finally {
-    if (generation === ledgerDetailSequence) loadingLedgerOrderNo.value = false
-  }
 }
 
 function closeLedgerDrawer() {
-  ledgerDetailSequence++
   showLedgerDrawer.value = false
 }
 
 function openRefundDrawer(refund: AdminGlobalRefund) {
   currentRefund.value = refund
-  failRefundForm.reason = ''
-  completeRefundForm.gateway_refund_id = ''
-  completeRefundForm.payout_reference = ''
   showRefundDrawer.value = true
 }
 
@@ -2134,7 +1147,7 @@ async function processRefund(refund: AdminGlobalRefund) {
     if (review?.decision !== 'approve') return
     const response = await adminWalletApi.processRefund(walletId, refundId, { referral_shortfall_confirmation: review.token })
     applyRefundUpdate(refundId, response.refund)
-    success('退款已进入 processing')
+    success(t('ui.refundIsNowProcessing'))
     await Promise.all([loadRefunds(), loadLedger()])
     syncCurrentRefund(refundId)
   } catch (error) {
@@ -2145,23 +1158,22 @@ async function processRefund(refund: AdminGlobalRefund) {
   }
 }
 
-async function submitFailRefund() {
+async function submitFailRefund(reason: string) {
   if (!currentRefund.value) return
-  if (!failRefundForm.reason.trim()) {
-    showError('请填写驳回原因')
+  if (!reason) {
+    showError(t('ui.enterAReasonForRejection'))
     return
   }
 
   const walletId = currentRefund.value.wallet_id
   const refundId = currentRefund.value.id
-  const reason = failRefundForm.reason.trim()
   submittingRefundAction.value = true
   try {
     const response = await adminWalletApi.failRefund(walletId, refundId, {
       reason,
     })
     applyRefundUpdate(refundId, response.refund)
-    success('退款已驳回')
+    success(t('ui.refundRejected'))
     await Promise.all([loadRefunds(), loadLedger()])
     syncCurrentRefund(refundId)
   } catch (error) {
@@ -2172,16 +1184,12 @@ async function submitFailRefund() {
   }
 }
 
-async function submitCompleteRefund() {
+async function submitCompleteRefund(payload: WalletRefundCompletePayload) {
   if (!currentRefund.value) return
 
   const walletId = currentRefund.value.wallet_id
   const refundId = currentRefund.value.id
   const canReject = canFailRefund(currentRefund.value)
-  const payload = {
-    gateway_refund_id: completeRefundForm.gateway_refund_id || undefined,
-    payout_reference: completeRefundForm.payout_reference || undefined,
-  }
   submittingRefundAction.value = true
   try {
     const review = await referralReview.value?.review(walletId, refundId, 'complete', canReject)
@@ -2194,7 +1202,7 @@ async function submitCompleteRefund() {
     applyRefundUpdate(refundId, response.refund)
     success(response.referral_reversal
       ? `退款已完成；该订单累计冲回 $${response.referral_reversal.reversed_amount_usd.toFixed(2)}，当前待冲回 $${response.referral_reversal.pending_reversal_amount_usd.toFixed(2)}`
-      : '退款已完成')
+      : t('ui.refundCompleted'))
     await Promise.all([loadRefunds(), loadLedger()])
     syncCurrentRefund(refundId)
   } catch (error) {
@@ -2207,24 +1215,15 @@ async function submitCompleteRefund() {
 
 function openCreditDialog(order: PaymentOrder) {
   currentOrder.value = order
-  creditForm.gateway_order_id = order.gateway_order_id || ''
-  creditForm.pay_amount = order.pay_amount || undefined
-  creditForm.pay_currency = order.pay_currency || ''
-  creditForm.exchange_rate = order.exchange_rate || undefined
   showCreditDialog.value = true
 }
 
-async function submitCreditOrder() {
+async function submitCreditOrder(payload: WalletOrderCreditPayload) {
   if (!currentOrder.value) return
   submittingOrderAction.value = true
   try {
-    await adminPaymentsApi.creditOrder(currentOrder.value.id, {
-      gateway_order_id: creditForm.gateway_order_id || undefined,
-      pay_amount: creditForm.pay_amount,
-      pay_currency: creditForm.pay_currency || undefined,
-      exchange_rate: creditForm.exchange_rate,
-    })
-    success('订单已手动到账')
+    await adminPaymentsApi.creditOrder(currentOrder.value.id, payload)
+    success(t('ui.orderCreditedManually'))
     showCreditDialog.value = false
     await Promise.all([loadOrders(), loadLedger(), loadWalletMetaMap()])
   } catch (error) {
@@ -2239,7 +1238,7 @@ async function expireOrder(orderId: string) {
   submittingOrderAction.value = true
   try {
     await adminPaymentsApi.expireOrder(orderId)
-    success('订单已标记过期')
+    success(t('ui.orderMarkedAsExpired'))
     await loadOrders()
   } catch (error) {
     log.error('标记过期失败:', error)
@@ -2253,7 +1252,7 @@ async function failOrder(orderId: string) {
   submittingOrderAction.value = true
   try {
     await adminPaymentsApi.failOrder(orderId)
-    success('订单已标记失败')
+    success(t('ui.orderMarkedAsFailed'))
     await loadOrders()
   } catch (error) {
     log.error('标记失败失败:', error)
@@ -2261,34 +1260,6 @@ async function failOrder(orderId: string) {
   } finally {
     submittingOrderAction.value = false
   }
-}
-
-function canProcessRefund(status: string) {
-  return status === 'pending_approval' || status === 'approved'
-}
-
-function canFailRefund(refund: Pick<AdminGlobalRefund, 'status' | 'refund_mode' | 'gateway_refund_id' | 'payout_proof'>) {
-  if (refund.status === 'pending_approval' || refund.status === 'approved') return true
-  return refund.status === 'processing'
-    && refund.refund_mode === 'offline_payout'
-    && !refund.gateway_refund_id?.trim()
-    && !refund.payout_proof
-}
-
-function canCompleteRefund(status: string) {
-  return status === 'processing'
-}
-
-function canCreditOrder(status: string) {
-  return status === 'pending' || status === 'paid'
-}
-
-function canExpireOrder(status: string) {
-  return status === 'pending'
-}
-
-function canFailOrder(status: string) {
-  return status !== 'credited' && status !== 'refunded'
 }
 
 function handleLedgerPageChange(page: number) {
@@ -2335,81 +1306,5 @@ function handleCallbackPageSizeChange(size: number) {
   void loadCallbacks()
 }
 
-function handleRedeemBatchPageChange(page: number) {
-  redeemBatchPage.value = page
-  void loadRedeemCodeBatches()
-}
-
-function handleRedeemBatchPageSizeChange(size: number) {
-  redeemBatchPageSize.value = size
-  redeemBatchPage.value = 1
-  void loadRedeemCodeBatches()
-}
-
-function handleRedeemCodePageChange(page: number) {
-  redeemCodePage.value = page
-  void loadRedeemCodes()
-}
-
-function handleRedeemCodePageSizeChange(size: number) {
-  redeemCodePageSize.value = size
-  redeemCodePage.value = 1
-  void loadRedeemCodes()
-}
-
-function ownerTypeLabel(ownerType: 'user' | 'api_key') {
-  return ownerType === 'user' ? '用户钱包' : '独立密钥'
-}
-
-function ownerDisplayName(name: string | null | undefined, ownerType: 'user' | 'api_key') {
-  if (name) return name
-  return ownerType === 'user' ? '未命名用户' : '未命名密钥'
-}
-
-function formatDateTime(value: string | null | undefined) {
-  if (!value) return '-'
-  return new Date(value).toLocaleString(getI18nLocale(), {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-function redeemCodeStatusLabel(status: string) {
-  if (status === 'active') return '可用'
-  if (status === 'disabled') return '已停用'
-  if (status === 'redeemed') return '已兑换'
-  return status
-}
-
-function redeemCodeStatusBadge(status: string) {
-  if (status === 'active') return 'success'
-  if (status === 'disabled') return 'secondary'
-  if (status === 'redeemed') return 'outline'
-  return 'secondary'
-}
 </script>
 
-<style scoped>
-.drawer-enter-active,
-.drawer-leave-active {
-  transition: opacity 0.3s ease;
-}
-
-.drawer-enter-active .drawer-panel,
-.drawer-leave-active .drawer-panel {
-  transition: transform 0.3s ease;
-}
-
-.drawer-enter-from,
-.drawer-leave-to {
-  opacity: 0;
-}
-
-.drawer-enter-from .drawer-panel,
-.drawer-leave-to .drawer-panel {
-  transform: translateX(100%);
-}
-</style>

@@ -22,10 +22,6 @@ vi.mock('@/composables/useToast', () => ({ useToast: () => toast }))
 vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => ({ replace: vi.fn(), push: vi.fn() }), onBeforeRouteLeave: vi.fn(), onBeforeRouteUpdate: vi.fn() }))
 vi.mock('@/features/providers/composables/useSchedulingProviderBalance', () => ({ provideSchedulingProviderBalance: vi.fn() }))
 vi.mock('@/utils/logger', () => ({ log: { error: vi.fn(), warn: vi.fn() } }))
-vi.mock('@/features/routing/components', async () => ({
-  RoutingFailoverPolicyEditor: (await import('@/features/routing/components/RoutingFailoverPolicyEditor.vue')).default,
-  RoutingSchedulingPolicyEditor: (await import('@/features/routing/components/RoutingSchedulingPolicyEditor.vue')).default,
-}))
 vi.mock('@/features/routing/components/RoutingPriorityPolicyEditor.vue', () => ({ default: { render: () => null } }))
 
 const mounted: Array<{ app: App, root: HTMLElement }> = []

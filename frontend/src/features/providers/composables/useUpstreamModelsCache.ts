@@ -1,3 +1,5 @@
+
+import { translate as t } from '@/i18n'
 /**
  * 上游模型获取服务
  *
@@ -44,7 +46,7 @@ function providerModelsFetchResult(response: ProviderModelsQueryResponse): Fetch
       fromCache: response.data.from_cache,
     }
   }
-  const rawError = response.data?.error || response.data?.warning || '获取上游模型失败'
+  const rawError = response.data?.error || response.data?.warning || t('ui.failedToFetchUpstreamModels')
   return { models: [], error: parseUpstreamModelError(rawError) }
 }
 
@@ -68,7 +70,7 @@ function fetchProviderModels(
       const rawError = isAxiosError(err)
         ? (err.response?.data?.detail ?? err.message)
         : (err instanceof Error ? err.message : String(err))
-      return { models: [], error: parseUpstreamModelError(rawError || '获取上游模型失败') }
+      return { models: [], error: parseUpstreamModelError(rawError || t('ui.failedToFetchUpstreamModels')) }
     } finally {
       if (activeRequestIds.get(requestKey) === requestId) {
         loadingMap.value.set(requestKey, false)
@@ -110,7 +112,7 @@ export function useUpstreamModelsCache() {
   ): Promise<FetchResult> {
     const normalizedKeyIds = [...new Set(apiKeyIds.map(id => id.trim()).filter(Boolean))].sort()
     if (normalizedKeyIds.length === 0) {
-      return { models: [], error: '请先选择账号' }
+      return { models: [], error: t('ui.selectAnAccountFirst') }
     }
     const requestKey = getBatchRequestKey(providerId, normalizedKeyIds)
     return fetchProviderModels(

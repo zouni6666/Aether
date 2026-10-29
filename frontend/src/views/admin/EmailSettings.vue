@@ -1,15 +1,15 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="邮件配置"
-      description="配置邮件发送服务和注册邮箱限制"
+      :title="t('guide.nav.modules.emailConfig')"
+      :description="t('ui.configureOutgoingEmailAndRegistrationEmailRestrictions')"
     />
 
     <div class="mt-6 space-y-6">
       <!-- SMTP 邮件配置 -->
       <CardSection
-        title="SMTP 邮件配置"
-        description="配置 SMTP 服务用于发送验证码邮件"
+        :title="t('ui.smtpEmailConfiguration')"
+        :description="t('ui.configureSmtpServiceForVerificationCodeEmails')"
       >
         <template #actions>
           <div class="flex gap-2">
@@ -19,14 +19,14 @@
               :disabled="testSmtpLoading"
               @click="handleTestSmtp"
             >
-              {{ testSmtpLoading ? '测试中...' : '测试连接' }}
+              {{ testSmtpLoading ? t('ui.testing7b6187c') : t('ui.testConnection') }}
             </Button>
             <Button
               size="sm"
               :disabled="smtpSaveLoading"
               @click="saveSmtpConfig"
             >
-              {{ smtpSaveLoading ? '保存中...' : '保存' }}
+              {{ smtpSaveLoading ? t('ui.saving') : t('ui.save') }}
             </Button>
           </div>
         </template>
@@ -35,9 +35,7 @@
             <Label
               for="smtp-host"
               class="block text-sm font-medium"
-            >
-              SMTP 服务器地址
-            </Label>
+            > {{ t('ui.smtpServerAddress') }} </Label>
             <Input
               id="smtp-host"
               v-model="emailConfig.smtp_host"
@@ -46,7 +44,7 @@
               class="mt-1"
             />
             <p class="mt-1 text-xs text-muted-foreground">
-              邮件服务器地址
+              {{ t('ui.mailServerAddress') }}
             </p>
           </div>
 
@@ -54,9 +52,7 @@
             <Label
               for="smtp-port"
               class="block text-sm font-medium"
-            >
-              SMTP 端口
-            </Label>
+            > {{ t('ui.smtpPort') }} </Label>
             <Input
               id="smtp-port"
               v-model.number="emailConfig.smtp_port"
@@ -65,7 +61,7 @@
               class="mt-1"
             />
             <p class="mt-1 text-xs text-muted-foreground">
-              常用端口: 587 (TLS), 465 (SSL), 25 (无加密)
+              {{ t('ui.commonPorts587Tls465Ssl25NoEncryption') }}
             </p>
           </div>
 
@@ -73,9 +69,7 @@
             <Label
               for="smtp-user"
               class="block text-sm font-medium"
-            >
-              SMTP 用户名
-            </Label>
+            > {{ t('ui.smtpUsername') }} </Label>
             <Input
               id="smtp-user"
               v-model="emailConfig.smtp_user"
@@ -88,7 +82,7 @@
               data-form-type="other"
             />
             <p class="mt-1 text-xs text-muted-foreground">
-              通常是您的邮箱地址
+              {{ t('ui.usuallyYourEmailAddress') }}
             </p>
           </div>
 
@@ -96,19 +90,17 @@
             <Label
               for="smtp-password"
               class="block text-sm font-medium"
-            >
-              SMTP 密码
-            </Label>
+            > {{ t('ui.smtpPassword') }} </Label>
             <div class="mt-1">
               <Input
                 id="smtp-password"
                 v-model="emailConfig.smtp_password"
                 masked
-                :placeholder="smtpPasswordIsSet ? '已设置（留空保持不变）' : '请输入密码'"
+                :placeholder="smtpPasswordIsSet ? t('ui.setLeaveEmptyToKeepUnchanged') : t('ui.enterPassword')"
               />
             </div>
             <p class="mt-1 text-xs text-muted-foreground">
-              邮箱密码或应用专用密码
+              {{ t('ui.emailPasswordOrAppSpecificPassword') }}
             </p>
           </div>
 
@@ -116,9 +108,7 @@
             <Label
               for="smtp-from-email"
               class="block text-sm font-medium"
-            >
-              发件人邮箱
-            </Label>
+            > {{ t('ui.senderEmail') }} </Label>
             <Input
               id="smtp-from-email"
               v-model="emailConfig.smtp_from_email"
@@ -127,7 +117,7 @@
               class="mt-1"
             />
             <p class="mt-1 text-xs text-muted-foreground">
-              显示为发件人的邮箱地址
+              {{ t('ui.emailAddressShownAsTheSender') }}
             </p>
           </div>
 
@@ -135,9 +125,7 @@
             <Label
               for="smtp-from-name"
               class="block text-sm font-medium"
-            >
-              发件人名称
-            </Label>
+            > {{ t('ui.senderName') }} </Label>
             <Input
               id="smtp-from-name"
               v-model="emailConfig.smtp_from_name"
@@ -146,7 +134,7 @@
               class="mt-1"
             />
             <p class="mt-1 text-xs text-muted-foreground">
-              显示为发件人的名称
+              {{ t('ui.nameShownAsTheSender') }}
             </p>
           </div>
 
@@ -154,9 +142,7 @@
             <Label
               for="smtp-encryption"
               class="block text-sm font-medium mb-2"
-            >
-              加密方式
-            </Label>
+            > {{ t('ui.encryptionMethod') }} </Label>
             <Select
               v-model="smtpEncryption"
             >
@@ -168,18 +154,18 @@
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="ssl">
-                  SSL (隐式加密)
+                  {{ t('ui.sslImplicitEncryption') }}
                 </SelectItem>
                 <SelectItem value="tls">
                   TLS / STARTTLS
                 </SelectItem>
                 <SelectItem value="none">
-                  无加密
+                  {{ t('ui.noEncryption') }}
                 </SelectItem>
               </SelectContent>
             </Select>
             <p class="mt-1 text-xs text-muted-foreground">
-              Gmail 等服务推荐使用 SSL
+              {{ t('ui.sslIsRecommendedForGmailAndSimilarServices') }}
             </p>
           </div>
         </div>
@@ -187,8 +173,8 @@
 
       <!-- 注册邮箱验证 -->
       <CardSection
-        title="注册邮箱验证"
-        description="控制用户注册时的邮箱验证要求和后缀限制"
+        :title="t('ui.registrationEmailVerification')"
+        :description="t('ui.controlEmailVerificationRequirementsAndSuffixRestrictionsDuringUserRegistration')"
       >
         <template #actions>
           <Button
@@ -196,7 +182,7 @@
             :disabled="emailVerificationSaveLoading"
             @click="saveEmailVerificationConfig"
           >
-            {{ emailVerificationSaveLoading ? '保存中...' : '保存' }}
+            {{ emailVerificationSaveLoading ? t('ui.saving') : t('ui.save') }}
           </Button>
         </template>
         <div class="space-y-6">
@@ -209,15 +195,13 @@
                   for="require-email-verification"
                   class="block text-sm font-medium cursor-pointer"
                   :class="{ 'text-muted-foreground': !smtpConfigured }"
-                >
-                  需要邮箱验证
-                </Label>
+                > {{ t('ui.requireEmailVerification') }} </Label>
                 <p class="mt-1 text-xs text-muted-foreground">
                   <template v-if="!smtpConfigured">
-                    需先配置 SMTP 服务
+                    {{ t('ui.smtpServiceMustBeConfiguredFirst') }}
                   </template>
                   <template v-else>
-                    开启后，用户注册时必须验证邮箱
+                    {{ t('ui.whenEnabledUsersMustVerifyEmailDuringRegistration') }}
                   </template>
                 </p>
               </div>
@@ -233,9 +217,7 @@
               <Label
                 for="email-suffix-mode"
                 class="block text-sm font-medium mb-2"
-              >
-                后缀限制模式
-              </Label>
+              > {{ t('ui.suffixRestrictionMode') }} </Label>
               <Select
                 v-model="emailConfig.email_suffix_mode"
                 :disabled="!requireEmailVerification"
@@ -249,25 +231,25 @@
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">
-                    不限制 - 允许所有邮箱
+                    {{ t('ui.noRestrictionAllowAllEmails') }}
                   </SelectItem>
                   <SelectItem value="whitelist">
-                    白名单 - 仅允许列出的后缀
+                    {{ t('ui.whitelistOnlyAllowListedSuffixes') }}
                   </SelectItem>
                   <SelectItem value="blacklist">
-                    黑名单 - 拒绝列出的后缀
+                    {{ t('ui.blacklistRejectListedSuffixes') }}
                   </SelectItem>
                 </SelectContent>
               </Select>
               <p class="mt-1 text-xs text-muted-foreground">
                 <template v-if="emailConfig.email_suffix_mode === 'none'">
-                  不限制邮箱后缀，所有邮箱均可注册
+                  {{ t('ui.doNotRestrictEmailSuffixesAllEmailsCanRegister') }}
                 </template>
                 <template v-else-if="emailConfig.email_suffix_mode === 'whitelist'">
-                  仅允许列出后缀的邮箱注册
+                  {{ t('ui.onlyEmailsWithListedSuffixesCanRegister') }}
                 </template>
                 <template v-else>
-                  拒绝列出后缀的邮箱注册
+                  {{ t('ui.rejectEmailsWithListedSuffixes') }}
                 </template>
               </p>
             </div>
@@ -278,9 +260,7 @@
             <Label
               for="email-suffix-list"
               class="block text-sm font-medium mb-2"
-            >
-              邮箱后缀列表
-            </Label>
+            > {{ t('ui.emailSuffixList') }} </Label>
             <Input
               id="email-suffix-list"
               v-model="emailSuffixListStr"
@@ -288,7 +268,7 @@
               class="mt-1"
             />
             <p class="mt-1 text-xs text-muted-foreground">
-              逗号分隔，例如: gmail.com, outlook.com, qq.com
+              {{ t('ui.commaSeparatedForExampleGmailComOutlookComQqCom') }}
             </p>
           </div>
         </div>
@@ -296,8 +276,8 @@
 
       <!-- 邮件模板配置 -->
       <CardSection
-        title="邮件模板"
-        description="配置不同类型邮件的 HTML 模板"
+        :title="t('ui.emailTemplates')"
+        :description="t('ui.configureHtmlTemplatesForDifferentEmailTypes')"
       >
         <template #actions>
           <Button
@@ -305,7 +285,7 @@
             :disabled="templateSaveLoading"
             @click="handleSaveTemplate"
           >
-            {{ templateSaveLoading ? '保存中...' : '保存' }}
+            {{ templateSaveLoading ? t('ui.saving') : t('ui.save') }}
           </Button>
         </template>
 
@@ -330,7 +310,7 @@
                 <span
                   v-if="tpl.is_custom"
                   class="ml-1 text-xs opacity-70"
-                >(已自定义)</span>
+                >{{ t('ui.customized') }}</span>
                 <span
                   v-if="activeTemplateType === tpl.type"
                   class="absolute bottom-0 left-0 right-0 h-0.5 bg-primary"
@@ -338,8 +318,7 @@
               </button>
             </div>
             <div class="text-xs text-muted-foreground">
-              可用变量:
-              <code
+              {{ t('ui.availableVariables') }} <code
                 v-for="(v, i) in currentTemplate.variables"
                 :key="v"
                 class="mx-0.5 px-1.5 py-0.5 bg-muted rounded text-foreground"
@@ -352,14 +331,12 @@
             <Label
               for="template-subject"
               class="block text-sm font-medium"
-            >
-              邮件主题
-            </Label>
+            > {{ t('ui.emailSubject') }} </Label>
             <Input
               id="template-subject"
               v-model="templateSubject"
               type="text"
-              :placeholder="currentTemplate.default_subject || '验证码'"
+              :placeholder="currentTemplate.default_subject || t('auth.register.verificationCode')"
               class="mt-1"
             />
           </div>
@@ -369,9 +346,7 @@
             <Label
               for="template-html"
               class="block text-sm font-medium"
-            >
-              HTML 模板
-            </Label>
+            > {{ t('ui.htmlTemplate') }} </Label>
             <textarea
               id="template-html"
               v-model="templateHtml"
@@ -390,7 +365,7 @@
               :disabled="previewLoading"
               @click="handlePreviewTemplate"
             >
-              {{ previewLoading ? '加载中...' : '预览' }}
+              {{ previewLoading ? t('common.loading') : t('site.home.preview') }}
             </Button>
             <Button
               variant="outline"
@@ -398,7 +373,7 @@
               :disabled="!currentTemplate.is_custom"
               @click="handleResetTemplate"
             >
-              重置为默认
+              {{ t('ui.resetToDefault') }}
             </Button>
           </div>
         </div>
@@ -408,7 +383,7 @@
           v-else-if="templateLoading"
           class="py-8 text-center text-muted-foreground"
         >
-          正在加载模板...
+          {{ t('ui.loadingTemplate') }}
         </div>
       </CardSection>
 
@@ -426,28 +401,28 @@
               <button
                 type="button"
                 class="flex gap-1.5 group"
-                title="关闭"
+                :title="t('ui.close')"
                 @click="previewDialogOpen = false"
               >
                 <div class="w-2.5 h-2.5 rounded-full bg-red-400/80 group-hover:bg-red-500" />
                 <div class="w-2.5 h-2.5 rounded-full bg-yellow-400/80" />
                 <div class="w-2.5 h-2.5 rounded-full bg-green-400/80" />
               </button>
-              <span class="text-sm font-medium text-foreground/80">邮件预览</span>
+              <span class="text-sm font-medium text-foreground/80">{{ t('ui.emailPreview') }}</span>
             </div>
             <div class="text-xs text-muted-foreground font-mono">
-              {{ currentTemplate?.name || '模板' }}
+              {{ currentTemplate?.name || t('ui.templates') }}
             </div>
           </div>
 
           <!-- 邮件头部信息 -->
           <div class="px-4 py-3 bg-muted/30 border-b border-border/30 space-y-1.5 flex-shrink-0">
             <div class="flex items-center gap-2 text-sm">
-              <span class="text-muted-foreground w-14">主题:</span>
-              <span class="font-medium text-foreground">{{ templateSubject || '(无主题)' }}</span>
+              <span class="text-muted-foreground w-14">{{ t('ui.subject') }}</span>
+              <span class="font-medium text-foreground">{{ templateSubject || t('ui.noSubject') }}</span>
             </div>
             <div class="flex items-center gap-2 text-sm">
-              <span class="text-muted-foreground w-14">收件人:</span>
+              <span class="text-muted-foreground w-14">{{ t('ui.recipientbd19bfc') }}</span>
               <span class="text-foreground/80">example@example.com</span>
             </div>
           </div>
@@ -471,6 +446,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { ref, computed, onMounted } from 'vue'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
@@ -638,9 +616,9 @@ async function saveEmailVerificationConfig() {
         adminApi.updateSystemConfig(item.key, item.value, item.description)
       )
     )
-    success('配置已保存')
+    success(t('ui.configurationSaved'))
   } catch (err) {
-    error(parseApiError(err, '保存配置失败'))
+    error(parseApiError(err, t('ui.failedToSaveConfiguration')))
     log.error('保存邮箱验证配置失败:', err)
   } finally {
     emailVerificationSaveLoading.value = false
@@ -661,7 +639,7 @@ async function loadEmailTemplates() {
       templateHtml.value = firstTemplate.html
     }
   } catch (err) {
-    error('加载邮件模板失败')
+    error(t('ui.failedToLoadEmailTemplate'))
     log.error('加载邮件模板失败:', err)
   } finally {
     templateLoading.value = false
@@ -693,9 +671,9 @@ async function handleSaveTemplate() {
       templateTypes.value[idx].is_custom = true
     }
 
-    success('模板保存成功')
+    success(t('ui.templateSaved'))
   } catch (err) {
-    error('保存模板失败')
+    error(t('ui.failedToSaveTemplate'))
     log.error('保存模板失败:', err)
   } finally {
     templateSaveLoading.value = false
@@ -711,7 +689,7 @@ async function handlePreviewTemplate() {
     previewHtml.value = response.html
     previewDialogOpen.value = true
   } catch (err) {
-    error('预览模板失败')
+    error(t('ui.failedToPreviewTemplate'))
     log.error('预览模板失败:', err)
   } finally {
     previewLoading.value = false
@@ -733,9 +711,9 @@ async function handleResetTemplate() {
     templateSubject.value = response.template.subject
     templateHtml.value = response.template.html
 
-    success('模板已重置为默认值')
+    success(t('ui.templateResetToDefault'))
   } catch (err) {
-    error('重置模板失败')
+    error(t('ui.failedToResetTemplate'))
     log.error('重置模板失败:', err)
   }
 }
@@ -771,7 +749,7 @@ async function loadEmailConfig() {
       }
     }
   } catch (err) {
-    error('加载邮件配置失败')
+    error(t('ui.failedToLoadEmailConfiguration'))
     log.error('加载邮件配置失败:', err)
   }
 }
@@ -831,7 +809,7 @@ async function saveSmtpConfig() {
         adminApi.updateSystemConfig(item.key, item.value, item.description)
       )
     )
-    success('SMTP 配置已保存')
+    success(t('ui.smtpConfigurationSaved'))
 
     // 更新状态
     if (emailConfig.value.smtp_password) {
@@ -839,7 +817,7 @@ async function saveSmtpConfig() {
     }
     emailConfig.value.smtp_password = null
   } catch (err) {
-    error('保存配置失败')
+    error(t('ui.failedToSaveConfiguration'))
     log.error('保存 SMTP 配置失败:', err)
   } finally {
     smtpSaveLoading.value = false
@@ -863,15 +841,16 @@ async function handleTestSmtp() {
       smtp_from_name: emailConfig.value.smtp_from_name
     })
     if (result.success) {
-      success('SMTP 连接测试成功')
+      success(t('ui.smtpConnectionTestSucceeded'))
     } else {
-      error(result.message || '未知错误', 'SMTP 连接测试失败')
+      error(result.message || t('ui.unknownError'), t('ui.smtpConnectionTestFailed'))
     }
   } catch (err: unknown) {
     log.error('SMTP 连接测试失败:', err)
-    error(parseApiError(err, '未知错误'), 'SMTP 连接测试失败')
+    error(parseApiError(err, t('ui.unknownError')), t('ui.smtpConnectionTestFailed'))
   } finally {
     testSmtpLoading.value = false
   }
 }
+
 </script>

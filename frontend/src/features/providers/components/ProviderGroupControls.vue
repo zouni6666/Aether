@@ -10,7 +10,7 @@
       v-if="showPriority !== false"
       class="flex items-center gap-2"
     >
-      <span class="text-muted-foreground">优先级</span>
+      <span class="text-muted-foreground">{{ t('ui.priority565d646') }}</span>
       <ProviderPriorityInput
         :provider-name="providerName"
         :priority="priority"
@@ -23,7 +23,7 @@
       :variant="enabled ? 'success' : 'secondary'"
       class="whitespace-nowrap text-xs"
     >
-      {{ legacyT(enabled ? '本组启用' : '本组禁用') }}
+      {{ enabled ? t('ui.enabledInGroup') : t('ui.disabledInGroup') }}
     </Badge>
   </div>
 </template>
@@ -35,5 +35,7 @@ import ProviderPriorityInput from './ProviderPriorityInput.vue'
 
 withDefaults(defineProps<{ providerName: string; priority: number; enabled: boolean; disabled?: boolean; priorityDisabled?: boolean; showPriority?: boolean; editContext?: string }>(), { showPriority: true, editContext: undefined })
 const emit = defineEmits<{ 'update:priority': [value: number] }>()
-const { legacyT } = useI18n()
+
+const { t } = useI18n()
+
 </script>

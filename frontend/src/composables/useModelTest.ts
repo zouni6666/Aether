@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import { ref, onBeforeUnmount } from 'vue'
 import { isAxiosError } from 'axios'
 import { useToast } from './useToast'
@@ -327,7 +328,7 @@ export function useModelTest(options: UseModelTestOptions) {
       stopPolling()
       const handled = params.onError?.(err)
       if (!handled) {
-        showError(`模型测试失败: ${parseApiError(err, '测试请求失败')}`)
+        showError(translate('providers.migration.modelTestFailed42b317', { value: parseApiError(err, translate('ui.testRequestFailed')) }))
         resetState()
       }
     } finally {

@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import {
   Ban,
   CheckCircle2,
@@ -22,61 +23,61 @@ export interface UserBatchActionOption {
 }
 
 export const USER_ROLE_FILTER_OPTIONS: UserFilterOption<UserFilterRole>[] = [
-  { value: 'all', label: '全部角色' },
-  { value: 'admin', label: '管理员' },
-  { value: 'audit_admin', label: '审计管理员' },
-  { value: 'user', label: '普通用户' },
+  { value: 'all', get label() { return translate('ui.allRoles') } },
+  { value: 'admin', get label() { return translate('auth.role.admin') } },
+  { value: 'audit_admin', get label() { return translate('auth.role.auditAdmin') } },
+  { value: 'user', get label() { return translate('ui.user') } },
 ]
 
 export const USER_STATUS_FILTER_OPTIONS: UserFilterOption<UserFilterStatus>[] = [
-  { value: 'all', label: '全部状态' },
-  { value: 'active', label: '活跃' },
-  { value: 'inactive', label: '禁用' },
+  { value: 'all', get label() { return translate('ui.allStatuses') } },
+  { value: 'active', get label() { return translate('ui.activee85e590') } },
+  { value: 'inactive', get label() { return translate('ui.disable') } },
 ]
 
 export const USER_SORT_OPTIONS: UserFilterOption<UserSortOption>[] = [
-  { value: 'default', label: '默认排序' },
-  { value: 'created_at_desc', label: '创建时间 新到旧' },
-  { value: 'created_at_asc', label: '创建时间 旧到新' },
+  { value: 'default', get label() { return translate('ui.defaultSort') } },
+  { value: 'created_at_desc', get label() { return translate('ui.createdTimeNewestFirst') } },
+  { value: 'created_at_asc', get label() { return translate('ui.createdTimeOldestFirst') } },
 ]
 
 export const USER_BATCH_ACTION_OPTIONS: UserBatchActionOption[] = [
   {
     value: 'enable',
-    label: '启用',
-    description: '恢复用户登录与调用',
+    get label() { return translate('ui.enablef4f0ead') },
+    get description() { return translate('ui.restoreUserSignInAndApiAccess') },
     icon: CheckCircle2,
   },
   {
     value: 'disable',
-    label: '禁用',
-    description: '暂停用户访问权限',
+    get label() { return translate('ui.disable') },
+    get description() { return translate('ui.pauseUserAccess') },
     icon: Ban,
   },
   {
     value: 'update_access_control',
-    label: '额度',
-    description: '批量调整用户额度模式',
+    get label() { return translate('poolQuota.claudeCode.unknownWindow') },
+    get description() { return translate('ui.batchUpdateUserQuotaMode') },
     icon: ShieldCheck,
   },
   {
     value: 'update_role',
-    label: '修改角色',
-    description: '批量设为普通用户或管理员',
+    get label() { return translate('ui.changeRole') },
+    get description() { return translate('ui.batchSetUsersToUserOrAdminRoles') },
     icon: UserCog,
   },
   {
     value: 'adjust_wallet_balance',
-    label: '调整余额',
-    description: '批量增加或扣减钱包余额',
+    get label() { return translate('ui.adjustBalance') },
+    get description() { return translate('ui.addOrDeductWalletBalancesInBulk') },
     icon: Wallet,
   },
 ]
 
 export function formatUserRoleLabel(role: UserRole | string): string {
-  if (role === 'admin') return '管理员'
-  if (role === 'audit_admin') return '审计管理员'
-  return '普通用户'
+  if (role === 'admin') return translate('auth.role.admin')
+  if (role === 'audit_admin') return translate('auth.role.auditAdmin')
+  return translate('ui.user')
 }
 
 export function userRoleBadgeVariant(role: UserRole | string): 'default' | 'secondary' {

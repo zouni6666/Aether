@@ -39,7 +39,7 @@
               data-testid="external-models-access-clear"
               @click="updateAccessConfig(null)"
             >
-              {{ legacyT('清除') }}
+              {{ t('ui.clear') }}
             </Button>
           </div>
           <ProxyNodeSelect
@@ -75,7 +75,7 @@ import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
 
 const { success, error: showError } = useToast()
-const { t, legacyT } = useI18n()
+const { t } = useI18n()
 
 const proxyNodeId = ref<string | null>(null)
 const popoverOpen = ref(false)

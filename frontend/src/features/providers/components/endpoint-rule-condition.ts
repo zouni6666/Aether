@@ -1,3 +1,5 @@
+
+import { translate as t } from '@/i18n'
 import type { BodyRuleCondition, BodyRuleConditionOp } from '@/api/endpoints'
 import {
   endpointSecretMarkerPayload,
@@ -25,20 +27,20 @@ export interface EditableConditionGroup {
 export type EditableConditionNode = EditableConditionLeaf | EditableConditionGroup
 
 export const CONDITION_OP_OPTIONS: Array<{ value: BodyRuleConditionOp; label: string }> = [
-  { value: 'eq', label: '等于' },
-  { value: 'neq', label: '不等于' },
-  { value: 'gt', label: '大于' },
-  { value: 'lt', label: '小于' },
-  { value: 'gte', label: '大于等于' },
-  { value: 'lte', label: '小于等于' },
-  { value: 'starts_with', label: '开头匹配' },
-  { value: 'ends_with', label: '结尾匹配' },
-  { value: 'contains', label: '包含' },
-  { value: 'matches', label: '正则匹配' },
-  { value: 'exists', label: '存在' },
-  { value: 'not_exists', label: '不存在' },
-  { value: 'in', label: '在列表中' },
-  { value: 'type_is', label: '类型是' },
+  { value: 'eq', get label() { return t('ui.equals') } },
+  { value: 'neq', get label() { return t('ui.doesNotEqual') } },
+  { value: 'gt', get label() { return t('ui.greaterThan') } },
+  { value: 'lt', get label() { return t('ui.lessThan') } },
+  { value: 'gte', get label() { return t('ui.greaterThanOrEqualTo') } },
+  { value: 'lte', get label() { return t('ui.lessThanOrEqualTo') } },
+  { value: 'starts_with', get label() { return t('ui.startsWith') } },
+  { value: 'ends_with', get label() { return t('ui.endsWith') } },
+  { value: 'contains', get label() { return t('ui.contains') } },
+  { value: 'matches', get label() { return t('ui.regexMatch') } },
+  { value: 'exists', get label() { return t('ui.exists') } },
+  { value: 'not_exists', get label() { return t('ui.doesNotExist') } },
+  { value: 'in', get label() { return t('ui.inList') } },
+  { value: 'type_is', get label() { return t('ui.typeIs') } },
 ]
 
 const NUMERIC_OPS = new Set(['gt', 'lt', 'gte', 'lte'])
@@ -157,11 +159,11 @@ export function isConditionValueRequired(op: BodyRuleConditionOp): boolean {
 export function getConditionValuePlaceholder(op: BodyRuleConditionOp): string {
   if (op === 'in') return '["a", "b"]'
   if (op === 'type_is') return 'string/number/boolean/...'
-  return '值'
+  return t('ui.value')
 }
 
 export function getBodyRuleConditionPathPlaceholder(path: string): string {
-  return path.includes('[*]') || /\[\d+-\d+\]/.test(path) ? '$item.字段名' : '字段路径'
+  return path.includes('[*]') || /\[\d+-\d+\]/.test(path) ? t('providers.migration.itemFieldb22c65') : t('ui.fieldPath')
 }
 
 export function conditionEquals(
@@ -193,16 +195,16 @@ export function validateEditableCondition(node: EditableConditionNode | null): s
   if (!node) return null
 
   if (node.kind === 'group') {
-    if (!node.children.length) return '组合条件至少需要一个子条件'
+    if (!node.children.length) return t('ui.aConditionGroupRequiresAtLeastOneCondition')
     for (let i = 0; i < node.children.length; i += 1) {
       const err = validateEditableCondition(node.children[i])
-      if (err) return `子条件 ${i + 1}: ${err}`
+      if (err) return t('providers.migration.childCondition774c00', { value: String(i + 1), value_2: String(err) })
     }
     return null
   }
 
   const path = node.path.trim()
-  if (!path) return '条件路径不能为空'
+  if (!path) return t('ui.conditionPathIsRequired')
 
   if (!isConditionValueRequired(node.op)) return null
   if (node.retainValue) return null
@@ -218,33 +220,33 @@ export function validateEditableCondition(node: EditableConditionNode | null): s
   }
 
   if (NUMERIC_OPS.has(node.op)) {
-    if (typeof parsed !== 'number' || Number.isNaN(parsed)) return '数值条件必须填写数字'
+    if (typeof parsed !== 'number' || Number.isNaN(parsed)) return t('ui.enterANumberForNumericConditions')
     return null
   }
 
   if (STRING_OPS.has(node.op)) {
-    if (typeof parsed !== 'string') return '该条件值必须为字符串'
+    if (typeof parsed !== 'string') return t('ui.theConditionValueMustBeAString')
     return null
   }
 
   if (node.op === 'matches') {
-    if (typeof parsed !== 'string' || !parsed) return '正则条件值不能为空'
+    if (typeof parsed !== 'string' || !parsed) return t('ui.aRegularExpressionIsRequired')
     try {
       new RegExp(parsed)
       return null
     } catch (error: unknown) {
-      return `正则表达式无效：${error instanceof Error ? error.message : String(error)}`
+      return t('providers.migration.invalidRegularExpressionb25ec5', { value: String(error instanceof Error ? error.message : String(error)) })
     }
   }
 
   if (node.op === 'in') {
-    if (!Array.isArray(parsed)) return 'in 条件值必须是 JSON 数组'
+    if (!Array.isArray(parsed)) return t('ui.theValueForAnInConditionMustBeAJson')
     return null
   }
 
   if (node.op === 'type_is') {
     if (typeof parsed !== 'string' || !TYPE_IS_VALUES.has(parsed)) {
-      return 'type_is 仅支持 string/number/boolean/array/object/null'
+      return t('ui.typeIsSupportsOnlyStringNumberBooleanArrayObjectOr')
     }
   }
 

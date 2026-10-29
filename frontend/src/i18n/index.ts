@@ -2,13 +2,11 @@ import type { App, InjectionKey, Ref } from 'vue'
 import { computed, inject, readonly, ref } from 'vue'
 import {
   defaultLocale,
-  messages,
   supportedLocales,
-  translateLegacyText,
+  translateMessage,
   type Locale,
   type MessageKey,
 } from './messages'
-import { installLegacyDomTranslator } from './dom-translator'
 
 type Params = Record<string, string | number>
 
@@ -16,7 +14,6 @@ interface I18nContext {
   locale: Ref<Locale>
   setLocale: (locale: Locale) => void
   t: (key: MessageKey, params?: Params) => string
-  legacyT: (value: string) => string
 }
 
 const STORAGE_KEY = 'aether_locale'
@@ -68,26 +65,16 @@ function setLocale(nextLocale: Locale): void {
   }
 }
 
-function formatMessage(template: string, params?: Params): string {
-  if (!params) return template
-  return template.replace(/\{(\w+)\}/g, (_, key: string) => String(params[key] ?? `{${key}}`))
+export function translate(key: MessageKey, params?: Params): string {
+  return translateMessage(key, locale.value, params)
 }
 
-function t(key: MessageKey, params?: Params): string {
-  const bundle = messages[locale.value] ?? messages[defaultLocale]
-  const template = bundle[key] ?? messages[defaultLocale][key] ?? key
-  return formatMessage(template, params)
-}
-
-function legacyT(value: string): string {
-  return translateLegacyText(value, locale.value)
-}
+const t = translate
 
 const context: I18nContext = {
   locale,
   setLocale,
   t,
-  legacyT,
 }
 
 export function createI18n() {
@@ -95,10 +82,7 @@ export function createI18n() {
     install(app: App) {
       app.provide(i18nKey, context)
       app.config.globalProperties.$t = t
-      app.config.globalProperties.$legacyT = legacyT
       setLocale(locale.value)
-      const stopTranslating = installLegacyDomTranslator(locale)
-      app.onUnmount(stopTranslating)
     }
   }
 }

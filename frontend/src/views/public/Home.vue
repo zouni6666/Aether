@@ -430,7 +430,7 @@ import {
   Sparkles,
   Terminal
 } from 'lucide-vue-next'
-import GithubIcon from '@/components/icons/GithubIcon.vue'
+import GithubIcon from '@/components/brand/GithubIcon.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useClipboard } from '@/composables/useClipboard'
@@ -438,10 +438,10 @@ import { useSiteInfo } from '@/composables/useSiteInfo'
 import LanguageSwitcher from '@/components/common/LanguageSwitcher.vue'
 import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
 import LoginDialog from '@/features/auth/components/LoginDialog.vue'
-import RippleLogo from '@/components/RippleLogo.vue'
-import HeaderLogo from '@/components/HeaderLogo.vue'
-import AetherLineByLineLogo from '@/components/AetherLineByLineLogo.vue'
-import GeminiStarCluster from '@/components/GeminiStarCluster.vue'
+import RippleLogo from '@/components/brand/RippleLogo.vue'
+import HeaderLogo from '@/components/brand/HeaderLogo.vue'
+import AetherLineByLineLogo from '@/components/brand/AetherLineByLineLogo.vue'
+import GeminiStarCluster from '@/components/brand/GeminiStarCluster.vue'
 import CliSection from './CliSection.vue'
 import { platformPresets, getInstallCommand } from '@/config/platform-presets'
 import {

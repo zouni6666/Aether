@@ -1,6 +1,5 @@
 import { computed, ref } from 'vue'
-import { getI18nLocale } from '@/i18n'
-import { translateLegacyText } from '@/i18n/messages'
+import { translate, type MessageKey } from '@/i18n'
 
 export type ConfirmVariant = 'danger' | 'destructive' | 'warning' | 'info' | 'question'
 
@@ -15,75 +14,76 @@ export interface ConfirmOptions {
 interface ConfirmState extends ConfirmOptions {
   isOpen: boolean
   resolve?: (value: boolean) => void
+  defaultTitleKey?: MessageKey
+  defaultConfirmTextKey?: MessageKey
 }
 
 const state = ref<ConfirmState>({
   isOpen: false,
   message: '',
-  title: '确认操作',
-  confirmText: '确认',
-  cancelText: '取消',
   variant: 'question'
 })
 
 export function useConfirm() {
-  function localizeConfirmText(value: string): string {
-    return translateLegacyText(value, getI18nLocale())
-  }
-
   /**
    * 显示确认对话框
    * @param options 对话框选项
    * @returns Promise<boolean> - true表示确认，false表示取消
    */
-  const confirm = (options: ConfirmOptions): Promise<boolean> => {
+  const openConfirm = (
+    options: ConfirmOptions,
+    defaultTitleKey: MessageKey = 'feedback.confirm.title',
+    defaultConfirmTextKey: MessageKey = 'feedback.confirm.confirm',
+  ): Promise<boolean> => {
     return new Promise((resolve) => {
       state.value = {
         isOpen: true,
-        title: options.title || '确认操作',
+        title: options.title,
         message: options.message,
-        confirmText: options.confirmText || '确认',
-        cancelText: options.cancelText || '取消',
+        confirmText: options.confirmText,
+        cancelText: options.cancelText,
+        defaultTitleKey,
+        defaultConfirmTextKey,
         variant: options.variant || 'question',
         resolve
       }
     })
   }
 
+  const confirm = (options: ConfirmOptions): Promise<boolean> => openConfirm(options)
+
   /**
    * 便捷方法：危险操作确认（红色主题）
    */
   const confirmDanger = (message: string, title?: string, confirmText?: string): Promise<boolean> => {
-    return confirm({
+    return openConfirm({
       message,
-      title: title || '危险操作',
-      confirmText: confirmText || '删除',
+      title,
+      confirmText,
       variant: 'danger'
-    })
+    }, 'feedback.confirm.danger', 'feedback.confirm.delete')
   }
 
   /**
    * 便捷方法：警告确认（黄色主题）
    */
   const confirmWarning = (message: string, title?: string): Promise<boolean> => {
-    return confirm({
+    return openConfirm({
       message,
-      title: title || '警告',
-      confirmText: '继续',
+      title,
       variant: 'warning'
-    })
+    }, 'feedback.confirm.warning', 'feedback.confirm.continue')
   }
 
   /**
    * 便捷方法：信息确认（蓝色主题）
    */
   const confirmInfo = (message: string, title?: string): Promise<boolean> => {
-    return confirm({
+    return openConfirm({
       message,
-      title: title || '提示',
-      confirmText: '确定',
+      title,
       variant: 'info'
-    })
+    }, 'feedback.confirm.info', 'feedback.confirm.ok')
   }
 
   /**
@@ -109,10 +109,9 @@ export function useConfirm() {
   return {
     state: computed(() => ({
       ...state.value,
-      title: localizeConfirmText(state.value.title || '确认操作'),
-      message: localizeConfirmText(state.value.message),
-      confirmText: localizeConfirmText(state.value.confirmText || '确认'),
-      cancelText: localizeConfirmText(state.value.cancelText || '取消'),
+      title: state.value.title ?? translate(state.value.defaultTitleKey ?? 'feedback.confirm.title'),
+      confirmText: state.value.confirmText ?? translate(state.value.defaultConfirmTextKey ?? 'feedback.confirm.confirm'),
+      cancelText: state.value.cancelText ?? translate('feedback.confirm.cancel'),
     })),
     confirm,
     confirmDanger,

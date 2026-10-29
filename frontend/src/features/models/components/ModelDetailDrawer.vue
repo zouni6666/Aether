@@ -1,539 +1,530 @@
 <template>
   <!-- 模型详情抽屉 -->
-  <Teleport to="body">
-    <Transition name="drawer">
-      <div
-        v-if="open && model"
-        class="fixed inset-0 z-50 flex justify-end"
-        @click.self="handleBackdropClick"
-      >
-        <!-- 背景遮罩 -->
-        <div
-          class="absolute inset-0 bg-black/30 backdrop-blur-sm"
-          @click="handleBackdropClick"
-        />
+  <Drawer
+    :open="open && !!model"
+    :close-on-backdrop="!hasBlockingDialogOpen"
+    :close-on-escape="!hasBlockingDialogOpen"
+    @close="handleClose"
+  >
+    <template v-if="model">
+      <div class="sticky top-0 z-10 bg-background border-b p-4 sm:p-6">
+        <div class="flex items-start justify-between gap-3 sm:gap-4">
+          <div class="space-y-1 flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <h3 class="text-lg sm:text-xl font-bold truncate">
+                {{ model.display_name }}
+              </h3>
+              <Badge
+                :variant="model.is_active ? 'default' : 'secondary'"
+                class="text-xs shrink-0"
+              >
+                {{ model.is_active ? t('ui.activee85e590') : t('ui.disable4e6fd0e') }}
+              </Badge>
+            </div>
+            <div class="flex items-center gap-2 text-sm text-muted-foreground min-w-0">
+              <span class="font-mono shrink-0">{{ model.name }}</span>
+              <button
+                class="p-0.5 rounded hover:bg-muted transition-colors shrink-0"
+                :title="t('ui.copyModelId')"
+                @click="copyToClipboard(model.name)"
+              >
+                <Copy class="w-3 h-3" />
+              </button>
+              <template v-if="model.config?.description">
+                <span class="shrink-0">·</span>
+                <span
+                  class="text-xs truncate"
+                  :title="model.config?.description"
+                >{{ model.config?.description }}</span>
+              </template>
+            </div>
+          </div>
+          <div class="flex items-center gap-1 shrink-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              :title="t('ui.editModel')"
+              @click="$emit('editModel', model)"
+            >
+              <Edit class="w-4 h-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              :title="model.is_active ? t('ui.clickToDisable') : t('ui.clickToEnable')"
+              @click="$emit('toggleModelStatus', model)"
+            >
+              <Power class="w-4 h-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              :title="t('ui.close')"
+              @click="handleClose"
+            >
+              <X class="w-4 h-4" />
+            </Button>
+          </div>
+        </div>
+      </div>
 
-        <!-- 抽屉内容 -->
-        <Card class="relative h-full w-full sm:w-[700px] sm:max-w-[90vw] rounded-none shadow-2xl overflow-y-auto">
-          <div class="sticky top-0 z-10 bg-background border-b p-4 sm:p-6">
-            <div class="flex items-start justify-between gap-3 sm:gap-4">
-              <div class="space-y-1 flex-1 min-w-0">
+      <div class="p-4 sm:p-6">
+        <!-- 自定义 Tab 切换 -->
+        <div class="flex gap-1 p-1 bg-muted/40 rounded-lg mb-4">
+          <button
+            type="button"
+            class="flex-1 px-2 sm:px-4 py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200"
+            :class="[
+              detailTab === 'basic'
+                ? 'bg-primary text-primary-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+            ]"
+            @click="detailTab = 'basic'"
+          >
+            {{ t('ui.basicInformation') }}
+          </button>
+          <button
+            type="button"
+            class="flex-1 px-2 sm:px-4 py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200"
+            :class="[
+              detailTab === 'routing'
+                ? 'bg-primary text-primary-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+            ]"
+            @click="detailTab = 'routing'"
+          >
+            <span class="hidden sm:inline">{{ t('ui.routeControl') }}</span>
+            <span class="sm:hidden">{{ t('ui.route') }}</span>
+          </button>
+          <button
+            type="button"
+            class="flex-1 px-2 sm:px-4 py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200"
+            :class="[
+              detailTab === 'mappings'
+                ? 'bg-primary text-primary-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+            ]"
+            @click="detailTab = 'mappings'"
+          >
+            <span class="hidden sm:inline">{{ t('guide.nav.concepts.modelMapping') }}</span>
+            <span class="sm:hidden">{{ t('ui.mapping') }}</span>
+          </button>
+        </div>
+
+        <!-- Tab 内容 -->
+        <div
+          v-show="detailTab === 'basic'"
+          class="space-y-6"
+        >
+          <!-- 基础属性 -->
+          <div class="space-y-4">
+            <h4 class="font-semibold text-sm">
+              {{ t('ui.basicProperties') }}
+            </h4>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <Label class="text-xs text-muted-foreground">{{ t('ui.createdAt') }}</Label>
+                <p class="text-sm mt-1">
+                  {{ formatDateOnly(model.created_at) }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 默认定价 -->
+          <div class="space-y-3">
+            <h4 class="font-semibold text-sm">
+              {{ t('ui.defaultPricing38e2f59') }}
+            </h4>
+
+            <ProcessingTierPricingSummary :pricing="model.default_tiered_pricing" />
+
+            <!-- 图片输出计费 -->
+            <div
+              v-if="hasImagePricing"
+              class="space-y-2"
+            >
+              <div class="flex items-center justify-between gap-3 text-sm text-muted-foreground">
                 <div class="flex items-center gap-2">
-                  <h3 class="text-lg sm:text-xl font-bold truncate">
-                    {{ model.display_name }}
-                  </h3>
+                  <span>{{ t('ui.imageOutputPricing') }}</span>
                   <Badge
-                    :variant="model.is_active ? 'default' : 'secondary'"
-                    class="text-xs shrink-0"
+                    v-if="imagePricingEntries.length > 0"
+                    variant="outline"
+                    class="text-[10px] h-5 px-1.5"
                   >
-                    {{ model.is_active ? '活跃' : '停用' }}
+                    {{ t('ui.matrix') }}
+                  </Badge>
+                  <Badge
+                    v-if="imagePriceRangeEntries.length > 0"
+                    variant="outline"
+                    class="text-[10px] h-5 px-1.5"
+                  >
+                    {{ t('ui.range') }}
                   </Badge>
                 </div>
-                <div class="flex items-center gap-2 text-sm text-muted-foreground min-w-0">
-                  <span class="font-mono shrink-0">{{ model.name }}</span>
-                  <button
-                    class="p-0.5 rounded hover:bg-muted transition-colors shrink-0"
-                    title="复制模型 ID"
-                    @click="copyToClipboard(model.name)"
-                  >
-                    <Copy class="w-3 h-3" />
-                  </button>
-                  <template v-if="model.config?.description">
-                    <span class="shrink-0">·</span>
-                    <span
-                      class="text-xs truncate"
-                      :title="model.config?.description"
-                    >{{ model.config?.description }}</span>
-                  </template>
-                </div>
+                <span
+                  v-if="imageOutputDefaultPrice !== null"
+                  class="text-xs font-mono"
+                >{{ t('ui.default') }}{{ imageOutputDefaultPrice.toFixed(6) }}{{ t('ui.imagef4878ca') }}</span>
               </div>
-              <div class="flex items-center gap-1 shrink-0">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title="编辑模型"
-                  @click="$emit('editModel', model)"
-                >
-                  <Edit class="w-4 h-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  :title="model.is_active ? '点击停用' : '点击启用'"
-                  @click="$emit('toggleModelStatus', model)"
-                >
-                  <Power class="w-4 h-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title="关闭"
-                  @click="handleClose"
-                >
-                  <X class="w-4 h-4" />
-                </Button>
+              <div
+                v-if="imagePricingEntries.length > 0"
+                class="border rounded-lg overflow-hidden"
+              >
+                <Table>
+                  <TableHeader>
+                    <TableRow class="bg-muted/30">
+                      <TableHead class="text-xs h-9">
+                        {{ t('ui.resolution') }}
+                      </TableHead>
+                      <TableHead
+                        v-for="quality in IMAGE_OUTPUT_QUALITIES"
+                        :key="quality"
+                        class="text-xs h-9 text-right"
+                      >
+                        {{ quality }}
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <TableRow
+                      v-for="entry in imagePricingEntries"
+                      :key="entry.size"
+                      class="text-xs"
+                    >
+                      <TableCell class="py-2 font-mono">
+                        {{ formatImageSize(entry.size) }}
+                      </TableCell>
+                      <TableCell
+                        v-for="quality in IMAGE_OUTPUT_QUALITIES"
+                        :key="`${entry.size}-${quality}`"
+                        class="py-2 text-right font-mono"
+                      >
+                        {{ formatImagePrice(entry.prices[quality]) }}
+                      </TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </div>
+              <div
+                v-if="imagePriceRangeEntries.length > 0"
+                class="border rounded-lg overflow-hidden"
+              >
+                <Table>
+                  <TableHeader>
+                    <TableRow class="bg-muted/30">
+                      <TableHead class="text-xs h-9">
+                        {{ t('ui.maxPixels') }}
+                      </TableHead>
+                      <TableHead
+                        v-for="quality in IMAGE_OUTPUT_QUALITIES"
+                        :key="quality"
+                        class="text-xs h-9 text-right"
+                      >
+                        {{ quality }}
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <TableRow
+                      v-for="entry in imagePriceRangeEntries"
+                      :key="entry.key"
+                      class="text-xs"
+                    >
+                      <TableCell class="py-2 font-mono">
+                        {{ formatPixelLimit(entry.upToPixels) }}
+                      </TableCell>
+                      <TableCell
+                        v-for="quality in IMAGE_OUTPUT_QUALITIES"
+                        :key="`${entry.key}-${quality}`"
+                        class="py-2 text-right font-mono"
+                      >
+                        {{ formatImagePrice(entry.prices[quality]) }}
+                      </TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
               </div>
             </div>
-          </div>
 
-          <div class="p-4 sm:p-6">
-            <!-- 自定义 Tab 切换 -->
-            <div class="flex gap-1 p-1 bg-muted/40 rounded-lg mb-4">
-              <button
-                type="button"
-                class="flex-1 px-2 sm:px-4 py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200"
-                :class="[
-                  detailTab === 'basic'
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
-                ]"
-                @click="detailTab = 'basic'"
-              >
-                基本信息
-              </button>
-              <button
-                type="button"
-                class="flex-1 px-2 sm:px-4 py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200"
-                :class="[
-                  detailTab === 'routing'
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
-                ]"
-                @click="detailTab = 'routing'"
-              >
-                <span class="hidden sm:inline">链路控制</span>
-                <span class="sm:hidden">链路</span>
-              </button>
-              <button
-                type="button"
-                class="flex-1 px-2 sm:px-4 py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200"
-                :class="[
-                  detailTab === 'mappings'
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
-                ]"
-                @click="detailTab = 'mappings'"
-              >
-                <span class="hidden sm:inline">模型映射</span>
-                <span class="sm:hidden">映射</span>
-              </button>
-            </div>
-
-            <!-- Tab 内容 -->
+            <!-- 单阶梯（固定价格）展示 -->
             <div
-              v-show="detailTab === 'basic'"
-              class="space-y-6"
+              v-if="getTierCount(model.default_tiered_pricing) <= 1"
+              class="space-y-3"
             >
-              <!-- 基础属性 -->
-              <div class="space-y-4">
-                <h4 class="font-semibold text-sm">
-                  基础属性
-                </h4>
-                <div class="grid grid-cols-2 gap-4">
-                  <div>
-                    <Label class="text-xs text-muted-foreground">创建时间</Label>
-                    <p class="text-sm mt-1">
-                      {{ formatDate(model.created_at) }}
-                    </p>
-                  </div>
+              <div class="grid grid-cols-2 sm:grid-cols-2 gap-3">
+                <!-- 按 Token 计费 -->
+                <div class="p-3 rounded-lg border">
+                  <Label class="text-xs text-muted-foreground">{{ t('ui.inputPriceM') }}</Label>
+                  <p class="text-lg font-semibold mt-1">
+                    {{ getFirstTierPrice(model.default_tiered_pricing, 'input_price_per_1m') }}
+                  </p>
+                </div>
+                <div class="p-3 rounded-lg border">
+                  <Label class="text-xs text-muted-foreground">{{ t('ui.outputPriceM') }}</Label>
+                  <p class="text-lg font-semibold mt-1">
+                    {{ getFirstTierPrice(model.default_tiered_pricing, 'output_price_per_1m') }}
+                  </p>
+                </div>
+                <div class="p-3 rounded-lg border">
+                  <Label class="text-xs text-muted-foreground">{{ getFirst1hCachePrice(model.default_tiered_pricing) !== '-' ? t('ui.5MinuteCacheWriteM') : t('ui.cacheWriteM') }}</Label>
+                  <p class="text-sm font-mono mt-1">
+                    {{ getFirstTierPrice(model.default_tiered_pricing, 'cache_creation_price_per_1m') }}
+                  </p>
+                </div>
+                <div class="p-3 rounded-lg border">
+                  <Label class="text-xs text-muted-foreground">{{ t('ui.cacheReadM') }}</Label>
+                  <p class="text-sm font-mono mt-1">
+                    {{ getFirstTierPrice(model.default_tiered_pricing, 'cache_read_price_per_1m') }}
+                  </p>
                 </div>
               </div>
-
-              <!-- 默认定价 -->
-              <div class="space-y-3">
-                <h4 class="font-semibold text-sm">
-                  默认定价
-                </h4>
-
-                <ProcessingTierPricingSummary :pricing="model.default_tiered_pricing" />
-
-                <!-- 图片输出计费 -->
-                <div
-                  v-if="hasImagePricing"
-                  class="space-y-2"
-                >
-                  <div class="flex items-center justify-between gap-3 text-sm text-muted-foreground">
-                    <div class="flex items-center gap-2">
-                      <span>图片输出计费</span>
-                      <Badge
-                        v-if="imagePricingEntries.length > 0"
-                        variant="outline"
-                        class="text-[10px] h-5 px-1.5"
-                      >
-                        矩阵
-                      </Badge>
-                      <Badge
-                        v-if="imagePriceRangeEntries.length > 0"
-                        variant="outline"
-                        class="text-[10px] h-5 px-1.5"
-                      >
-                        区间
-                      </Badge>
-                    </div>
-                    <span
-                      v-if="imageOutputDefaultPrice !== null"
-                      class="text-xs font-mono"
-                    >默认 ${{ imageOutputDefaultPrice.toFixed(6) }}/张</span>
-                  </div>
-                  <div
-                    v-if="imagePricingEntries.length > 0"
-                    class="border rounded-lg overflow-hidden"
-                  >
-                    <Table>
-                      <TableHeader>
-                        <TableRow class="bg-muted/30">
-                          <TableHead class="text-xs h-9">
-                            分辨率
-                          </TableHead>
-                          <TableHead
-                            v-for="quality in IMAGE_OUTPUT_QUALITIES"
-                            :key="quality"
-                            class="text-xs h-9 text-right"
-                          >
-                            {{ quality }}
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        <TableRow
-                          v-for="entry in imagePricingEntries"
-                          :key="entry.size"
-                          class="text-xs"
-                        >
-                          <TableCell class="py-2 font-mono">
-                            {{ formatImageSize(entry.size) }}
-                          </TableCell>
-                          <TableCell
-                            v-for="quality in IMAGE_OUTPUT_QUALITIES"
-                            :key="`${entry.size}-${quality}`"
-                            class="py-2 text-right font-mono"
-                          >
-                            {{ formatImagePrice(entry.prices[quality]) }}
-                          </TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  </div>
-                  <div
-                    v-if="imagePriceRangeEntries.length > 0"
-                    class="border rounded-lg overflow-hidden"
-                  >
-                    <Table>
-                      <TableHeader>
-                        <TableRow class="bg-muted/30">
-                          <TableHead class="text-xs h-9">
-                            上限像素
-                          </TableHead>
-                          <TableHead
-                            v-for="quality in IMAGE_OUTPUT_QUALITIES"
-                            :key="quality"
-                            class="text-xs h-9 text-right"
-                          >
-                            {{ quality }}
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        <TableRow
-                          v-for="entry in imagePriceRangeEntries"
-                          :key="entry.key"
-                          class="text-xs"
-                        >
-                          <TableCell class="py-2 font-mono">
-                            {{ formatPixelLimit(entry.upToPixels) }}
-                          </TableCell>
-                          <TableCell
-                            v-for="quality in IMAGE_OUTPUT_QUALITIES"
-                            :key="`${entry.key}-${quality}`"
-                            class="py-2 text-right font-mono"
-                          >
-                            {{ formatImagePrice(entry.prices[quality]) }}
-                          </TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  </div>
-                </div>
-
-                <!-- 单阶梯（固定价格）展示 -->
-                <div
-                  v-if="getTierCount(model.default_tiered_pricing) <= 1"
-                  class="space-y-3"
-                >
-                  <div class="grid grid-cols-2 sm:grid-cols-2 gap-3">
-                    <!-- 按 Token 计费 -->
-                    <div class="p-3 rounded-lg border">
-                      <Label class="text-xs text-muted-foreground">输入价格 ($/M)</Label>
-                      <p class="text-lg font-semibold mt-1">
-                        {{ getFirstTierPrice(model.default_tiered_pricing, 'input_price_per_1m') }}
-                      </p>
-                    </div>
-                    <div class="p-3 rounded-lg border">
-                      <Label class="text-xs text-muted-foreground">输出价格 ($/M)</Label>
-                      <p class="text-lg font-semibold mt-1">
-                        {{ getFirstTierPrice(model.default_tiered_pricing, 'output_price_per_1m') }}
-                      </p>
-                    </div>
-                    <div class="p-3 rounded-lg border">
-                      <Label class="text-xs text-muted-foreground">{{ getFirst1hCachePrice(model.default_tiered_pricing) !== '-' ? '5min 缓存创建 ($/M)' : '缓存创建 ($/M)' }}</Label>
-                      <p class="text-sm font-mono mt-1">
-                        {{ getFirstTierPrice(model.default_tiered_pricing, 'cache_creation_price_per_1m') }}
-                      </p>
-                    </div>
-                    <div class="p-3 rounded-lg border">
-                      <Label class="text-xs text-muted-foreground">缓存读取 ($/M)</Label>
-                      <p class="text-sm font-mono mt-1">
-                        {{ getFirstTierPrice(model.default_tiered_pricing, 'cache_read_price_per_1m') }}
-                      </p>
-                    </div>
-                  </div>
-                  <!-- 1h 缓存 -->
-                  <div
-                    v-if="getFirst1hCachePrice(model.default_tiered_pricing) !== '-'"
-                    class="flex items-center gap-3 p-3 rounded-lg border bg-muted/20"
-                  >
-                    <Label class="text-xs text-muted-foreground whitespace-nowrap">1h 缓存创建</Label>
-                    <span class="text-sm font-mono">{{ getFirst1hCachePrice(model.default_tiered_pricing) }}</span>
-                  </div>
-                  <!-- 按次计费 -->
-                  <div
-                    v-if="model.default_price_per_request && model.default_price_per_request > 0"
-                    class="flex items-center gap-3 p-3 rounded-lg border bg-muted/20"
-                  >
-                    <Label class="text-xs text-muted-foreground whitespace-nowrap">按次计费</Label>
-                    <span class="text-sm font-mono">${{ model.default_price_per_request.toFixed(3) }}/次</span>
-                  </div>
-                  <!-- 视频分辨率计费 -->
-                  <div
-                    v-if="hasVideoPricing"
-                    class="space-y-2"
-                  >
-                    <div class="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Video class="w-4 h-4" />
-                      <span>视频分辨率计费 ({{ videoPricingEntries.length }} 种)</span>
-                    </div>
-                    <div class="border rounded-lg overflow-hidden">
-                      <Table>
-                        <TableHeader>
-                          <TableRow class="bg-muted/30">
-                            <TableHead class="text-xs h-9">
-                              分辨率
-                            </TableHead>
-                            <TableHead class="text-xs h-9 text-right">
-                              单价 ($/秒)
-                            </TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          <TableRow
-                            v-for="[res, price] in videoPricingEntries"
-                            :key="res"
-                            class="text-xs"
-                          >
-                            <TableCell class="py-2">
-                              {{ res }}
-                            </TableCell>
-                            <TableCell class="py-2 text-right font-mono">
-                              ${{ (price as number).toFixed(4) }}
-                            </TableCell>
-                          </TableRow>
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- 多阶梯计费展示 -->
-                <div
-                  v-else
-                  class="space-y-3"
-                >
-                  <div class="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Layers class="w-4 h-4" />
-                    <span>阶梯计费 ({{ getTierCount(model.default_tiered_pricing) }} 档)</span>
-                  </div>
-
-                  <!-- 阶梯价格表格 -->
-                  <div class="border rounded-lg overflow-hidden">
-                    <Table>
-                      <TableHeader>
-                        <TableRow class="bg-muted/30">
-                          <TableHead class="text-xs h-9">
-                            阶梯
-                          </TableHead>
-                          <TableHead class="text-xs h-9 text-right">
-                            输入 ($/M)
-                          </TableHead>
-                          <TableHead class="text-xs h-9 text-right">
-                            输出 ($/M)
-                          </TableHead>
-                          <TableHead class="text-xs h-9 text-right">
-                            缓存创建
-                          </TableHead>
-                          <TableHead class="text-xs h-9 text-right">
-                            缓存读取
-                          </TableHead>
-                          <TableHead class="text-xs h-9 text-right">
-                            1h 缓存
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        <TableRow
-                          v-for="(tier, index) in model.default_tiered_pricing?.tiers || []"
-                          :key="index"
-                          class="text-xs"
-                        >
-                          <TableCell class="py-2">
-                            <span
-                              v-if="tier.up_to === null"
-                              class="text-muted-foreground"
-                            >
-                              {{ index === 0 ? '所有' : `> ${formatTierLimit((model.default_tiered_pricing?.tiers || [])[index - 1]?.up_to)}` }}
-                            </span>
-                            <span v-else>
-                              {{ index === 0 ? '0' : formatTierLimit((model.default_tiered_pricing?.tiers || [])[index - 1]?.up_to) }} - {{ formatTierLimit(tier.up_to) }}
-                            </span>
-                          </TableCell>
-                          <TableCell class="py-2 text-right font-mono">
-                            ${{ tier.input_price_per_1m?.toFixed(2) || '0.00' }}
-                          </TableCell>
-                          <TableCell class="py-2 text-right font-mono">
-                            ${{ tier.output_price_per_1m?.toFixed(2) || '0.00' }}
-                          </TableCell>
-                          <TableCell class="py-2 text-right font-mono text-muted-foreground">
-                            {{ tier.cache_creation_price_per_1m != null ? `$${tier.cache_creation_price_per_1m.toFixed(2)}` : '-' }}
-                          </TableCell>
-                          <TableCell class="py-2 text-right font-mono text-muted-foreground">
-                            {{ tier.cache_read_price_per_1m != null ? `$${tier.cache_read_price_per_1m.toFixed(2)}` : '-' }}
-                          </TableCell>
-                          <TableCell class="py-2 text-right font-mono text-muted-foreground">
-                            {{ get1hCachePrice(tier) }}
-                          </TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  </div>
-
-                  <!-- 按次计费（多阶梯时也显示） -->
-                  <div
-                    v-if="model.default_price_per_request && model.default_price_per_request > 0"
-                    class="flex items-center gap-3 p-3 rounded-lg border bg-muted/20"
-                  >
-                    <Label class="text-xs text-muted-foreground whitespace-nowrap">按次计费</Label>
-                    <span class="text-sm font-mono">${{ model.default_price_per_request.toFixed(3) }}/次</span>
-                  </div>
-                  <!-- 视频分辨率计费（多阶梯时也显示） -->
-                  <div
-                    v-if="hasVideoPricing"
-                    class="space-y-2"
-                  >
-                    <div class="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Video class="w-4 h-4" />
-                      <span>视频分辨率计费 ({{ videoPricingEntries.length }} 种)</span>
-                    </div>
-                    <div class="border rounded-lg overflow-hidden">
-                      <Table>
-                        <TableHeader>
-                          <TableRow class="bg-muted/30">
-                            <TableHead class="text-xs h-9">
-                              分辨率
-                            </TableHead>
-                            <TableHead class="text-xs h-9 text-right">
-                              单价 ($/秒)
-                            </TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          <TableRow
-                            v-for="[res, price] in videoPricingEntries"
-                            :key="res"
-                            class="text-xs"
-                          >
-                            <TableCell class="py-2">
-                              {{ res }}
-                            </TableCell>
-                            <TableCell class="py-2 text-right font-mono">
-                              ${{ (price as number).toFixed(4) }}
-                            </TableCell>
-                          </TableRow>
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </div>
-                </div>
+              <!-- 1h 缓存 -->
+              <div
+                v-if="getFirst1hCachePrice(model.default_tiered_pricing) !== '-'"
+                class="flex items-center gap-3 p-3 rounded-lg border bg-muted/20"
+              >
+                <Label class="text-xs text-muted-foreground whitespace-nowrap">{{ t('ui.1HourCacheWrite1528b84') }}</Label>
+                <span class="text-sm font-mono">{{ getFirst1hCachePrice(model.default_tiered_pricing) }}</span>
               </div>
-
-              <!-- 统计信息 -->
-              <div class="space-y-3">
-                <h4 class="font-semibold text-sm">
-                  统计信息
-                </h4>
-                <div class="grid grid-cols-2 gap-3">
-                  <div class="p-3 rounded-lg border bg-muted/20">
-                    <div class="flex items-center justify-between">
-                      <Label class="text-xs text-muted-foreground">关联提供商</Label>
-                      <Building2 class="w-4 h-4 text-muted-foreground" />
-                    </div>
-                    <p class="text-2xl font-bold mt-1">
-                      {{ model.active_provider_count || 0 }}<span class="text-sm text-muted-foreground font-normal">/{{ model.provider_count || 0 }}</span>
-                    </p>
-                  </div>
-                  <div class="p-3 rounded-lg border bg-muted/20">
-                    <div class="flex items-center justify-between">
-                      <Label class="text-xs text-muted-foreground">调用次数</Label>
-                      <BarChart3 class="w-4 h-4 text-muted-foreground" />
-                    </div>
-                    <p class="text-2xl font-bold mt-1">
-                      {{ model.usage_count || 0 }}
-                    </p>
-                  </div>
+              <!-- 按次计费 -->
+              <div
+                v-if="model.default_price_per_request && model.default_price_per_request > 0"
+                class="flex items-center gap-3 p-3 rounded-lg border bg-muted/20"
+              >
+                <Label class="text-xs text-muted-foreground whitespace-nowrap">{{ t('ui.perRequestBilling') }}</Label>
+                <span class="text-sm font-mono">${{ model.default_price_per_request.toFixed(3) }}{{ t('ui.requestad9c0d7') }}</span>
+              </div>
+              <!-- 视频分辨率计费 -->
+              <div
+                v-if="hasVideoPricing"
+                class="space-y-2"
+              >
+                <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Video class="w-4 h-4" />
+                  <span>{{ t('ui.videoResolutionPricing') }}{{ videoPricingEntries.length }} {{ t('ui.types') }}</span>
+                </div>
+                <div class="border rounded-lg overflow-hidden">
+                  <Table>
+                    <TableHeader>
+                      <TableRow class="bg-muted/30">
+                        <TableHead class="text-xs h-9">
+                          {{ t('ui.resolution') }}
+                        </TableHead>
+                        <TableHead class="text-xs h-9 text-right">
+                          {{ t('ui.unitPriceSecond2bf91c2') }}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <TableRow
+                        v-for="[res, price] in videoPricingEntries"
+                        :key="res"
+                        class="text-xs"
+                      >
+                        <TableCell class="py-2">
+                          {{ res }}
+                        </TableCell>
+                        <TableCell class="py-2 text-right font-mono">
+                          ${{ (price as number).toFixed(4) }}
+                        </TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
                 </div>
               </div>
             </div>
 
-            <!-- Tab 2: 链路控制 -->
-            <div v-show="detailTab === 'routing'">
-              <RoutingTab
-                v-if="model"
-                ref="routingTabRef"
-                :global-model-id="model.id"
-                :routing-data="routingData"
-                :loading="routingLoading"
-                :error="routingError"
-                @refresh="loadRoutingData"
-                @add-provider="$emit('addProvider')"
-                @edit-provider="handleEditProviderFromRouting"
-                @toggle-provider-status="handleToggleProviderFromRouting"
-                @delete-provider="handleDeleteProviderFromRouting"
-              />
-            </div>
+            <!-- 多阶梯计费展示 -->
+            <div
+              v-else
+              class="space-y-3"
+            >
+              <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                <Layers class="w-4 h-4" />
+                <span>{{ t('ui.tieredPricing5233988') }}{{ getTierCount(model.default_tiered_pricing) }} {{ t('ui.tiers') }}</span>
+              </div>
 
-            <!-- Tab 3: 模型映射 -->
-            <div v-show="detailTab === 'mappings'">
-              <ModelMappingsTab
-                v-if="model"
-                ref="modelMappingsTabRef"
-                :global-model-id="model.id"
-                :model-name="model.name"
-                :mappings="model.config?.model_mappings || []"
-                :routing-data="routingData"
-                :loading-preview="routingLoading"
-                @update="handleMappingsUpdate"
-                @refresh="loadRoutingData"
-                @link-provider="(providerId) => $emit('linkProvider', providerId)"
-                @link-providers="(providerIds) => $emit('linkProviders', providerIds)"
-              />
+              <!-- 阶梯价格表格 -->
+              <div class="border rounded-lg overflow-hidden">
+                <Table>
+                  <TableHeader>
+                    <TableRow class="bg-muted/30">
+                      <TableHead class="text-xs h-9">
+                        {{ t('ui.tier') }}
+                      </TableHead>
+                      <TableHead class="text-xs h-9 text-right">
+                        {{ t('ui.inputM') }}
+                      </TableHead>
+                      <TableHead class="text-xs h-9 text-right">
+                        {{ t('ui.outputM') }}
+                      </TableHead>
+                      <TableHead class="text-xs h-9 text-right">
+                        {{ t('ui.cacheCreation') }}
+                      </TableHead>
+                      <TableHead class="text-xs h-9 text-right">
+                        {{ t('ui.cacheRead1ded655') }}
+                      </TableHead>
+                      <TableHead class="text-xs h-9 text-right">
+                        {{ t('ui.1hCache') }}
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <TableRow
+                      v-for="(tier, index) in model.default_tiered_pricing?.tiers || []"
+                      :key="index"
+                      class="text-xs"
+                    >
+                      <TableCell class="py-2">
+                        <span
+                          v-if="tier.up_to === null"
+                          class="text-muted-foreground"
+                        >
+                          {{ index === 0 ? t('ui.all') : `> ${formatTierLimit((model.default_tiered_pricing?.tiers || [])[index - 1]?.up_to)}` }}
+                        </span>
+                        <span v-else>
+                          {{ index === 0 ? '0' : formatTierLimit((model.default_tiered_pricing?.tiers || [])[index - 1]?.up_to) }} - {{ formatTierLimit(tier.up_to) }}
+                        </span>
+                      </TableCell>
+                      <TableCell class="py-2 text-right font-mono">
+                        ${{ tier.input_price_per_1m?.toFixed(2) || '0.00' }}
+                      </TableCell>
+                      <TableCell class="py-2 text-right font-mono">
+                        ${{ tier.output_price_per_1m?.toFixed(2) || '0.00' }}
+                      </TableCell>
+                      <TableCell class="py-2 text-right font-mono text-muted-foreground">
+                        {{ tier.cache_creation_price_per_1m != null ? `$${tier.cache_creation_price_per_1m.toFixed(2)}` : '-' }}
+                      </TableCell>
+                      <TableCell class="py-2 text-right font-mono text-muted-foreground">
+                        {{ tier.cache_read_price_per_1m != null ? `$${tier.cache_read_price_per_1m.toFixed(2)}` : '-' }}
+                      </TableCell>
+                      <TableCell class="py-2 text-right font-mono text-muted-foreground">
+                        {{ get1hCachePrice(tier) }}
+                      </TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </div>
+
+              <!-- 按次计费（多阶梯时也显示） -->
+              <div
+                v-if="model.default_price_per_request && model.default_price_per_request > 0"
+                class="flex items-center gap-3 p-3 rounded-lg border bg-muted/20"
+              >
+                <Label class="text-xs text-muted-foreground whitespace-nowrap">{{ t('ui.perRequestBilling') }}</Label>
+                <span class="text-sm font-mono">${{ model.default_price_per_request.toFixed(3) }}{{ t('ui.requestad9c0d7') }}</span>
+              </div>
+              <!-- 视频分辨率计费（多阶梯时也显示） -->
+              <div
+                v-if="hasVideoPricing"
+                class="space-y-2"
+              >
+                <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Video class="w-4 h-4" />
+                  <span>{{ t('ui.videoResolutionPricing') }}{{ videoPricingEntries.length }} {{ t('ui.types') }}</span>
+                </div>
+                <div class="border rounded-lg overflow-hidden">
+                  <Table>
+                    <TableHeader>
+                      <TableRow class="bg-muted/30">
+                        <TableHead class="text-xs h-9">
+                          {{ t('ui.resolution') }}
+                        </TableHead>
+                        <TableHead class="text-xs h-9 text-right">
+                          {{ t('ui.unitPriceSecond2bf91c2') }}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <TableRow
+                        v-for="[res, price] in videoPricingEntries"
+                        :key="res"
+                        class="text-xs"
+                      >
+                        <TableCell class="py-2">
+                          {{ res }}
+                        </TableCell>
+                        <TableCell class="py-2 text-right font-mono">
+                          ${{ (price as number).toFixed(4) }}
+                        </TableCell>
+                      </TableRow>
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
             </div>
           </div>
-        </Card>
+
+          <!-- 统计信息 -->
+          <div class="space-y-3">
+            <h4 class="font-semibold text-sm">
+              {{ t('ui.statistics') }}
+            </h4>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="p-3 rounded-lg border bg-muted/20">
+                <div class="flex items-center justify-between">
+                  <Label class="text-xs text-muted-foreground">{{ t('ui.linkedProviders') }}</Label>
+                  <Building2 class="w-4 h-4 text-muted-foreground" />
+                </div>
+                <p class="text-2xl font-bold mt-1">
+                  {{ model.active_provider_count || 0 }}<span class="text-sm text-muted-foreground font-normal">/{{ model.provider_count || 0 }}</span>
+                </p>
+              </div>
+              <div class="p-3 rounded-lg border bg-muted/20">
+                <div class="flex items-center justify-between">
+                  <Label class="text-xs text-muted-foreground">{{ t('ui.callCount') }}</Label>
+                  <BarChart3 class="w-4 h-4 text-muted-foreground" />
+                </div>
+                <p class="text-2xl font-bold mt-1">
+                  {{ model.usage_count || 0 }}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: 链路控制 -->
+        <div v-show="detailTab === 'routing'">
+          <RoutingTab
+            v-if="model"
+            ref="routingTabRef"
+            :global-model-id="model.id"
+            :routing-data="routingData"
+            :loading="routingLoading"
+            :error="routingError"
+            @refresh="loadRoutingData"
+            @add-provider="$emit('addProvider')"
+            @edit-provider="handleEditProviderFromRouting"
+            @toggle-provider-status="handleToggleProviderFromRouting"
+            @delete-provider="handleDeleteProviderFromRouting"
+          />
+        </div>
+
+        <!-- Tab 3: 模型映射 -->
+        <div v-show="detailTab === 'mappings'">
+          <ModelMappingsTab
+            v-if="model"
+            ref="modelMappingsTabRef"
+            :global-model-id="model.id"
+            :model-name="model.name"
+            :mappings="model.config?.model_mappings || []"
+            :routing-data="routingData"
+            :loading-preview="routingLoading"
+            @update="handleMappingsUpdate"
+            @refresh="loadRoutingData"
+            @link-provider="(providerId) => $emit('linkProvider', providerId)"
+            @link-providers="(providerIds) => $emit('linkProviders', providerIds)"
+          />
+        </div>
       </div>
-    </Transition>
-  </Teleport>
+    </template>
+  </Drawer>
 </template>
 
 <script setup lang="ts">
-import { getI18nLocale } from '@/i18n'
+import { useI18n } from '@/i18n'
+
 import { ref, watch, computed } from 'vue'
 import {
   X,
@@ -545,9 +536,8 @@ import {
   BarChart3,
   Video
 } from 'lucide-vue-next'
-import { useEscapeKey } from '@/composables/useEscapeKey'
+import Drawer from '@/components/ui/drawer/Drawer.vue'
 import { useClipboard } from '@/composables/useClipboard'
-import Card from '@/components/ui/card.vue'
 import Badge from '@/components/ui/badge.vue'
 import Button from '@/components/ui/button.vue'
 import Label from '@/components/ui/label.vue'
@@ -562,7 +552,7 @@ import ModelMappingsTab from './ModelMappingsTab.vue'
 import ProcessingTierPricingSummary from './ProcessingTierPricingSummary.vue'
 import { sortResolutionEntries } from '@/utils/form'
 import { parseApiError } from '@/utils/errorParser'
-import { formatCompactNumber, formatTokens } from '@/utils/format'
+import { formatCompactNumber, formatTokens, formatDateOnly } from '@/utils/format'
 import { getGlobalModelRoutingPreview } from '@/api/global-models'
 
 // 使用外部类型定义
@@ -585,6 +575,8 @@ const emit = defineEmits<{
   'linkProvider': [providerId: string]
   'linkProviders': [providerIds: string[]]
 }>()
+
+const { t } = useI18n()
 const { copyToClipboard } = useClipboard()
 
 interface Props {
@@ -613,7 +605,7 @@ async function loadRoutingData() {
   try {
     routingData.value = await getGlobalModelRoutingPreview(props.model.id)
   } catch (err: unknown) {
-    routingError.value = parseApiError(err, '加载失败')
+    routingError.value = parseApiError(err, t('ui.failedToLoad'))
   } finally {
     routingLoading.value = false
   }
@@ -743,29 +735,11 @@ function formatPixels(value: number): string {
 
 const detailTab = ref('basic')
 
-// 处理背景点击
-function handleBackdropClick() {
-  if (!props.hasBlockingDialogOpen) {
-    handleClose()
-  }
-}
-
 // 关闭抽屉
 function handleClose() {
   if (!props.hasBlockingDialogOpen) {
     emit('update:open', false)
   }
-}
-
-// 格式化日期
-function formatDate(dateStr: string): string {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleDateString(getI18nLocale(), {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  })
 }
 
 // 从 tiered_pricing 获取第一阶梯的价格
@@ -820,44 +794,5 @@ watch(() => props.open, (newOpen) => {
   }
 })
 
-// 添加 ESC 键监听
-useEscapeKey(() => {
-  if (props.open) {
-    handleClose()
-  }
-}, {
-  disableOnInput: true,
-  once: false
-})
 </script>
 
-<style scoped>
-/* 抽屉过渡动画 */
-.drawer-enter-active,
-.drawer-leave-active {
-  transition: opacity 0.3s ease;
-}
-
-.drawer-enter-active .relative,
-.drawer-leave-active .relative {
-  transition: transform 0.3s ease;
-}
-
-.drawer-enter-from,
-.drawer-leave-to {
-  opacity: 0;
-}
-
-.drawer-enter-from .relative {
-  transform: translateX(100%);
-}
-
-.drawer-leave-to .relative {
-  transform: translateX(100%);
-}
-
-.drawer-enter-to .relative,
-.drawer-leave-from .relative {
-  transform: translateX(0);
-}
-</style>

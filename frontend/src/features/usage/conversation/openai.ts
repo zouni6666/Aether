@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 /**
  * OpenAI API 格式解析器
  */
@@ -1370,7 +1371,7 @@ export class OpenAIParser implements ApiFormatParser {
     return content
       .map(block => {
         if (block.type === 'text') return block.text
-        if (block.type === 'image') return '[图片]'
+        if (block.type === 'image') return translate('ui.imagea71f445')
         if (block.type === 'error') return `[错误: ${block.message}]`
         return ''
       })

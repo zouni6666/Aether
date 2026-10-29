@@ -12,10 +12,10 @@
           </div>
           <div class="min-w-0 flex-1">
             <h3 class="text-lg font-semibold leading-tight text-foreground">
-              {{ legacyT('管理 API Keys') }}
+              {{ t('ui.manageApiKeys') }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ legacyT('查看和管理用户的 API 密钥') }}
+              {{ t('ui.viewAndManageUserApiKeys') }}
             </p>
           </div>
         </div>
@@ -34,39 +34,39 @@
               <div class="min-w-0 flex-1">
                 <div class="flex flex-wrap items-center gap-2">
                   <span class="font-semibold text-foreground">
-                    {{ apiKey.name || legacyT('未命名 API Key') }}
+                    {{ apiKey.name || t('ui.unnamedApiKey') }}
                   </span>
                   <Badge
                     :variant="apiKey.is_active ? 'success' : 'secondary'"
                     class="text-xs"
                   >
-                    {{ legacyT(apiKey.is_active ? '活跃' : '禁用') }}
+                    {{ apiKey.is_active ? t('ui.activee85e590') : t('ui.disable') }}
                   </Badge>
                   <Badge
                     v-if="apiKey.is_locked"
                     variant="secondary"
                     class="text-xs"
                   >
-                    {{ legacyT('已锁定') }}
+                    {{ t('ui.locked') }}
                   </Badge>
                   <Badge
                     v-if="apiKey.is_standalone"
                     variant="default"
                     class="bg-purple-500 text-xs"
                   >
-                    {{ legacyT('独立余额') }}
+                    {{ t('ui.standaloneBalance') }}
                   </Badge>
                   <Badge
                     variant="secondary"
                     class="text-xs"
                   >
-                    {{ legacyT(formatRateLimit(apiKey.rate_limit)) }}
+                    {{ formatRateLimit(apiKey.rate_limit) }}
                   </Badge>
                   <Badge
                     variant="secondary"
                     class="text-xs"
                   >
-                    {{ legacyT(formatConcurrentLimit(apiKey.concurrent_limit)) }}
+                    {{ formatConcurrentLimit(apiKey.concurrent_limit) }}
                   </Badge>
                 </div>
                 <div class="mt-0.5 flex items-center gap-1">
@@ -74,11 +74,11 @@
                     {{ apiKey.key_display || '****' }}
                   </code>
                   <span class="text-xs text-muted-foreground">
-                    {{ legacyT('IP 限制：') }}{{ legacyT(formatIpRules(apiKey.ip_rules)) }}
+                    {{ t('ui.ipRestrictions') }}{{ formatIpRules(apiKey.ip_rules) }}
                   </span>
                   <button
                     class="rounded p-0.5 transition-colors hover:bg-muted"
-                    :title="legacyT('复制完整密钥')"
+                    :title="t('ui.copyFullKey')"
                     @click="$emit('copy-full-key', apiKey)"
                   >
                     <Copy class="h-3 w-3 text-muted-foreground" />
@@ -89,7 +89,7 @@
             <div class="flex flex-shrink-0 items-center gap-4">
               <div class="text-right text-sm">
                 <div class="text-muted-foreground">
-                  {{ (apiKey.total_requests || 0).toLocaleString() }} {{ legacyT('次') }}
+                  {{ (apiKey.total_requests || 0).toLocaleString() }} {{ t('ui.times') }}
                 </div>
                 <div class="font-semibold text-rose-600">
                   ${{ (apiKey.total_cost_usd || 0).toFixed(4) }}
@@ -99,7 +99,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8"
-                :title="legacyT('编辑')"
+                :title="t('ui.edit0518365')"
                 @click="$emit('edit-key', apiKey)"
               >
                 <SquarePen class="h-4 w-4" />
@@ -108,7 +108,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8"
-                :title="legacyT(apiKey.is_locked ? '解锁' : '锁定')"
+                :title="apiKey.is_locked ? t('ui.unlock') : t('ui.lock')"
                 @click="$emit('toggle-lock', apiKey)"
               >
                 <Lock
@@ -124,7 +124,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8"
-                :title="legacyT('删除')"
+                :title="t('ui.delete')"
                 @click="$emit('delete-key', apiKey)"
               >
                 <Trash2 class="h-4 w-4" />
@@ -143,10 +143,10 @@
           </div>
           <div>
             <p class="mb-1 text-base font-semibold text-foreground">
-              {{ legacyT('暂无 API Keys') }}
+              {{ t('ui.noApiKeys1c953a6') }}
             </p>
             <p class="text-sm text-muted-foreground">
-              {{ legacyT('点击下方按钮创建') }}
+              {{ t('ui.useTheButtonBelowToCreateOne') }}
             </p>
           </div>
         </div>
@@ -159,14 +159,14 @@
         class="h-10 px-5"
         @click="$emit('close')"
       >
-        {{ legacyT('取消') }}
+        {{ t('common.cancel') }}
       </Button>
       <Button
         class="h-10 px-5"
         :disabled="creating"
         @click="$emit('create-key')"
       >
-        {{ creating ? legacyT('创建中...') : legacyT('创建') }}
+        {{ creating ? t('ui.creating') : t('ui.create') }}
       </Button>
     </template>
   </Dialog>
@@ -196,5 +196,5 @@ defineEmits<{
   'copy-full-key': [apiKey: ApiKey]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

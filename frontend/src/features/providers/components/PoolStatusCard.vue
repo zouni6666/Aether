@@ -5,28 +5,28 @@
       <div class="flex items-center justify-between">
         <div class="flex flex-wrap items-center gap-2">
           <h3 class="text-sm font-semibold">
-            号池状态
+            {{ t('ui.poolStatus') }}
           </h3>
           <Badge
             v-if="poolStatus"
             variant="secondary"
             class="text-xs"
           >
-            {{ poolStatus.total_keys }} 个密钥
+            {{ poolStatus.total_keys }} {{ t('ui.keyse30fd99') }}
           </Badge>
           <Badge
             v-if="poolStatus && poolStatus.total_sticky_sessions > 0"
             variant="outline"
             class="text-xs"
           >
-            {{ poolStatus.total_sticky_sessions }} 个粘性会话
+            {{ poolStatus.total_sticky_sessions }} {{ t('ui.stickySessions') }}
           </Badge>
           <Badge
             v-if="poolStatus && poolStatus.provider_desired_hot > 0"
             variant="outline"
             class="text-xs"
           >
-            热池 {{ poolStatus.provider_hot_count }} / {{ poolStatus.provider_desired_hot }}
+            {{ t('ui.warmPool') }} {{ poolStatus.provider_hot_count }} / {{ poolStatus.provider_desired_hot }}
           </Badge>
           <Badge
             v-if="poolStatus && poolStatus.provider_in_flight > 0"
@@ -47,12 +47,12 @@
             variant="secondary"
             class="text-xs"
           >
-            补热中
+            {{ t('ui.warmingUp') }}
           </Badge>
         </div>
         <RefreshButton
           :loading="refreshing"
-          title="刷新号池状态"
+          :title="t('ui.refreshPoolStatus')"
           @click="refresh"
         />
       </div>
@@ -72,10 +72,10 @@
       class="p-6 text-center text-muted-foreground"
     >
       <p class="text-sm">
-        号池未启用
+        {{ t('ui.poolDisabled') }}
       </p>
       <p class="text-xs mt-1">
-        请在提供商编辑中配置号池参数
+        {{ t('ui.configurePoolSettingsInTheProviderEditor') }}
       </p>
     </div>
 
@@ -93,7 +93,7 @@
         <!-- Row 1: name + cooldown + actions -->
         <div class="flex items-center justify-between gap-2">
           <div class="flex items-center gap-2 min-w-0">
-            <span class="text-sm font-medium truncate">{{ key.key_name || '未命名' }}</span>
+            <span class="text-sm font-medium truncate">{{ key.key_name || t('ui.untitled') }}</span>
             <Badge
               v-if="key.cooldown_reason"
               variant="destructive"
@@ -114,7 +114,7 @@
               variant="ghost"
               size="icon"
               class="h-7 w-7 text-muted-foreground hover:text-green-600"
-              title="清除冷却"
+              :title="t('ui.clearCooldown')"
               :disabled="actionLoading === key.key_id"
               @click="handleClearCooldown(key.key_id)"
             >
@@ -128,7 +128,7 @@
               variant="ghost"
               size="icon"
               class="h-7 w-7 text-muted-foreground hover:text-foreground"
-              title="重置成本窗口"
+              :title="t('ui.resetCostWindow')"
               :disabled="actionLoading === key.key_id"
               @click="handleResetCost(key.key_id)"
             >
@@ -144,7 +144,7 @@
             v-if="key.cost_limit != null"
             class="flex items-center gap-1.5 flex-1 min-w-0"
           >
-            <span class="shrink-0">成本</span>
+            <span class="shrink-0">{{ t('stats.metric.cost') }}</span>
             <div class="flex-1 h-1.5 bg-border rounded-full overflow-hidden max-w-[120px]">
               <div
                 class="h-full transition-all duration-300 rounded-full"
@@ -163,7 +163,7 @@
             v-else-if="key.cost_window_usage > 0"
             class="flex items-center gap-1"
           >
-            <span>成本</span>
+            <span>{{ t('stats.metric.cost') }}</span>
             <span class="tabular-nums">{{ formatTokens(key.cost_window_usage) }}</span>
           </div>
 
@@ -174,8 +174,7 @@
 
           <!-- Sticky sessions -->
           <span v-if="key.sticky_sessions > 0">
-            {{ key.sticky_sessions }} 粘性会话
-          </span>
+            {{ key.sticky_sessions }} {{ t('ui.stickySession') }} </span>
 
           <!-- LRU score -->
           <template v-if="key.lru_score != null">
@@ -192,13 +191,15 @@
       class="p-6 text-center text-muted-foreground"
     >
       <p class="text-sm">
-        暂无密钥数据
+        {{ t('ui.noKeyData') }}
       </p>
     </div>
   </Card>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { onMounted, ref } from 'vue'
 import { RefreshCw, RotateCcw } from 'lucide-vue-next'
 
@@ -217,6 +218,8 @@ const props = defineProps<{
   providerId: string
   poolEnabled: boolean
 }>()
+
+const { t } = useI18n()
 
 const { error: showError, success } = useToast()
 
@@ -269,12 +272,12 @@ async function handleResetCost(keyId: string) {
 }
 
 const COOLDOWN_REASON_MAP: Record<string, string> = {
-  rate_limited_429: '429 限流',
-  forbidden_403: '403 禁止',
-  overloaded_529: '529 过载',
-  auth_failed_401: '401 认证失败',
-  payment_required_402: '402 欠费',
-  server_error_500: '500 错误',
+  get rate_limited_429() { return t('ui.429RateLimited') },
+  get forbidden_403() { return t('ui.403Forbidden') },
+  get overloaded_529() { return t('ui.529Overloaded') },
+  get auth_failed_401() { return t('ui.401Unauthorized') },
+  get payment_required_402() { return t('ui.402PaymentRequired') },
+  get server_error_500() { return t('ui.500ServerError') },
 }
 
 function formatCooldownReason(reason: string): string {
@@ -303,14 +306,15 @@ function getCostBarColor(usage: number, limit: number): string {
 function formatLruScore(score: number): string {
   const now = Date.now() / 1000
   const diff = now - score
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m 前`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h 前`
-  return `${Math.floor(diff / 86400)}d 前`
+  if (diff < 60) return t('ui.justNow')
+  if (diff < 3600) return t('providers.migration.mAgo314ee4', { value: String(Math.floor(diff / 60)) })
+  if (diff < 86400) return t('providers.migration.hAgoe04bd6', { value: String(Math.floor(diff / 3600)) })
+  return t('providers.migration.dAgo36bb9b', { value: String(Math.floor(diff / 86400)) })
 }
 
 onMounted(async () => {
   await loadPoolStatus()
   initialLoading.value = false
 })
+
 </script>

@@ -5,7 +5,7 @@
       <div class="json-panel-actions">
         <slot name="toolbar-actions-before" />
         <button
-          :title="panelExpandDepth === 0 ? '展开全部' : '收缩全部'"
+          :title="panelExpandDepth === 0 ? t('ui.expandAll') : t('ui.collapseAll')"
           class="json-panel-action"
           :class="{ 'is-disabled': expandDisabled }"
           :disabled="expandDisabled"
@@ -22,7 +22,7 @@
           />
         </button>
         <button
-          :title="panelCopied ? '已复制' : '复制'"
+          :title="panelCopied ? t('common.copied') : t('common.copy')"
           class="json-panel-action"
           :class="{ 'is-disabled': copyDisabled }"
           :disabled="copyDisabled"
@@ -55,6 +55,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, ref } from 'vue'
 import { Check, Copy, Maximize2, Minimize2 } from 'lucide-vue-next'
 import { useClipboard } from '@/composables/useClipboard'
@@ -74,7 +76,7 @@ const props = withDefaults(defineProps<{
   expandDisabled?: boolean
   copyDisabled?: boolean
 }>(), {
-  emptyMessage: '无数据',
+  emptyMessage: undefined,
   title: 'JSON',
   maxHeight: '360px',
   expandDepth: undefined,
@@ -88,6 +90,8 @@ const emit = defineEmits<{
   'update:expandDepth': [value: number]
   copy: []
 }>()
+
+const { t } = useI18n()
 
 const { copyToClipboard } = useClipboard()
 const internalExpandDepth = ref(0)
@@ -124,6 +128,8 @@ const copyJson = () => {
     internalCopied.value = false
   }, 2000)
 }
+
+const emptyMessage = computed(() => props.emptyMessage ?? t('ui.noData'))
 </script>
 
 <style scoped>

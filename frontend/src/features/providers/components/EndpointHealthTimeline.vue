@@ -7,7 +7,7 @@
     :time-range-end="monitor?.time_range_end"
     :lookback-hours="lookbackHours"
     :fallback-segments="segmentCount ?? GRID_COUNT"
-    entity-label="端点"
+    :entity-label="t('ui.endpoint52fff16')"
     :entity-name="monitor?.api_format ? formatApiFormat(monitor.api_format) : undefined"
   />
   <div
@@ -49,6 +49,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed } from 'vue'
 import type { EndpointStatusMonitor, EndpointHealthEvent, PublicEndpointStatusMonitor, PublicHealthEvent } from '@/api/endpoints'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
@@ -64,6 +66,8 @@ const props = defineProps<{
   segmentCount?: number
   lookbackHours?: number
 }>()
+
+const { t } = useI18n()
 
 // 固定格子数量，将实际事件按时间均匀分布到格子中
 const GRID_COUNT = 60
@@ -225,7 +229,7 @@ function buildSegmentTooltip(
       avg_first_byte_ms: null,
       avg_tps: null
     },
-    entityLabel: '端点',
+    entityLabel: t('ui.endpoint52fff16'),
     entityName: props.monitor?.api_format ? formatApiFormat(props.monitor.api_format) : undefined
   })
 }

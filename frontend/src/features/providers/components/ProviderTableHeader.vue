@@ -9,8 +9,8 @@
           size="icon"
           class="-ml-2 h-8 w-8 shrink-0"
           :class="policyPanelCollapsed ? 'text-muted-foreground' : 'text-primary'"
-          :title="legacyT(policyPanelCollapsed ? '展开策略分组' : '收起策略分组')"
-          :aria-label="legacyT(policyPanelCollapsed ? '展开策略分组' : '收起策略分组')"
+          :title="policyPanelCollapsed ? t('ui.expandPolicyGroups') : t('ui.collapsePolicyGroups')"
+          :aria-label="policyPanelCollapsed ? t('ui.expandPolicyGroups') : t('ui.collapsePolicyGroups')"
           :aria-expanded="!policyPanelCollapsed"
           aria-controls="provider-policy-editor"
           @click="$emit('togglePolicyPanel')"
@@ -18,7 +18,7 @@
           <SlidersHorizontal class="h-4 w-4" />
         </Button>
         <h3 class="text-sm sm:text-base font-semibold text-foreground">
-          {{ legacyT('提供商管理') }}
+          {{ t('ui.providerManagement') }}
         </h3>
       </div>
 
@@ -31,7 +31,7 @@
             id="provider-search"
             :model-value="searchQuery"
             type="text"
-            :placeholder="legacyT('搜索提供商...')"
+            :placeholder="t('ui.searchProviders')"
             class="w-32 sm:w-44 pl-8 pr-3 h-8 text-sm bg-muted/30 border-border/50 focus:border-primary/50 transition-colors"
             @update:model-value="$emit('update:searchQuery', $event)"
           />
@@ -44,7 +44,7 @@
             @update:model-value="$emit('update:filterApiFormat', $event)"
           >
             <SelectTrigger class="w-20 sm:w-28 h-8 text-xs border-border/60">
-              <SelectValue :placeholder="legacyT('全部格式')" />
+              <SelectValue :placeholder="t('ui.allFormats')" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem
@@ -52,7 +52,7 @@
                 :key="fmt.value"
                 :value="fmt.value"
               >
-                {{ legacyT(fmt.label) }}
+                {{ fmt.label }}
               </SelectItem>
             </SelectContent>
           </Select>
@@ -68,7 +68,7 @@
             @update:model-value="$emit('update:filterModel', $event)"
           >
             <SelectTrigger class="w-20 sm:w-36 h-8 text-xs border-border/60">
-              <SelectValue :placeholder="legacyT('全部模型')" />
+              <SelectValue :placeholder="t('ui.allModels')" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem
@@ -76,7 +76,7 @@
                 :key="model.value"
                 :value="model.value"
               >
-                {{ legacyT(model.label) }}
+                {{ model.label }}
               </SelectItem>
             </SelectContent>
           </Select>
@@ -88,7 +88,7 @@
           variant="ghost"
           size="icon"
           class="h-8 w-8"
-          :title="legacyT('重置筛选')"
+          :title="t('ui.resetFilters')"
           @click="$emit('resetFilters')"
         >
           <FilterX class="w-3.5 h-3.5" />
@@ -101,7 +101,7 @@
           variant="ghost"
           size="icon"
           class="h-8 w-8"
-          :title="legacyT('批量处理提供商')"
+          :title="t('ui.batchProcessProviders')"
           :disabled="loading"
           @click="$emit('batchProcess')"
         >
@@ -111,7 +111,7 @@
           variant="ghost"
           size="icon"
           class="h-8 w-8"
-          :title="legacyT('新增提供商')"
+          :title="t('ui.addProvider')"
           @click="$emit('addProvider')"
         >
           <Plus class="w-3.5 h-3.5" />
@@ -161,5 +161,6 @@ defineEmits<{
   'refresh': []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
+
 </script>

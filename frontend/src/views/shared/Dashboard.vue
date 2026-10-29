@@ -22,7 +22,7 @@
             :disabled="loading"
             @click="loadDashboardData"
           >
-            {{ getI18nLocale() === 'en-US' ? 'Retry' : '重试' }}
+            {{ getI18nLocale() === 'en-US' ? 'Retry' : kt('vscodex.connection.retry') }}
           </Button>
         </div>
 
@@ -178,7 +178,7 @@
                   class="text-[10px] sm:text-sm text-muted-foreground/50"
                   :class="isAdmin ? 'leading-5' : 'mt-0.5 sm:mt-1'"
                 >
-                  暂无数据
+                  {{ kt('stats.empty.title') }}
                 </p>
               </div>
             </Card>
@@ -238,7 +238,7 @@
         >
           <div class="mb-3 flex items-center justify-between">
             <h3 class="text-sm font-medium text-foreground">
-              本月统计
+              {{ " " + kt('ui.monthlyStatistics') + " " }}
             </h3>
             <Badge
               variant="outline"
@@ -259,7 +259,7 @@
                 <p
                   class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
-                  缓存命中率
+                  {{ " " + kt('ui.cacheHitRate') + " " }}
                 </p>
                 <p
                   class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
@@ -279,7 +279,7 @@
                 <p
                   class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
-                  缓存读取
+                  {{ " " + kt('ui.cacheRead1ded655') + " " }}
                 </p>
                 <p
                   class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
@@ -299,7 +299,7 @@
                 <p
                   class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
-                  缓存创建
+                  {{ " " + kt('ui.cacheCreation') + " " }}
                 </p>
                 <p
                   class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
@@ -319,7 +319,7 @@
                 <p
                   class="text-xs font-semibold tracking-normal break-words text-muted-foreground"
                 >
-                  本月费用
+                  {{ " " + kt('ui.costThisMonth') + " " }}
                 </p>
                 <p
                   class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground"
@@ -352,7 +352,7 @@
       <h3
         class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
       >
-        统计周期
+        {{ " " + kt('ui.statisticsPeriod') + " " }}
       </h3>
       <TimeRangePicker
         v-model="dailyTimeRange"
@@ -389,7 +389,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          每日使用趋势
+          {{ " " + kt('ui.dailyUsageTrends') + " " }}
         </h4>
         <div
           v-if="loadingDaily"
@@ -413,7 +413,7 @@
             v-else
             class="flex h-full items-center justify-center text-xs text-muted-foreground"
           >
-            暂无数据
+            {{ kt('stats.empty.title') }}
           </div>
         </div>
       </Card>
@@ -426,7 +426,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          每日模型费用
+          {{ " " + kt('ui.dailyModelCosts') + " " }}
         </h4>
         <div
           v-if="loadingDaily"
@@ -463,7 +463,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          提供商费用分布
+          {{ " " + kt('ui.providerCostDistribution2224786') + " " }}
         </h4>
         <div
           v-if="loadingDaily"
@@ -500,7 +500,7 @@
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
-          每日模型费用
+          {{ " " + kt('ui.dailyModelCosts') + " " }}
         </h4>
         <div
           v-if="loadingDaily"
@@ -524,7 +524,7 @@
             v-else
             class="flex h-full items-center justify-center text-xs text-muted-foreground"
           >
-            暂无数据
+            {{ kt('stats.empty.title') }}
           </div>
         </div>
       </Card>
@@ -546,7 +546,7 @@
       <div class="sm:hidden">
         <div class="px-4 py-3 border-b border-border/60">
           <h3 class="text-sm font-semibold">
-            每日统计
+            {{ " " + kt('ui.dailyStatistics') + " " }}
           </h3>
         </div>
         <div
@@ -554,13 +554,13 @@
           class="flex items-center justify-center py-8"
         >
           <Skeleton class="h-5 w-5 rounded-full" />
-          <span class="ml-2 text-muted-foreground text-xs">加载中...</span>
+          <span class="ml-2 text-muted-foreground text-xs">{{ kt('common.loading') }}</span>
         </div>
         <div
           v-else-if="displayDailyStats.length === 0"
           class="py-8 text-center text-muted-foreground text-xs"
         >
-          暂无数据
+          {{ kt('stats.empty.title') }}
         </div>
         <div
           v-else
@@ -585,7 +585,7 @@
             </div>
             <div class="grid grid-cols-2 gap-2 text-xs">
               <div class="flex justify-between">
-                <span class="text-muted-foreground">请求</span>
+                <span class="text-muted-foreground">{{ kt('ui.request') }}</span>
                 <span>{{ stat.requests.toLocaleString() }}</span>
               </div>
               <div class="flex justify-between">
@@ -593,11 +593,11 @@
                 <span>{{ compactTokens(stat.tokens) }}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-muted-foreground">响应</span>
+                <span class="text-muted-foreground">{{ kt('ui.response') }}</span>
                 <span>{{ formatResponseTime(stat.avg_response_time) }}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-muted-foreground">模型</span>
+                <span class="text-muted-foreground">{{ kt('ui.model') }}</span>
                 <span>{{ stat.unique_models }}</span>
               </div>
             </div>
@@ -610,28 +610,28 @@
         <TableHeader>
           <TableRow>
             <TableHead class="text-left">
-              日期
+              {{ " " + kt('ui.date') + " " }}
             </TableHead>
             <TableHead class="text-center">
-              请求次数
+              {{ " " + kt('ui.requestCount') + " " }}
             </TableHead>
             <TableHead class="text-center">
               Tokens
             </TableHead>
             <TableHead class="text-center">
-              费用
+              {{ " " + kt('ui.cost7fe8603') + " " }}
             </TableHead>
             <TableHead class="text-center">
-              平均响应
+              {{ " " + kt('ui.averageResponse') + " " }}
             </TableHead>
             <TableHead class="text-center">
-              使用模型
+              {{ " " + kt('ui.modelsUsed') + " " }}
             </TableHead>
             <TableHead
               v-if="isAdmin"
               class="text-center"
             >
-              使用提供商
+              {{ " " + kt('ui.providersUsed') + " " }}
             </TableHead>
           </TableRow>
         </TableHeader>
@@ -643,7 +643,7 @@
             >
               <div class="flex items-center justify-center gap-2">
                 <Skeleton class="h-5 w-5 rounded-full" />
-                <span class="text-muted-foreground text-xs">加载中...</span>
+                <span class="text-muted-foreground text-xs">{{ kt('common.loading') }}</span>
               </div>
             </TableCell>
           </TableRow>
@@ -652,7 +652,7 @@
               :colspan="isAdmin ? 7 : 6"
               class="text-center py-8 text-muted-foreground text-xs"
             >
-              暂无数据
+              {{ kt('stats.empty.title') }}
             </TableCell>
           </TableRow>
           <template v-else>
@@ -715,7 +715,7 @@
         <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div class="text-center">
             <div class="text-muted-foreground text-[10px]">
-              总请求
+              {{ " " + kt('ui.totalRequests') + " " }}
             </div>
             <div class="font-semibold text-foreground">
               {{ totalStats.requests.toLocaleString() }}
@@ -723,7 +723,7 @@
           </div>
           <div class="text-center">
             <div class="text-muted-foreground text-[10px]">
-              总Tokens
+              {{ " " + kt('ui.totalTokens6a53a4d') + " " }}
             </div>
             <div class="font-semibold text-book-cloth dark:text-kraft">
               {{ compactTokens(totalStats.tokens) }}
@@ -731,7 +731,7 @@
           </div>
           <div class="text-center">
             <div class="text-muted-foreground text-[10px]">
-              总费用
+              {{ " " + kt('ui.totalCost') + " " }}
             </div>
             <div class="font-semibold text-amber-600 dark:text-amber-400">
               {{ formatDailyCost(totalStats.cost) }}
@@ -740,7 +740,7 @@
           </div>
           <div class="text-center">
             <div class="text-muted-foreground text-[10px]">
-              平均响应
+              {{ " " + kt('ui.averageResponse') + " " }}
             </div>
             <div class="font-semibold text-book-cloth dark:text-kraft">
               {{ formatResponseTime(totalStats.avgResponseTime) }}
@@ -753,6 +753,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t: kt } = useI18n()
+
 import { getI18nLocale } from '@/i18n'
 import { formatRelativeTime } from '@/utils/format'
 import {
@@ -785,7 +788,7 @@ import DashboardAnnouncements from "@/features/overview/dashboard/DashboardAnnou
 import MetricValue from "@/features/overview/components/MetricValue.vue";
 import type { ActivityHeatmap } from "@/types/activity";
 import { useOverviewI18n } from "@/features/overview/i18n";
-import { getDateRangeFromPeriod } from "@/features/usage/composables";
+import { getDateRangeFromPeriod } from "@/features/usage/composables/useDateRange";
 import type { DateRangeParams } from "@/features/usage/types";
 import {
   Card,
@@ -831,7 +834,6 @@ type DashboardStatCard = Omit<DashboardStat, "icon"> & {
   valueHint?: string;
   totalHint?: string;
 };
-
 
 const isAdmin = computed(() => authStore.canAccessAdmin);
 const route = inject(routeLocationKey, undefined);
@@ -1000,7 +1002,6 @@ let dashboardTimezone: string | null = null;
 let dailyStatsRequestId = 0;
 let dailyStatsController: AbortController | null = null;
 let dailyStatsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
 
 const iconMap: Record<string, Component> = {
   Users,
@@ -1558,7 +1559,7 @@ watch(() => dailyTimeRange.value.timezone, () => {
   if (isAdmin.value) void loadDashboardData();
 });
 
-function formatDate(dateString: string): string {
+function formatDayLabel(dateString: string): string {
   const date = parseDateLike(dateString);
   const today = new Date();
   const yesterday = new Date(today);
@@ -1596,7 +1597,7 @@ function formatDailyDate(value: string): string {
     if (date === yesterday) return formatRelativeTime(-1, 'day');
     return parseDateLike(date).toLocaleDateString(getI18nLocale(), { month: '2-digit', day: '2-digit', weekday: 'short' });
   }
-  return formatDate(value);
+  return formatDayLabel(value);
 }
 
 function formatResponseTime(seconds: number | null): string {

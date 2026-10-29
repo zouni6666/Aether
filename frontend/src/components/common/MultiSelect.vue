@@ -70,12 +70,12 @@
               type="checkbox"
               :checked="isAllSelected"
               :indeterminate="isPartiallySelected"
-              :aria-label="legacyT('全选')"
+              :aria-label="t('ui.selectAll')"
               class="h-4 w-4 shrink-0 cursor-pointer rounded border-border/60 bg-card/80 text-primary shadow-sm accent-primary focus:ring-2 focus:ring-primary/40 focus:ring-offset-1"
               @click.stop
               @change="toggleAll"
             >
-            <span class="min-w-0 truncate text-sm">{{ legacyT('全选') }}</span>
+            <span class="min-w-0 truncate text-sm">{{ t('ui.selectAll') }}</span>
             <span class="ml-auto shrink-0 text-xs text-muted-foreground">
               {{ selectedOptionCount }}/{{ options.length }}
             </span>
@@ -95,7 +95,7 @@
               @change="remove(item)"
             >
             <span class="min-w-0 truncate text-sm text-destructive">{{ item }}</span>
-            <span class="shrink-0 text-xs text-destructive/70">{{ legacyT('(已失效)') }}</span>
+            <span class="shrink-0 text-xs text-destructive/70">{{ t('ui.invalidf12eecc') }}</span>
           </div>
 
           <div
@@ -154,15 +154,15 @@ const props = withDefaults(
     teleport?: boolean
   }>(),
   {
-    placeholder: '请选择',
-    emptyText: '暂无选项',
-    noResultsText: '未找到匹配项',
+    placeholder: undefined,
+    emptyText: undefined,
+    noResultsText: undefined,
     triggerClass: '',
     dropdownMinWidth: undefined,
     disabled: false,
     searchable: true,
     searchThreshold: 8,
-    searchPlaceholder: '输入关键词搜索...',
+    searchPlaceholder: undefined,
     teleport: false,
   },
 )
@@ -170,7 +170,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:modelValue': [value: string[]]
 }>()
-const { legacyT, locale } = useI18n()
+const { t } = useI18n()
 
 const isOpen = ref(false)
 const searchQuery = ref('')
@@ -235,13 +235,13 @@ const showSearch = computed(
   () => props.searchable && totalCount.value >= props.searchThreshold,
 )
 
-const localizedPlaceholder = computed(() => legacyT(props.placeholder))
-const localizedEmptyText = computed(() => legacyT(props.emptyText))
-const localizedNoResultsText = computed(() => legacyT(props.noResultsText))
-const localizedSearchPlaceholder = computed(() => legacyT(props.searchPlaceholder))
+const localizedPlaceholder = computed(() => props.placeholder ?? t('ui.selectda590a8'))
+const localizedEmptyText = computed(() => props.emptyText ?? t('ui.noOptions'))
+const localizedNoResultsText = computed(() => props.noResultsText ?? t('common.noSearchResults'))
+const localizedSearchPlaceholder = computed(() => props.searchPlaceholder ?? t('common.searchPlaceholder'))
 const invalidSummaryText = computed(() => {
   const count = invalidItems.value.length
-  return locale.value === 'en-US' ? `(${count} invalid)` : `(${count} 个已失效)`
+  return t('feedback.select.invalidSummary', { count })
 })
 
 const filteredInvalidItems = computed(() => {
@@ -270,9 +270,7 @@ const displayText = computed(() => {
       .map((v) => props.options.find((o) => o.value === v)?.label ?? v)
       .join(', ')
   }
-  return locale.value === 'en-US'
-    ? `${props.modelValue.length} selected`
-    : `已选择 ${props.modelValue.length} 项`
+  return t('feedback.select.selectedCount', { count: props.modelValue.length })
 })
 
 watch(isOpen, (open) => {

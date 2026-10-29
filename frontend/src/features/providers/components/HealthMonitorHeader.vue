@@ -10,26 +10,26 @@
         </p>
       </div>
       <div class="flex items-center gap-3">
-        <Label class="text-xs text-muted-foreground">回溯时间：</Label>
+        <Label class="text-xs text-muted-foreground">{{ t('ui.lookback') }}</Label>
         <Select v-model="selectedLookbackHours">
           <SelectTrigger class="w-28 h-8 text-xs border-border/60">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="1">
-              1 小时
+              {{ t('ui.1H5482d1a') }}
             </SelectItem>
             <SelectItem value="6">
-              6 小时
+              {{ t('ui.6Hf65d113') }}
             </SelectItem>
             <SelectItem value="12">
-              12 小时
+              {{ t('ui.12H') }}
             </SelectItem>
             <SelectItem value="24">
-              24 小时
+              {{ t('ui.24H9248356') }}
             </SelectItem>
             <SelectItem value="48">
-              48 小时
+              {{ t('ui.48H') }}
             </SelectItem>
           </SelectContent>
         </Select>
@@ -43,6 +43,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed } from 'vue'
 import Label from '@/components/ui/label.vue'
 import Select from '@/components/ui/select.vue'
@@ -64,8 +66,11 @@ const emit = defineEmits<{
   refresh: []
 }>()
 
+const { t } = useI18n()
+
 const selectedLookbackHours = computed({
   get: () => props.lookbackHours,
   set: value => emit('update:lookbackHours', value)
 })
+
 </script>

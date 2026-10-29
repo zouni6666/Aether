@@ -1,8 +1,8 @@
 <template>
   <div class="space-y-2.5">
     <div class="flex items-center justify-between gap-3">
-      <Label class="text-sm font-medium">{{ legacyT('选择批量动作') }}</Label>
-      <span class="text-[11px] text-muted-foreground">{{ legacyT('只会提交当前动作对应的字段') }}</span>
+      <Label class="text-sm font-medium">{{ t('ui.selectBatchAction') }}</Label>
+      <span class="text-[11px] text-muted-foreground">{{ t('ui.onlyFieldsForTheCurrentActionWillBeSubmitted') }}</span>
     </div>
     <div class="grid gap-2 md:grid-cols-4">
       <button
@@ -19,10 +19,10 @@
               class="h-4 w-4"
             />
           </span>
-          <span class="font-medium text-foreground">{{ legacyT(action.label) }}</span>
+          <span class="font-medium text-foreground">{{ action.label }}</span>
         </span>
         <span class="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
-          {{ legacyT(action.description) }}
+          {{ action.description }}
         </span>
       </button>
     </div>
@@ -45,7 +45,7 @@ defineEmits<{
   'update:modelValue': [value: UserBatchAction]
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 function actionCardClass(action: UserBatchAction): string {
   return cn(

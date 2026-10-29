@@ -1,3 +1,5 @@
+
+import { translate as t } from '@/i18n'
 import type {
   CodexUpstreamMetadata,
   QuotaResetCreditSnapshot,
@@ -58,7 +60,7 @@ export function getCodexResetCreditAvailableCount(
 }
 
 export function formatCodexResetCreditCount(count: number | null | undefined): string {
-  return `共 ${count ?? 0} 次机会`
+  return t('providers.migration.resetCreditsInTotal69bb5f', { value: String(count ?? 0) })
 }
 
 interface CodexResetCreditCrypto {
@@ -150,7 +152,7 @@ export function createCodexResetCreditIdempotencyKey(
   const randomUUID = cryptoSource?.randomUUID?.bind(cryptoSource)
   if (randomUUID) return randomUUID()
   if (!cryptoSource) {
-    throw new Error('浏览器不支持安全随机数，无法生成幂等 ID')
+    throw new Error(t('ui.yourBrowserDoesNotSupportSecureRandomNumbersAndCannot'))
   }
 
   const bytes = cryptoSource.getRandomValues(new Uint8Array(16))
@@ -272,7 +274,7 @@ export function getVisibleCodexResetCreditItems(
   snapshot: QuotaResetCreditsSnapshot | null | undefined,
   nowUnixSecs = Math.floor(Date.now() / 1000),
   limit = 5,
-  titleLabel = 'Codex 重置机会',
+  titleLabel = t('providers.migration.codexResetCreditsd105c9'),
 ): CodexResetCreditDisplayItem[] {
   const credits = snapshot?.credits
   if (!snapshot || !Array.isArray(credits)) return []

@@ -3,7 +3,7 @@
     <div class="grid grid-cols-[1fr_auto] items-center gap-x-6 gap-y-3 xl:grid-cols-[minmax(8rem,1fr)_auto_minmax(12rem,1fr)]">
       <div>
         <h1 class="text-2xl font-semibold">
-          邀请返利
+          {{ t('nav.referralRewards') }}
         </h1>
       </div>
       <ReferralOverview
@@ -18,7 +18,7 @@
           to="/admin/system"
           class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
-          <Settings2 class="h-4 w-4" />规则设置
+          <Settings2 class="h-4 w-4" />{{ t('ui.ruleSettings') }}
         </RouterLink><Button
           variant="outline"
           :disabled="refreshing"
@@ -27,7 +27,7 @@
           <RefreshCw
             class="mr-2 h-4 w-4"
             :class="{ 'animate-spin': refreshing }"
-          />刷新
+          />{{ t('ui.refresh') }}
         </Button>
       </div>
     </div>
@@ -39,7 +39,7 @@
     />
     <nav
       class="flex gap-5 overflow-x-auto border-b border-border"
-      aria-label="返利管理分类"
+      :aria-label="t('ui.referralManagementSections')"
     >
       <button
         v-for="item in tabs"
@@ -63,13 +63,13 @@
     >
       <div
         class="grid gap-3 sm:grid-cols-2"
-        aria-label="待处理队列"
+        :aria-label="t('ui.actionQueues')"
       >
         <button
           v-for="queue in queues"
           :key="queue.value"
           type="button"
-          :aria-label="`${queue.label}队列`"
+          :aria-label="t('ui.valueQueue', { value: queue.label })"
           :aria-pressed="queueTab === queue.value"
           class="flex min-w-0 items-center gap-3 rounded-xl border p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           :class="queueTab === queue.value ? 'border-primary/50 bg-primary/5' : 'border-border bg-card hover:bg-muted/30'"
@@ -98,7 +98,7 @@
       </div>
       <ReferralRewardList
         v-show="queueTab === 'failed'"
-        title="发放失败"
+        :title="t('ui.grantFailed')"
         kind="failed"
         v-bind="listProps(failed)"
         :mutating="mutating"
@@ -119,7 +119,7 @@
       </ReferralRewardList>
       <ReferralRewardList
         v-show="queueTab === 'debt'"
-        title="待冲回款项"
+        :title="t('ui.outstandingReversals')"
         kind="debt"
         v-bind="listProps(debt)"
         :mutating="mutating"
@@ -141,7 +141,7 @@
     </div>
     <ReferralRewardList
       v-if="tab === 'rewards'"
-      title="返利记录"
+      :title="t('ui.rewardRecords')"
       kind="rewards"
       v-bind="listProps(rewards)"
       :mutating="mutating"
@@ -171,7 +171,7 @@
       @query="queryRelationships"
       @reset="resetRelationships"
       @rewards="showRelationshipRewards"
-      @copy="copy"
+      @copy="copyToClipboard"
     />
     <ReferralDetailDrawer
       :id="detailId"
@@ -181,7 +181,7 @@
       :mutating="mutating"
       @close="closeDetail"
       @reload="loadDetail"
-      @copy="copy"
+      @copy="copyToClipboard"
       @operate="openOperation"
     />
     <ReferralOperationDialog
@@ -197,21 +197,26 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { RefreshCw, Settings2, CircleAlert, History, Users, RotateCcw, ChevronRight } from 'lucide-vue-next'
 import { Button } from '@/components/ui'
 import { referralApi, type AdminReferralOverview, type ReferralRewardDetail, type ReferralRewardQuery, type ReferralRewardRecord } from '@/api/referrals'
 import { useToast } from '@/composables/useToast'
-import ReferralOverview from './referrals/ReferralOverview.vue'
-import ReferralRewardList from './referrals/ReferralRewardList.vue'
-import ReferralRewardFilters, { type RewardFilters } from './referrals/ReferralRewardFilters.vue'
-import ReferralRelationshipList from './referrals/ReferralRelationshipList.vue'
-import ReferralDetailDrawer from './referrals/ReferralDetailDrawer.vue'
-import ReferralOperationDialog, { type RewardOperation } from './referrals/ReferralOperationDialog.vue'
-import { useReferralList } from './referrals/useReferralLists'
-import { usd } from './referrals/presentation'
+import ReferralOverview from '@/features/referrals/components/ReferralOverview.vue'
+import ReferralRewardList from '@/features/referrals/components/ReferralRewardList.vue'
+import ReferralRewardFilters, { type RewardFilters } from '@/features/referrals/components/ReferralRewardFilters.vue'
+import ReferralRelationshipList from '@/features/referrals/components/ReferralRelationshipList.vue'
+import ReferralDetailDrawer from '@/features/referrals/components/ReferralDetailDrawer.vue'
+import ReferralOperationDialog, { type RewardOperation } from '@/features/referrals/components/ReferralOperationDialog.vue'
+import { useReferralList } from '@/features/referrals/useReferralLists'
+import { usd } from '@/features/referrals/presentation'
+import { useClipboard } from '@/composables/useClipboard'
 const toast = useToast()
+const { copyToClipboard } = useClipboard()
 const tab = ref('pending')
 const queueTab = ref<'failed' | 'debt'>('failed')
 let queueSelected = false
@@ -221,10 +226,10 @@ const overview = ref<AdminReferralOverview | null>(null)
 const overviewLoading = ref(false)
 const overviewError = ref(false)
 let overviewSequence = 0
-const tabs = [{ value: 'pending', label: '待处理', icon: CircleAlert }, { value: 'rewards', label: '返利记录', icon: History }, { value: 'relationships', label: '邀请关系', icon: Users }]
+const tabs = [{ value: 'pending', get label() { return t('ui.actionNeeded') }, icon: CircleAlert }, { value: 'rewards', get label() { return t('ui.rewardRecords') }, icon: History }, { value: 'relationships', get label() { return t('ui.referralRelationships') }, icon: Users }]
 const queues = computed(() => [
-  { value: 'failed' as const, label: '发放失败', count: overview.value && !overviewError.value ? overview.value.stats.failed_reward_count : '—', icon: CircleAlert },
-  { value: 'debt' as const, label: '待冲回款项', count: overview.value && !overviewError.value ? overview.value.stats.pending_reversal_reward_count : '—', icon: RotateCcw },
+  { value: 'failed' as const, get label() { return t('ui.grantFailed') }, count: overview.value && !overviewError.value ? overview.value.stats.failed_reward_count : '—', icon: CircleAlert },
+  { value: 'debt' as const, get label() { return t('ui.outstandingReversals') }, count: overview.value && !overviewError.value ? overview.value.stats.pending_reversal_reward_count : '—', icon: RotateCcw },
 ])
 const blankFilters = (): RewardFilters => ({ inviter: '', invitee: '', order_no: '', referral_id: '', reward_type: 'all', status: 'all', trigger_point: 'all', pending_reversal: 'all' })
 const rewardFilters = ref(blankFilters())
@@ -311,15 +316,15 @@ async function confirmOperation(note: string) {
   mutating.value = id
   try {
     const { reward } = action === 'retry' ? await referralApi.retryReferralReward(id, note || undefined) : await referralApi.voidReferralReward(id, note)
-    if (action === 'void') { if (reward.status === 'voided') toast.success('返利已作废'); else toast.error('返利状态已变化，未作废，请核对最新记录') }
+    if (action === 'void') { if (reward.status === 'voided') toast.success(t('ui.rebateVoided')); else toast.error('返利状态已变化，未作废，请核对最新记录') }
     else if (reward.status === 'applied') toast.success(`返利已发放${reward.reversed_amount_usd > 0 ? `，累计冲回 ${usd(reward.reversed_amount_usd)}` : ''}`)
-    else if (reward.status === 'reversed') toast.info('返利已全部冲回，没有新增可用赠款')
-    else if (reward.status === 'failed') toast.error('重试后仍发放失败，请核对记录')
+    else if (reward.status === 'reversed') toast.info(t('ui.theRewardWasFullyReversedNoAvailableGiftCreditWas'))
+    else if (reward.status === 'failed') toast.error(t('ui.theGrantStillFailedAfterRetryReviewTheRecord'))
     else toast.info(`重试已受理，当前${reward.status === 'applying' ? '处理中' : reward.status === 'pending' ? '待发' : reward.status}`)
   } catch { toast.error(action === 'void' ? '作废失败，记录可能已发放，请核对最新状态' : '重试失败，请核对最新状态') }
   finally { mutating.value = null; closeOperation(); await refresh(); if (detailId.value === id) await loadDetail() }
 }
-async function copy(value: string) { try { await navigator.clipboard.writeText(value); toast.success('已复制') } catch { toast.error('复制失败，请手动复制') } }
 onMounted(() => { void refresh() })
 onScopeDispose(() => { overviewSequence++; detailSequence++; operationSequence++ })
+
 </script>

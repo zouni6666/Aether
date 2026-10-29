@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import type { TimeScatterChartData } from '@/components/charts/types'
 /**
  * TTL 分析 composable
@@ -15,8 +16,8 @@ import { log } from '@/utils/logger'
 
 // 时间范围选项
 export const ANALYSIS_HOURS_OPTIONS = [
-  { value: '12', label: '12 小时' },
-  { value: '24', label: '24 小时' },
+  { value: '12', get label() { return translate('ui.12H') } },
+  { value: '24', get label() { return translate('ui.24H9248356') } },
   { value: '72', label: '3 天' },
   { value: '168', label: '7 天' },
   { value: '336', label: '14 天' },
@@ -171,7 +172,7 @@ export function useTTLAnalysis() {
 
     return {
       datasets: [{
-        label: '请求间隔',
+        get label() { return translate('ui.requestInterval') },
         data: points.map(p => ({ x: p.x, y: p.y })),
         backgroundColor: points.map(p => getIntervalColor(p.y)),
         borderColor: points.map(p => getIntervalColor(p.y).replace('0.6', '1')),

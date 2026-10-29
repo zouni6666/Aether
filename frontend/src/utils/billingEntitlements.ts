@@ -1,11 +1,14 @@
-import { getI18nLocale } from '@/i18n'
+import { getI18nLocale, translate } from '@/i18n'
 
 import type {
+  BillingDurationUnit,
   BillingEntitlement,
   UsagePolicyEntitlement,
   UsagePolicyRule,
   UserPlanEntitlement,
 } from '@/api/billing'
+
+type Translator = typeof translate
 
 export function isPlanEntitlementReplacementCandidate(
   entitlement: Pick<UserPlanEntitlement, 'status' | 'expires_at'>,
@@ -53,78 +56,128 @@ function hasEntitlementType(
   return entitlements.some(item => item.type === type)
 }
 
-export function usagePolicyEntitlementLabels(policy: UsagePolicyEntitlement): string[] {
-  const labels = policy.rules.map(formatUsagePolicyRuleLabel)
+export function usagePolicyEntitlementLabels(
+  policy: UsagePolicyEntitlement,
+  t: Translator = translate,
+): string[] {
+  const labels = policy.rules.map(rule => formatUsagePolicyRuleLabel(rule, t))
   const name = policy.name?.trim()
 
-  if (name) labels.unshift(`使用策略 ${name}`)
-  return labels.length > 0 ? labels : ['使用限制']
+  if (name) labels.unshift(t('billing.entitlements.namedUsagePolicy', { name }))
+  return labels.length > 0 ? labels : [t('billing.entitlements.usageLimits')]
 }
 
 export function billingEntitlementLabels(
   items: BillingEntitlement[] | undefined,
-  translate: (value: string) => string,
+  t: Translator = translate,
 ): string[] {
   return (items || []).flatMap((item) => {
-    if (item.type === 'wallet_credit') return `${translate('附赠余额')} $${Number(item.amount_usd || 0).toFixed(2)}`
-    if (item.type === 'daily_quota') return `${translate('每日额度')} $${Number(item.daily_quota_usd || 0).toFixed(2)}`
-    if (item.type === 'membership_group') return translate('会员权益')
-    if (item.type === 'usage_policy') return usagePolicyEntitlementLabels(item)
+    if (item.type === 'wallet_credit') return t('billing.entitlements.walletCredit', { amount: Number(item.amount_usd || 0).toFixed(2) })
+    if (item.type === 'daily_quota') return t('billing.entitlements.dailyQuota', { amount: Number(item.daily_quota_usd || 0).toFixed(2) })
+    if (item.type === 'membership_group') return t('billing.entitlements.membership')
+    if (item.type === 'usage_policy') return usagePolicyEntitlementLabels(item, t)
     return []
   })
 }
 
-function formatUsagePolicyRuleLabel(rule: UsagePolicyRule): string {
+function formatUsagePolicyRuleLabel(rule: UsagePolicyRule, t: Translator): string {
   const limit = formatLimit(rule.limit)
 
-  if (rule.metric === 'concurrency') return `并发 ${limit}`
+  if (rule.metric === 'concurrency') return t('billing.entitlements.concurrency', { limit })
   const amount = rule.metric === 'actual_cost_usd' ? formatUsd(rule.limit) : null
+  const timezone = rule.window.kind === 'calendar_day'
+    || rule.window.kind === 'calendar_week'
+    || rule.window.kind === 'calendar_month'
+    ? rule.window.timezone?.trim() || t('billing.entitlements.systemTimezone')
+    : ''
 
   switch (rule.window.kind) {
     case 'rolling':
-      if (amount) return `滚动 ${formatWindowDuration(rule.window.seconds)} ${amount}`
-      if (rule.window.seconds === 1) return `QPS ${limit}`
-      if (rule.window.seconds === 60) return `RPM ${limit}`
-      return `滚动 ${formatWindowDuration(rule.window.seconds)} ${limit} 次`
+      if (amount) return t('billing.entitlements.rollingCost', { duration: formatWindowDuration(rule.window.seconds, t), amount })
+      if (rule.window.seconds === 1) return t('billing.entitlements.qps', { limit })
+      if (rule.window.seconds === 60) return t('billing.entitlements.rpm', { limit })
+      return t('billing.entitlements.rollingRequests', { duration: formatWindowDuration(rule.window.seconds, t), limit })
     case 'calendar_day':
-      return `${amount ? `每日 ${amount}` : `每日 ${limit} 次`}${formatCalendarTimezone(rule.window.timezone)}`
+      return amount
+        ? t('billing.entitlements.dailyCost', { amount, timezone })
+        : t('billing.entitlements.dailyRequests', { limit, timezone })
     case 'calendar_week':
-      return `${amount ? `每周 ${amount}` : `每周 ${limit} 次`}${formatCalendarWeek(rule.window.timezone, rule.window.week_start)}`
+      return amount
+        ? t('billing.entitlements.weeklyCost', { amount, timezone, weekday: formatWeekday(rule.window.week_start, t) })
+        : t('billing.entitlements.weeklyRequests', { limit, timezone, weekday: formatWeekday(rule.window.week_start, t) })
     case 'calendar_month':
-      return `${amount ? `每月 ${amount}` : `每月 ${limit} 次`}${formatCalendarTimezone(rule.window.timezone)}`
+      return amount
+        ? t('billing.entitlements.monthlyCost', { amount, timezone })
+        : t('billing.entitlements.monthlyRequests', { limit, timezone })
     case 'subscription_period':
-      return amount ? `套餐周期 ${amount}` : `套餐周期 ${limit} 次`
+      return amount
+        ? t('billing.entitlements.subscriptionCost', { amount })
+        : t('billing.entitlements.subscriptionRequests', { limit })
     case 'concurrent':
-      return `并发窗口 ${limit} 次`
+      return t('billing.entitlements.concurrentWindow', { limit })
   }
 }
 
-function formatCalendarTimezone(timezone?: string): string {
-  return `（${timezone?.trim() || '系统时区'}）`
-}
-
-function formatCalendarWeek(timezone?: string, weekStart?: number): string {
-  const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+function formatWeekday(weekStart: number | undefined, t: Translator): string {
+  const weekdays = [
+    t('billing.entitlements.monday'),
+    t('billing.entitlements.tuesday'),
+    t('billing.entitlements.wednesday'),
+    t('billing.entitlements.thursday'),
+    t('billing.entitlements.friday'),
+    t('billing.entitlements.saturday'),
+    t('billing.entitlements.sunday'),
+  ]
   const normalizedWeekStart = typeof weekStart === 'number'
     && Number.isInteger(weekStart)
     && weekStart >= 1
     && weekStart <= 7
     ? weekStart
     : 1
-  return `（${timezone?.trim() || '系统时区'}，${weekdays[normalizedWeekStart - 1]}开始）`
+  return weekdays[normalizedWeekStart - 1]
 }
 
 function formatUsd(limit: number): string {
   return `$${Number(limit || 0).toLocaleString(getI18nLocale(), { maximumFractionDigits: 8 })}`
 }
 
-function formatWindowDuration(seconds: number): string {
-  if (seconds % 86_400 === 0) return `${seconds / 86_400} 天`
-  if (seconds % 3_600 === 0) return `${seconds / 3_600} 小时`
-  if (seconds % 60 === 0) return `${seconds / 60} 分钟`
-  return `${seconds} 秒`
+function formatWindowDuration(seconds: number, t: Translator): string {
+  if (seconds % 86_400 === 0) {
+    const count = seconds / 86_400
+    return t(count === 1 ? 'billing.entitlements.durationDay' : 'billing.entitlements.durationDays', { count })
+  }
+  if (seconds % 3_600 === 0) {
+    const count = seconds / 3_600
+    return t(count === 1 ? 'billing.entitlements.durationHour' : 'billing.entitlements.durationHours', { count })
+  }
+  if (seconds % 60 === 0) {
+    const count = seconds / 60
+    return t(count === 1 ? 'billing.entitlements.durationMinute' : 'billing.entitlements.durationMinutes', { count })
+  }
+  return t(seconds === 1 ? 'billing.entitlements.durationSecond' : 'billing.entitlements.durationSeconds', { count: seconds })
 }
 
 function formatLimit(limit: number): string {
   return Number(limit || 0).toLocaleString(getI18nLocale())
+}
+
+export function formatBillingPlanDuration(unit: BillingDurationUnit, value: number): string {
+  if (getI18nLocale() === 'en-US') {
+    const plural = value === 1 ? '' : 's'
+    const labels: Record<BillingDurationUnit, string> = {
+      day: ` day${plural}`,
+      month: ` month${plural}`,
+      year: ` year${plural}`,
+      custom: ` day${plural}`,
+    }
+    return `${value}${labels[unit] ?? labels.month}`
+  }
+
+  const labels: Record<BillingDurationUnit, string> = {
+    get day() { return translate('ui.days') },
+    get month() { return translate('ui.months') },
+    get year() { return translate('ui.years') },
+    get custom() { return translate('ui.days') },
+  }
+  return `${value}${labels[unit] ?? labels.month}`
 }

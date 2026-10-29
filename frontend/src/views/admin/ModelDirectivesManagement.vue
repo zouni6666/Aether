@@ -1,17 +1,17 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="模型后缀参数"
-      description="允许通过模型名后缀覆盖推理参数或服务层级"
+      :title="t('ui.modelSuffixParameters')"
+      :description="t('ui.allowModelNameSuffixesToOverrideReasoningParametersOrService')"
     >
       <template #actions>
         <div class="flex flex-wrap items-center justify-end gap-3">
           <div class="flex h-9 items-center gap-2 rounded-md border px-3">
-            <span class="text-sm text-muted-foreground">模块状态</span>
+            <span class="text-sm text-muted-foreground">{{ t('ui.moduleStatus') }}</span>
             <Switch
               :model-value="moduleEnabled"
               :disabled="loading || moduleSaving"
-              aria-label="启用模型后缀参数模块"
+              :aria-label="t('ui.enableTheModelSuffixParametersModule')"
               @update:model-value="setModuleEnabled"
             />
           </div>
@@ -23,8 +23,7 @@
             <RefreshCw
               class="w-4 h-4 mr-2"
               :class="{ 'animate-spin': loading }"
-            />
-            刷新
+            /> {{ t('ui.refresh') }}
           </Button>
         </div>
       </template>
@@ -46,6 +45,9 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { onMounted, ref } from 'vue'
 import { RefreshCw } from 'lucide-vue-next'
 import Button from '@/components/ui/button.vue'
@@ -57,12 +59,12 @@ import { useModuleStore } from '@/stores/modules'
 import { useToast } from '@/composables/useToast'
 import { log } from '@/utils/logger'
 import { getErrorMessage } from '@/types/api-error'
-import ModelDirectivesPanel from './module-management/ModelDirectivesPanel.vue'
+import ModelDirectivesPanel from '@/features/model-directives/ModelDirectivesPanel.vue'
 import {
   createDefaultModelDirectivesConfig,
   normalizeModelDirectivesConfig,
   type ModelDirectivesConfig,
-} from './module-management/modelDirectivesConfig'
+} from '@/features/model-directives/modelDirectivesConfig'
 
 const { success, error } = useToast()
 const moduleStore = useModuleStore()
@@ -83,14 +85,14 @@ async function loadConfig() {
     if (modulesResult.status === 'fulfilled') {
       moduleEnabled.value = modulesResult.value.model_directives?.enabled === true
     } else {
-      error('获取模型后缀参数模块状态失败')
+      error(t('ui.failedToLoadTheModelSuffixParametersModuleStatus'))
       log.error('获取模型后缀参数模块状态失败:', modulesResult.reason)
     }
     if (configResult.status === 'rejected') throw configResult.reason
     const normalized = normalizeModelDirectivesConfig(configResult.value.value)
     modelDirectivesConfig.value = normalized
   } catch (err) {
-    error('获取模型后缀参数配置失败')
+    error(t('ui.failedToLoadModelSuffixParameterSettings'))
     log.error('获取模型后缀参数配置失败:', err)
   } finally {
     loading.value = false
@@ -107,7 +109,7 @@ async function saveConfig(nextConfig: ModelDirectivesConfig) {
       '模型后缀参数配置'
     )
     modelDirectivesConfig.value = normalized
-    success('模型后缀参数配置已保存')
+    success(t('ui.modelSuffixParameterSettingsSaved'))
   } catch (err) {
     error(getErrorMessage(err, '保存模型后缀参数配置失败'))
     log.error('保存模型后缀参数配置失败:', err)
@@ -121,7 +123,7 @@ async function setModuleEnabled(value: boolean) {
   try {
     await moduleStore.setEnabled('model_directives', Boolean(value))
     moduleEnabled.value = moduleStore.modules.model_directives?.enabled === true
-    success(moduleEnabled.value ? '模型后缀参数模块已启用' : '模型后缀参数模块已禁用')
+    success(moduleEnabled.value ? t('ui.modelSuffixParametersModuleEnabled') : t('ui.modelSuffixParametersModuleDisabled'))
   } catch (err) {
     error(getErrorMessage(err, '更新模型后缀参数模块状态失败'))
     log.error('更新模型后缀参数模块状态失败:', err)
@@ -133,4 +135,5 @@ async function setModuleEnabled(value: boolean) {
 onMounted(() => {
   loadConfig()
 })
+
 </script>

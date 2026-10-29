@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 import { computed, ref } from 'vue'
 import { adminApi, type S3BackupScope } from '@/api/admin'
 import { useToast } from '@/composables/useToast'
@@ -180,7 +181,7 @@ export function useS3BackupConfig() {
       config.value = next
       originalConfig.value = cloneConfig(next)
     } catch (err) {
-      error('加载 S3 备份配置失败')
+      error(translate('ui.failedToLoadS3BackupSettings'))
       log.error('加载 S3 备份配置失败:', err)
     } finally {
       loading.value = false
@@ -225,9 +226,9 @@ export function useS3BackupConfig() {
         config.value.secretAccessKeyIsSet = true
       }
       originalConfig.value = cloneConfig(config.value)
-      success('S3 备份配置已保存')
+      success(translate('ui.s3BackupSettingsSaved'))
     } catch (err) {
-      error(parseApiError(err, '保存 S3 备份配置失败'))
+      error(parseApiError(err, translate('ui.failedToSaveS3BackupSettings')))
       log.error('保存 S3 备份配置失败:', err)
       await loadS3BackupConfig()
     } finally {
@@ -249,9 +250,9 @@ export function useS3BackupConfig() {
         originalConfig.value.secretAccessKey = ''
         originalConfig.value.secretAccessKeyIsSet = false
       }
-      success('S3 访问密钥已清除')
+      success(translate('ui.s3AccessKeyCleared'))
     } catch (err) {
-      error(parseApiError(err, '清除 S3 访问密钥失败'))
+      error(parseApiError(err, translate('ui.failedToClearS3AccessKey')))
       log.error('清除 S3 访问密钥失败:', err)
     } finally {
       saving.value = false
@@ -262,9 +263,9 @@ export function useS3BackupConfig() {
     running.value = true
     try {
       const response = await adminApi.runS3Backup()
-      success(response.message || 'S3 备份任务已提交')
+      success(response.message || translate('ui.s3BackupTaskSubmitted'))
     } catch (err) {
-      error(parseApiError(err, '提交 S3 备份任务失败'))
+      error(parseApiError(err, translate('ui.failedToSubmitS3BackupTask')))
       log.error('提交 S3 备份任务失败:', err)
     } finally {
       running.value = false

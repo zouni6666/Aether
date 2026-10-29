@@ -12,10 +12,10 @@
           </div>
           <div class="min-w-0 flex-1">
             <h3 class="text-lg font-semibold leading-tight text-foreground">
-              {{ legacyT('登录设备') }}
+              {{ t('ui.signedInDevices') }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ legacyT('查看并强制下线该用户的设备会话') }}
+              {{ t('ui.viewAndRevokeThisUserSDeviceSessions') }}
             </p>
           </div>
         </div>
@@ -27,13 +27,13 @@
         v-if="loading"
         class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground"
       >
-        {{ legacyT('正在加载设备会话...') }}
+        {{ t('ui.loadingDeviceSessions') }}
       </div>
       <div
         v-else-if="sessions.length === 0"
         class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground"
       >
-        {{ legacyT('暂无在线设备') }}
+        {{ t('ui.noOnlineDevices') }}
       </div>
       <div
         v-else
@@ -53,7 +53,7 @@
                 {{ formatSessionMeta(session) }}
               </div>
               <div class="mt-1 text-xs text-muted-foreground">
-                {{ legacyT('最近活跃') }} {{ formatDate(session.last_seen_at || session.created_at) }}
+                {{ t('ui.lastActive') }} {{ formatDate(session.last_seen_at || session.created_at) }}
                 <span v-if="session.ip_address"> · IP {{ session.ip_address }}</span>
               </div>
             </div>
@@ -63,7 +63,7 @@
               :disabled="actionLoading === session.id"
               @click="$emit('revoke-session', session.id)"
             >
-              {{ actionLoading === session.id ? legacyT('处理中...') : legacyT('强制下线') }}
+              {{ actionLoading === session.id ? t('ui.processingc1fd812') : t('ui.forceSignOut') }}
             </Button>
           </div>
         </div>
@@ -76,14 +76,14 @@
         class="h-10 px-5"
         @click="$emit('close')"
       >
-        {{ legacyT('关闭') }}
+        {{ t('ui.close') }}
       </Button>
       <Button
         class="h-10 px-5"
         :disabled="loading || sessions.length === 0 || actionLoading === 'all'"
         @click="$emit('revoke-all')"
       >
-        {{ actionLoading === 'all' ? legacyT('处理中...') : legacyT('全部下线') }}
+        {{ actionLoading === 'all' ? t('ui.processingc1fd812') : t('ui.signOutAll') }}
       </Button>
     </template>
   </Dialog>
@@ -110,5 +110,5 @@ defineEmits<{
   'revoke-all': []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

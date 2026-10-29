@@ -5,6 +5,7 @@ import type { ProviderType } from '@/api/endpoints/types'
 import PoolManagement from '@/views/admin/PoolManagement.vue'
 import type { PoolKeyDetail, PoolOverviewItem, PoolKeysPageResponse } from '@/api/endpoints/pool'
 import { POOL_MANAGEMENT_VIEW_STORAGE_KEY } from '@/features/pool/utils/poolManagementState'
+import { setI18nLocale } from '@/i18n'
 
 const endpointMocks = vi.hoisted(() => ({
   getPoolOverview: vi.fn(),
@@ -631,6 +632,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setI18nLocale('zh-CN')
   for (const { app, root } of mountedApps.splice(0)) {
     app.unmount()
     root.remove()
@@ -638,6 +640,30 @@ afterEach(() => {
 })
 
 describe('PoolManagement Codex cycle stats mode', () => {
+  it.each([
+    { enabled: true, zh: '2 维度', en: '2 dimensions' },
+    { enabled: false, zh: '无启用维度', en: 'No enabled scoring dimensions' },
+  ])('updates object preset scheduling labels when switching locale ($enabled)', async ({ enabled, zh, en }) => {
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(createPoolKey('codex')))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex', {
+      pool_advanced: {
+        scheduling_presets: [
+          { preset: 'lru', enabled },
+          { preset: 'health_first', enabled },
+        ],
+      },
+    }))
+    const root = mountPoolManagement()
+    await settle()
+    expect(root.textContent).toContain(zh)
+
+    setI18nLocale('en-US')
+    await nextTick()
+    expect(root.textContent).toContain(en)
+    expect(root.textContent).not.toContain(zh)
+  })
+
   it('renders current-cycle comparison text without a mode toggle', async () => {
     const codexKey = createPoolKey('codex')
     endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })

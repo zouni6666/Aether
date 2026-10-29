@@ -7,10 +7,10 @@
       <div class="flex items-start justify-between gap-4">
         <div class="min-w-0">
           <div class="text-sm font-semibold text-foreground">
-            {{ legacyT('正在删除提供商') }}: {{ progress.providerName }}
+            {{ t('ui.deletingProvider') }}: {{ progress.providerName }}
           </div>
           <div class="mt-1 text-xs text-muted-foreground">
-            {{ stageLabel }} · {{ legacyT(progress.message || '后台处理中') }}
+            {{ stageLabel }} · {{ (progress.message || t('ui.processingInBackground')) }}
           </div>
         </div>
         <div class="shrink-0 text-right">
@@ -25,7 +25,7 @@
 
       <div class="space-y-2">
         <div class="flex items-center justify-between text-xs text-muted-foreground">
-          <span>{{ legacyT('总体进度') }}</span>
+          <span>{{ t('ui.overallProgress') }}</span>
           <span>{{ completedUnits }}/{{ totalUnits }}</span>
         </div>
         <div class="h-2 rounded-full bg-primary/10 overflow-hidden">
@@ -39,7 +39,7 @@
       <div class="grid gap-3 md:grid-cols-2">
         <div class="space-y-2">
           <div class="flex items-center justify-between text-xs text-muted-foreground">
-            <span>{{ legacyT('账号删除') }}</span>
+            <span>{{ t('ui.accountDeletion') }}</span>
             <span>{{ progress.deletedKeys }}/{{ progress.totalKeys || '...' }}</span>
           </div>
           <div class="h-2 rounded-full bg-primary/10 overflow-hidden">
@@ -52,7 +52,7 @@
 
         <div class="space-y-2">
           <div class="flex items-center justify-between text-xs text-muted-foreground">
-            <span>{{ legacyT('端点删除') }}</span>
+            <span>{{ t('ui.endpointDeletion') }}</span>
             <span>{{ progress.deletedEndpoints }}/{{ progress.totalEndpoints || '...' }}</span>
           </div>
           <div class="h-2 rounded-full bg-primary/10 overflow-hidden">
@@ -90,5 +90,6 @@ defineProps<{
   endpointsPercent: number
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
+
 </script>

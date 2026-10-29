@@ -277,6 +277,7 @@ import { LoadingState } from '@/components/common'
 import { Button } from '@/components/ui'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useI18n } from '@/i18n'
+import { useClipboard } from '@/composables/useClipboard'
 
 const PROTOCOL_VERSION = 1
 const PAIRING_POLL_INTERVAL_MS = 4_000
@@ -294,6 +295,7 @@ const pairingCreatedAt = ref(0)
 const creatingPairing = ref(false)
 const pairingError = ref(false)
 const codeCopied = ref(false)
+const { copyToClipboard } = useClipboard()
 const frameRef = ref<HTMLIFrameElement | null>(null)
 const frameKey = ref(0)
 const frameLoaded = ref(false)
@@ -436,15 +438,13 @@ async function revokeSelectedDevice(): Promise<void> {
 }
 
 async function copyPairingCode(): Promise<void> {
-  if (!pairing.value || !navigator.clipboard) return
-  try {
-    await navigator.clipboard.writeText(pairing.value.code)
-    codeCopied.value = true
+  if (!pairing.value) return
+  const copied = await copyToClipboard(pairing.value.code, false)
+  codeCopied.value = copied
+  if (copied) {
     window.setTimeout(() => {
       codeCopied.value = false
     }, 1_500)
-  } catch {
-    codeCopied.value = false
   }
 }
 

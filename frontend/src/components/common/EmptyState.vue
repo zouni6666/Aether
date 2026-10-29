@@ -129,40 +129,40 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const emit = defineEmits<Emits>()
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 // 根据类型获取默认配置
 const typeConfig = computed(() => {
   const configs = {
     default: {
       icon: Inbox,
-      title: '暂无数据',
-      description: '当前没有可显示的内容'
+      title: t('stats.empty.title'),
+      description: t('ui.thereIsNothingToDisplayRightNow')
     },
     search: {
       icon: Search,
-      title: '未找到结果',
-      description: '尝试使用不同的关键词搜索'
+      title: t('ui.noResultsFound'),
+      description: t('ui.tryADifferentKeyword')
     },
     filter: {
       icon: Filter,
-      title: '无匹配结果',
-      description: '没有符合当前筛选条件的数据'
+      title: t('ui.noMatchingResults'),
+      description: t('ui.noDataMatchesTheCurrentFilters')
     },
     error: {
       icon: AlertCircle,
-      title: '加载失败',
-      description: '数据加载过程中出现错误'
+      title: t('ui.failedToLoad'),
+      description: t('ui.anErrorOccurredWhileLoadingData')
     },
     empty: {
       icon: PackageOpen,
-      title: '这里空空如也',
-      description: '还没有任何内容'
+      title: t('ui.nothingHereYet'),
+      description: t('ui.thereIsNoContentYet')
     },
     notFound: {
       icon: FileQuestion,
-      title: '未找到',
-      description: '请求的资源不存在'
+      title: t('ui.notFound'),
+      description: t('ui.theRequestedResourceDoesNotExist')
     }
   }
 
@@ -171,9 +171,9 @@ const typeConfig = computed(() => {
 
 // 默认图标
 const defaultIcon = computed(() => typeConfig.value.icon)
-const displayTitle = computed(() => legacyT(props.title || typeConfig.value.title))
-const displayDescription = computed(() => legacyT(props.description || typeConfig.value.description))
-const displayActionText = computed(() => props.actionText ? legacyT(props.actionText) : '')
+const displayTitle = computed(() => (props.title ?? typeConfig.value.title))
+const displayDescription = computed(() => (props.description ?? typeConfig.value.description))
+const displayActionText = computed(() => props.actionText ? props.actionText : '')
 
 // 容器样式
 const containerClasses = computed(() => {

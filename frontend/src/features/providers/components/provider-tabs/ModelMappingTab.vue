@@ -4,7 +4,7 @@
     <div class="p-4 border-b border-border/60">
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold flex items-center gap-2">
-          模型映射
+          {{ t('guide.nav.concepts.modelMapping') }}
         </h3>
         <Button
           variant="outline"
@@ -12,8 +12,7 @@
           class="h-8"
           @click="openAddDialog"
         >
-          <Plus class="w-3.5 h-3.5 mr-1.5" />
-          添加映射
+          <Plus class="w-3.5 h-3.5 mr-1.5" /> {{ t('ui.addMapping') }}
         </Button>
       </div>
     </div>
@@ -66,12 +65,11 @@
                 variant="default"
                 class="text-xs shrink-0"
               >
-                精确
+                {{ t('ui.exact') }}
               </Badge>
               <!-- 分隔符 + 映射数量 -->
               <span class="text-xs text-muted-foreground shrink-0">
-                | {{ item.mappings.length }} 个映射
-              </span>
+                | {{ item.mappings.length }} {{ t('ui.mappings4d33911') }} </span>
               <Badge
                 v-if="item.group"
                 variant="outline"
@@ -107,12 +105,11 @@
                 variant="secondary"
                 class="text-xs shrink-0"
               >
-                正则
+                {{ t('ui.regex') }}
               </Badge>
               <!-- 分隔符 + 映射数量 -->
               <span class="text-xs text-muted-foreground shrink-0">
-                | {{ item.mappings.length }} 个映射
-              </span>
+                | {{ item.mappings.length }} {{ t('ui.mappings4d33911') }} </span>
               <!-- Key 数量 -->
               <span
                 v-if="item.matchedKeys && item.matchedKeys.length > 0"
@@ -132,7 +129,7 @@
               variant="ghost"
               size="icon"
               class="h-8 w-8"
-              title="编辑映射"
+              :title="t('ui.editMapping')"
               @click="item.group && editGroup(item.group)"
             >
               <Edit class="w-3.5 h-3.5" />
@@ -141,7 +138,7 @@
               variant="ghost"
               size="icon"
               class="h-8 w-8 hover:text-destructive"
-              title="删除映射"
+              :title="t('ui.deleteMapping')"
               @click="item.group && deleteGroup(item.group)"
             >
               <Trash2 class="w-3.5 h-3.5" />
@@ -173,7 +170,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-7 w-7 shrink-0"
-                title="测试映射"
+                :title="t('ui.testMapping')"
                 :disabled="testingMapping === `${item.key}-${mapping.name}`"
                 @click="testMapping(item, mapping)"
               >
@@ -203,7 +200,7 @@
               <div class="flex items-center gap-3">
                 <!-- 第一列：Key 名称 + sk -->
                 <div class="flex flex-col shrink-0">
-                  <span class="font-medium text-sm">{{ keyItem.keyName || '未命名密钥' }}</span>
+                  <span class="font-medium text-sm">{{ keyItem.keyName || t('ui.unnamedKey') }}</span>
                   <span class="text-xs text-muted-foreground font-mono">
                     {{ keyItem.maskedKey }}
                   </span>
@@ -238,7 +235,7 @@
                     variant="ghost"
                     size="icon"
                     class="h-7 w-7 shrink-0"
-                    title="测试映射"
+                    :title="t('ui.testMapping')"
                     :disabled="testingMapping === `${item.key}-${keyItem.keyId}-${match.name}`"
                     @click="testRegexMapping(item, keyItem, match)"
                   >
@@ -262,7 +259,7 @@
         v-if="shouldPaginateMappings"
         class="px-4 py-2 flex items-center justify-between text-xs text-muted-foreground"
       >
-        <span>共 {{ combinedMappings.length }} 个映射</span>
+        <span>{{ t('ui.total76e547a') }} {{ combinedMappings.length }} {{ t('ui.mappings4d33911') }}</span>
         <div class="flex items-center gap-1.5">
           <Button
             variant="ghost"
@@ -294,10 +291,10 @@
     >
       <Tag class="w-12 h-12 mx-auto mb-3 opacity-50" />
       <p class="text-sm">
-        暂无模型映射
+        {{ t('ui.noModelMappings') }}
       </p>
       <p class="text-xs mt-1">
-        点击上方"添加映射"按钮为模型创建名称映射
+        {{ t('ui.addAMappingToConfigureModelNameAliases') }}
       </p>
     </div>
   </Card>
@@ -318,10 +315,10 @@
   <!-- 删除确认对话框 -->
   <AlertDialog
     v-model="deleteConfirmOpen"
-    title="删除映射"
+    :title="t('ui.deleteMapping')"
     :description="deleteConfirmDescription"
-    confirm-text="删除"
-    cancel-text="取消"
+    :confirm-text="t('ui.delete')"
+    :cancel-text="t('common.cancel')"
     type="danger"
     @confirm="confirmDelete"
     @cancel="deleteConfirmOpen = false"
@@ -438,8 +435,9 @@ const emit = defineEmits<{
   'refresh': []
 }>()
 
-const { error: showError, success: showSuccess } = useToast()
 const { t } = useI18n()
+
+const { error: showError, success: showSuccess } = useToast()
 
 // 模型测试 composable
 const modelTest = useModelTest({ providerId: () => props.provider.id })
@@ -492,7 +490,7 @@ async function loadTestKeys() {
     }
   } catch (err: unknown) {
     if (version === testKeysLoadVersion && providerId === props.provider.id) {
-      showError(parseApiError(err, '加载测试 Key 失败'), '错误')
+      showError(parseApiError(err, t('ui.failedToLoadTestKeys')), t('ui.error'))
     }
   } finally {
     if (version === testKeysLoadVersion) loadingTestKeys.value = false
@@ -753,7 +751,7 @@ const deleteConfirmDescription = computed(() => {
   const aliasNames = aliases.map(a => a.name).join(', ')
   const endpointScope = getGroupEndpointScopeLabel(deletingGroup.value)
   const operationScope = getGroupOperationScopeLabel(deletingGroup.value)
-  return `确定要删除模型「${modelName}」在「${endpointScope} / ${operationScope}」下的 ${aliases.length} 个映射吗？\n\n映射名称：${aliasNames}`
+  return t('providers.migration.deleteMappingsForModelUnder7e3e4a', { value: String(modelName), value_2: String(endpointScope), value_3: String(operationScope), value_4: String(aliases.length), value_5: String(aliasNames) })
 })
 
 // 切换展开状态
@@ -819,12 +817,12 @@ async function confirmDelete() {
       provider_model_mappings: newAliases.length > 0 ? newAliases : null
     })
 
-    showSuccess('映射已删除')
+    showSuccess(t('ui.mappingDeleted'))
     deleteConfirmOpen.value = false
     deletingGroup.value = null
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '删除失败'), '错误')
+    showError(parseApiError(err, t('ui.deletionFailed')), t('ui.error'))
   }
 }
 
@@ -886,7 +884,7 @@ function runMappingTest(
 ) {
   const endpoints = endpointsOverride ?? testableEndpoints.value
   if (endpoints.length === 0) {
-    showError('暂无可用于测试的端点')
+    showError(t('providers.migration.noEndpointsAvailableForTesting9ec423'))
     return
   }
   pendingMappingKey.value = testingKey
@@ -940,19 +938,19 @@ async function handleStartMappingTest() {
   if (modelTest.testing.value || loadingTestKeys.value || !testingModelName.value) return
   const endpoint = selectedTestEndpoint.value || selectableTestEndpoints.value[0]
   if (!endpoint) {
-    showError('请选择要测试的端点')
+    showError(t('ui.selectAnEndpointToTest'))
     return
   }
 
   const { value: requestHeaders, error: requestHeadersError } = parsedTestRequestHeaders.value
   if (!requestHeaders || requestHeadersError) {
-    showError(`测试请求头无效: ${requestHeadersError || '无效 JSON'}`)
+    showError(t('providers.migration.invalidTestRequestHeaders73f57d', { value: String(requestHeadersError || t('ui.invalidJson')) }))
     return
   }
 
   const { value: requestBody, error } = parsedTestRequestBody.value
   if (!requestBody || error) {
-    showError(`测试请求体无效: ${error || '无效 JSON'}`)
+    showError(t('providers.migration.invalidTestRequestBody4d0d50', { value: String(error || t('ui.invalidJson')) }))
     return
   }
 
@@ -962,7 +960,7 @@ async function handleStartMappingTest() {
   await modelTest.startTest({
     mode: 'direct',
     modelName: testingModelName.value,
-    displayLabel: `[${formatApiFormat(endpoint.api_format)}] 映射 "${testingModelName.value}"`,
+    displayLabel: t('providers.migration.mapping3bd29d', { value: String(formatApiFormat(endpoint.api_format)), value_2: String(testingModelName.value) }),
     apiFormat: endpoint.api_format,
     endpointId: endpoint.id,
     endpointBaseUrl: endpoint.base_url,

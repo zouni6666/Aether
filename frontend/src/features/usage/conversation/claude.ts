@@ -1,3 +1,4 @@
+import { translate } from '@/i18n'
 /**
  * Claude API 格式解析器
  */
@@ -802,7 +803,7 @@ export class ClaudeParser implements ApiFormatParser {
       return content
         .map((item: RawObject) => {
           if (item.type === 'text') return String(item.text || '')
-          if (item.type === 'image') return '[图片]'
+          if (item.type === 'image') return translate('ui.imagea71f445')
           return ''
         })
         .filter(Boolean)
@@ -819,7 +820,7 @@ export class ClaudeParser implements ApiFormatParser {
     return content
       .map(block => {
         if (block.type === 'text') return block.text
-        if (block.type === 'image') return '[图片]'
+        if (block.type === 'image') return translate('ui.imagea71f445')
         if (block.type === 'error') return `[错误: ${block.message}]`
         return ''
       })

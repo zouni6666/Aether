@@ -27,7 +27,7 @@
       <div class="grid grid-cols-2 gap-2.5 text-xs">
         <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
           <div class="mb-1 text-muted-foreground">
-            {{ legacyT('请求次数') }}
+            {{ t('ui.requestCount') }}
           </div>
           <div class="font-semibold text-foreground">
             {{ row.requestCountLabel }}
@@ -45,7 +45,7 @@
 
       <div class="rounded-lg bg-muted/35 p-2.5 text-[11px] text-muted-foreground">
         <div class="flex items-center justify-between gap-2">
-          <span>{{ legacyT('创建时间') }}</span>
+          <span>{{ t('ui.createdAt') }}</span>
           <span class="font-medium text-foreground">{{ row.createdAtLabel }}</span>
         </div>
       </div>
@@ -93,5 +93,5 @@ defineEmits<{
   delete: []
 }>()
 
-const { legacyT } = useI18n()
+const { t } = useI18n()
 </script>

@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="isOpen"
-    title="编辑账号"
-    description="修改 OAuth 账号配置"
+    :title="t('ui.editAccount')"
+    :description="t('ui.editOauthAccountSettings')"
     :icon="SquarePen"
     size="xl"
     @update:model-value="handleDialogUpdate"
@@ -15,22 +15,22 @@
       <!-- 基本信息：账号名称 + 备注 -->
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <Label for="name">账号名称 *</Label>
+          <Label for="name">{{ t('ui.accountName') }}</Label>
           <Input
             id="name"
             v-model="form.name"
             required
-            placeholder="例如：主账号、备用账号"
+            :placeholder="t('ui.eGPrimaryAccountBackupAccount')"
             maxlength="100"
             autocomplete="off"
           />
         </div>
         <div>
-          <Label for="note">备注</Label>
+          <Label for="note">{{ t('ui.notes') }}</Label>
           <Input
             id="note"
             v-model="form.note"
-            placeholder="可选的备注信息"
+            :placeholder="t('ui.optionalNotes')"
           />
         </div>
       </div>
@@ -41,7 +41,7 @@
           <Label
             for="internal_priority"
             class="text-xs"
-          >优先级</Label>
+          >{{ t('ui.priority565d646') }}</Label>
           <Input
             id="internal_priority"
             v-model.number="form.internal_priority"
@@ -51,51 +51,51 @@
             class="h-8"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            越小越优先
+            {{ t('ui.lowerValuesHaveHigherPriority') }}
           </p>
         </div>
         <div>
           <Label
             for="rpm_limit"
             class="text-xs"
-          >RPM 限制</Label>
+          >{{ t('ui.rpmLimit50b7143') }}</Label>
           <Input
             id="rpm_limit"
             :model-value="form.rpm_limit ?? ''"
             type="number"
             min="1"
             max="10000"
-            placeholder="自适应"
+            :placeholder="t('ui.adaptive')"
             class="h-8"
             @update:model-value="(v) => form.rpm_limit = parseNullableNumberInput(v, { min: 1, max: 10000 })"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            留空自适应
+            {{ t('ui.leaveEmptyForAdaptive') }}
           </p>
         </div>
         <div>
           <Label
             for="concurrent_limit"
             class="text-xs"
-          >并发请求上限</Label>
+          >{{ t('ui.concurrentRequestLimit') }}</Label>
           <Input
             id="concurrent_limit"
             :model-value="form.concurrent_limit ?? ''"
             type="number"
             min="0"
-            placeholder="不限制"
+            :placeholder="t('ui.noRestriction')"
             class="h-8"
             @update:model-value="(v) => form.concurrent_limit = parseNullableNumberInput(v, { min: 0 })"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            留空或 0 表示不限制
+            {{ t('ui.leaveEmptyOrEnter0ForNoLimit') }}
           </p>
         </div>
         <div>
           <Label
             for="cache_ttl_minutes"
             class="text-xs"
-          >缓存 TTL</Label>
+          >{{ t('ui.cacheTtld8a1617') }}</Label>
           <Input
             id="cache_ttl_minutes"
             :model-value="form.cache_ttl_minutes ?? ''"
@@ -106,14 +106,14 @@
             @update:model-value="(v) => form.cache_ttl_minutes = parseNumberInput(v, { min: 0, max: 60 }) ?? 5"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            分钟，0禁用
+            {{ t('ui.minutes0Disables') }}
           </p>
         </div>
         <div>
           <Label
             for="max_probe_interval_minutes"
             class="text-xs"
-          >熔断探测</Label>
+          >{{ t('ui.circuitProbe') }}</Label>
           <Input
             id="max_probe_interval_minutes"
             :model-value="form.max_probe_interval_minutes ?? ''"
@@ -125,7 +125,7 @@
             @update:model-value="(v) => form.max_probe_interval_minutes = parseNumberInput(v, { min: 0, max: 32 }) ?? 32"
           />
           <p class="text-xs text-muted-foreground mt-0.5">
-            0-32分钟
+            {{ t('ui.032Minutes') }}
           </p>
         </div>
       </div>
@@ -134,9 +134,9 @@
       <div class="space-y-3 py-2 px-3 rounded-md border border-border/60 bg-muted/30">
         <div class="flex items-center justify-between">
           <div class="space-y-0.5">
-            <Label class="text-sm font-medium">自动获取上游可用模型</Label>
+            <Label class="text-sm font-medium">{{ t('ui.autoFetchUpstreamModels') }}</Label>
             <p class="text-xs text-muted-foreground">
-              定时更新上游模型, 配合模型映射使用
+              {{ t('ui.periodicallyUpdateUpstreamModelsForUseWithModelMapping') }}
             </p>
             <p
               v-if="showAutoFetchWarning"
@@ -155,15 +155,15 @@
         >
           <div class="grid grid-cols-2 gap-3">
             <div>
-              <Label class="text-xs">包含规则</Label>
+              <Label class="text-xs">{{ t('ui.includeRules') }}</Label>
               <Input
                 v-model="form.model_include_patterns_text"
-                placeholder="gpt-*, claude-*, 留空包含全部"
+                :placeholder="t('ui.gptClaudeLeaveEmptyToIncludeAll')"
                 class="h-8 text-sm"
               />
             </div>
             <div>
-              <Label class="text-xs">排除规则</Label>
+              <Label class="text-xs">{{ t('ui.excludeRules') }}</Label>
               <Input
                 v-model="form.model_exclude_patterns_text"
                 placeholder="*-preview, *-beta"
@@ -172,7 +172,7 @@
             </div>
           </div>
           <p class="text-xs text-muted-foreground">
-            逗号分隔，支持 * ? 通配符，不区分大小写
+            {{ t('ui.commaSeparatedSupportsAndWildcardsCaseInsensitive') }}
           </p>
         </div>
       </div>
@@ -183,24 +183,25 @@
         variant="outline"
         @click="handleCancel"
       >
-        取消
+        {{ t('common.cancel') }}
       </Button>
       <Button
         :disabled="saving || !canSave"
         @click="handleSave"
       >
-        {{ saving ? '保存中...' : '保存' }}
+        {{ saving ? t('ui.saving') : t('ui.save') }}
       </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, computed, watch } from 'vue'
 import { Dialog, Button, Input, Label, Switch } from '@/components/ui'
 import { SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
-import { useConfirm } from '@/composables/useConfirm'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { parseApiError } from '@/utils/errorParser'
 import { parseNumberInput, parseNullableNumberInput } from '@/utils/form'
@@ -220,8 +221,9 @@ const emit = defineEmits<{
   saved: [key: EndpointAPIKey]
 }>()
 
+const { t } = useI18n()
+
 const { success, error: showError } = useToast()
-const { confirmWarning } = useConfirm()
 
 // 显示自动获取模型警告：编辑模式下，原本未启用但现在启用，且已有 allowed_models
 const showAutoFetchWarning = computed(() => {
@@ -244,7 +246,7 @@ const autoFetchWarningMessage = computed(() => {
     ? props.editingKey.allowed_models
     : []
   if (models.length === 0) return ''
-  return `当前 Key 模型权限存在以下模型：${models.map(model => `“${model}”`).join('、')}，开启自动获取后将被覆盖`
+  return t('providers.migration.thisKeyCurrentlyAllowsTheseef7e31', { value: String(models.map(model => `“${model}”`).join('、')) })
 })
 
 // 表单是否可以保存
@@ -328,34 +330,15 @@ function loadKeyData() {
 }
 
 // 使用 useFormDialog 统一处理对话框逻辑
-const {
-  handleDialogUpdate: _baseHandleDialogUpdate,
-  handleCancel: _baseHandleCancel,
-} = useFormDialog({
+const { handleDialogUpdate, handleCancel } = useFormDialog({
   isOpen: () => props.open,
   entity: () => props.editingKey,
   isLoading: saving,
+  isDirty: () => isDirty.value,
   onClose: () => emit('close'),
   loadData: loadKeyData,
   resetForm,
 })
-
-// 包装关闭逻辑：有未保存更改时弹出确认
-async function handleDialogUpdate(value: boolean) {
-  if (!value && isDirty.value) {
-    const confirmed = await confirmWarning('有未保存的更改，确定要关闭吗？', '放弃更改')
-    if (!confirmed) return
-  }
-  _baseHandleDialogUpdate(value)
-}
-
-async function handleCancel() {
-  if (isDirty.value) {
-    const confirmed = await confirmWarning('有未保存的更改，确定要关闭吗？', '放弃更改')
-    if (!confirmed) return
-  }
-  _baseHandleCancel()
-}
 
 // 将逗号分隔的文本解析为数组（去空、去重）
 function parsePatternText(text: string): string[] {
@@ -369,7 +352,7 @@ function parsePatternText(text: string): string[] {
 
 async function handleSave() {
   if (!props.editingKey) {
-    showError('无法保存：缺少账号信息', '错误')
+    showError(t('ui.cannotSaveAccountInformationIsMissing'), t('ui.error'))
     return
   }
 
@@ -391,14 +374,15 @@ async function handleSave() {
     }
 
     const updatedKey = await updateProviderKey(props.editingKey.id, updateData)
-    success('账号已更新', '成功')
+    success(t('ui.accountUpdated'), t('ui.success'))
     emit('saved', updatedKey)
     emit('close')
   } catch (err: unknown) {
-    const errorMessage = parseApiError(err, '保存失败')
-    showError(errorMessage, '错误')
+    const errorMessage = parseApiError(err, t('ui.failedToSave'))
+    showError(errorMessage, t('ui.error'))
   } finally {
     saving.value = false
   }
 }
+
 </script>

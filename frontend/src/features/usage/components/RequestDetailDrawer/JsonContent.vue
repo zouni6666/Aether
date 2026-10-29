@@ -24,7 +24,7 @@
             class="p-3 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800"
           >
             <div class="flex items-start gap-2">
-              <span class="text-amber-600 dark:text-amber-400 text-sm font-medium">Warning: 响应解析失败</span>
+              <span class="text-amber-600 dark:text-amber-400 text-sm font-medium">{{ t('ui.warningFailedToParseResponse') }}</span>
               <span class="text-xs text-amber-700 dark:text-amber-300">{{ chunk.parseError }}</span>
             </div>
           </div>
@@ -54,7 +54,7 @@
                     v-if="line.canFold"
                     class="fold-button"
                     type="button"
-                    :aria-label="line.collapsed ? '展开节点' : '折叠节点'"
+                    :aria-label="line.collapsed ? t('ui.expandNode') : t('ui.collapseNode')"
                     :aria-expanded="!line.collapsed"
                     @click="toggleFold(line, index)"
                   >
@@ -96,6 +96,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { ref, watch } from 'vue'
 import { ChevronRight, ChevronDown } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
@@ -114,6 +116,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ 'load-error': [error: unknown] }>()
+
+const { t } = useI18n()
 const viewer = ref<{ refresh: (index: number, resetTail?: boolean) => void } | null>(null)
 const viewRevision = ref(0)
 const foldOverrides = ref(new Map<string, boolean>())
@@ -180,6 +184,7 @@ watch([() => props.data, () => props.bodyDocument, () => props.expandDepth], () 
   localReader = undefined
   foldOverrides.value = new Map()
 })
+
 </script>
 
 <style scoped>

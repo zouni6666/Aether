@@ -15,7 +15,7 @@
               {{ stats?.total ?? '-' }}
             </p>
             <p class="text-xs text-muted-foreground">
-              总任务数
+              {{ t('ui.totalTasks') }}
             </p>
           </div>
         </div>
@@ -36,7 +36,7 @@
               {{ runningCount || '-' }}
             </p>
             <p class="text-xs text-muted-foreground">
-              处理中
+              {{ t('ui.processing694b71b') }}
             </p>
           </div>
         </div>
@@ -54,7 +54,7 @@
               {{ stats?.by_status?.succeeded ?? '-' }}
             </p>
             <p class="text-xs text-muted-foreground">
-              已完成
+              {{ t('site.home.status.completed') }}
             </p>
           </div>
         </div>
@@ -72,7 +72,7 @@
               {{ stats?.registered_tasks ?? '-' }}
             </p>
             <p class="text-xs text-muted-foreground">
-              已注册
+              {{ t('ui.registered') }}
             </p>
           </div>
         </div>
@@ -88,7 +88,7 @@
       <div class="px-4 sm:px-6 py-3.5 border-b border-border/60">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h3 class="text-base font-semibold">
-            异步任务
+            {{ t('nav.asyncTasks') }}
           </h3>
           <div class="flex items-center gap-2">
             <!-- 状态筛选 -->
@@ -96,32 +96,32 @@
               v-model="filterStatus"
             >
               <SelectTrigger class="w-28 h-8 text-xs border-border/60">
-                <SelectValue placeholder="状态" />
+                <SelectValue :placeholder="t('ui.status6320b4a')" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">
-                  全部状态
+                  {{ t('ui.allStatuses') }}
                 </SelectItem>
                 <SelectItem value="queued">
-                  排队中
+                  {{ t('ui.queuedd6f766f') }}
                 </SelectItem>
                 <SelectItem value="running">
-                  运行中
+                  {{ t('ui.running1f0eb99') }}
                 </SelectItem>
                 <SelectItem value="retrying">
-                  重试中
+                  {{ t('ui.retrying') }}
                 </SelectItem>
                 <SelectItem value="succeeded">
-                  成功
+                  {{ t('ui.success') }}
                 </SelectItem>
                 <SelectItem value="failed">
-                  失败
+                  {{ t('ui.failed28384d7') }}
                 </SelectItem>
                 <SelectItem value="cancelled">
-                  已取消
+                  {{ t('ui.canceled') }}
                 </SelectItem>
                 <SelectItem value="skipped">
-                  已跳过
+                  {{ t('ui.skipped71e95b2') }}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -129,7 +129,7 @@
             <Input
               v-model="filterModel"
               type="text"
-              placeholder="任务 Key..."
+              :placeholder="t('ui.taskKey')"
               class="w-32 h-8 text-xs"
             />
             <!-- 刷新按钮 -->
@@ -156,7 +156,7 @@
       >
         <Loader2 class="w-8 h-8 animate-spin mx-auto text-muted-foreground" />
         <p class="mt-2 text-sm text-muted-foreground">
-          加载中...
+          {{ t('common.loading') }}
         </p>
       </div>
 
@@ -167,7 +167,7 @@
       >
         <Zap class="w-12 h-12 mx-auto text-muted-foreground/50" />
         <p class="mt-2 text-sm text-muted-foreground">
-          暂无异步任务
+          {{ t('ui.noAsynchronousTasks') }}
         </p>
       </div>
 
@@ -179,22 +179,22 @@
         <TableHeader>
           <TableRow>
             <TableHead class="w-[25%]">
-              任务
+              {{ t('ui.task') }}
             </TableHead>
             <TableHead class="w-[15%]">
-              {{ isAdmin ? '用户/Provider' : 'Provider' }}
+              {{ isAdmin ? t('ui.userProvider') : 'Provider' }}
             </TableHead>
             <TableHead class="w-[12%]">
-              状态
+              {{ t('ui.status6320b4a') }}
             </TableHead>
             <TableHead class="w-[10%]">
-              参数
+              {{ t('ui.parameters') }}
             </TableHead>
             <TableHead class="w-[15%]">
-              时间
+              {{ t('ui.time') }}
             </TableHead>
             <TableHead class="w-[8%] text-center">
-              操作
+              {{ t('ui.actionsed31fbb') }}
             </TableHead>
           </TableRow>
         </TableHeader>
@@ -287,14 +287,14 @@
               <div class="text-xs space-y-0.5">
                 <div class="flex items-center gap-1.5 text-muted-foreground">
                   <Clock class="w-3 h-3" />
-                  <span>{{ formatDate(task.created_at) }}</span>
+                  <span>{{ formatDateTimeCompact(task.created_at) }}</span>
                 </div>
                 <div
                   v-if="finishTime(task)"
                   class="flex items-center gap-1.5 text-green-600 dark:text-green-400"
                 >
                   <CheckCircle class="w-3 h-3" />
-                  <span>{{ formatDate(finishTime(task)) }}</span>
+                  <span>{{ formatDateTimeCompact(finishTime(task)) }}</span>
                 </div>
               </div>
             </TableCell>
@@ -305,7 +305,7 @@
                   variant="ghost"
                   size="icon"
                   class="h-7 w-7"
-                  title="任务详情"
+                  :title="t('ui.taskDetails')"
                   @click.stop="openTaskDetail(task)"
                 >
                   <Eye class="w-4 h-4" />
@@ -315,7 +315,7 @@
                   variant="ghost"
                   size="icon"
                   class="h-7 w-7"
-                  title="使用记录"
+                  :title="t('nav.usageRecords')"
                   @click.stop="openUsageRecord(task)"
                 >
                   <ExternalLink class="w-4 h-4" />
@@ -390,7 +390,7 @@
             </div>
             <div class="flex items-center gap-1.5 text-muted-foreground">
               <Clock class="w-3 h-3" />
-              <span>{{ formatDate(task.created_at) }}</span>
+              <span>{{ formatDateTimeCompact(task.created_at) }}</span>
             </div>
             <div
               v-if="task.duration_seconds || task.attempt"
@@ -410,8 +410,7 @@
               class="h-7 text-xs"
               @click.stop="openUsageRecord(task)"
             >
-              <ExternalLink class="w-3.5 h-3.5 mr-1" />
-              使用记录
+              <ExternalLink class="w-3.5 h-3.5 mr-1" /> {{ t('nav.usageRecords') }}
             </Button>
             <Button
               v-if="authStore.canOperateAdmin && canCancel(task.status)"
@@ -420,8 +419,7 @@
               class="h-7 text-xs text-red-500 border-red-200 hover:bg-red-50"
               @click.stop="cancelTask(task)"
             >
-              <XCircle class="w-3.5 h-3.5 mr-1" />
-              取消
+              <XCircle class="w-3.5 h-3.5 mr-1" /> {{ t('common.cancel') }}
             </Button>
           </div>
         </div>
@@ -440,413 +438,398 @@
     </Card>
 
     <!-- 任务详情抽屉 -->
-    <Teleport to="body">
-      <Transition name="drawer">
-        <div
-          v-if="showDetail && selectedTask"
-          class="fixed inset-0 z-50 flex justify-end"
-          @click.self="closeDetail"
-        >
-          <!-- 背景遮罩 -->
+    <Drawer
+      :open="showDetail && !!selectedTask"
+      width="sm:w-[800px] sm:max-w-[90vw]"
+      layout="column"
+      @close="closeDetail"
+    >
+      <template v-if="selectedTask">
+        <!-- 固定头部 -->
+        <div class="sticky top-0 z-10 bg-background border-b px-3 sm:px-6 py-3 sm:py-4 flex-shrink-0">
+          <!-- 第一行：标题、模型、状态、操作按钮 -->
+          <div class="flex items-center justify-between gap-4 mb-3">
+            <div class="flex items-center gap-3 flex-wrap">
+              <h3 class="text-lg font-semibold">
+                {{ t('ui.taskDetails') }}
+              </h3>
+              <div class="flex items-center gap-1 text-sm font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded">
+                <Video
+                  v-if="isVideoTask(selectedTask)"
+                  class="w-3.5 h-3.5 mr-1"
+                />
+                <span>{{ displayTaskName(selectedTask) }}</span>
+              </div>
+              <Badge :variant="getStatusVariant(selectedTask.status)">
+                {{ getStatusLabel(selectedTask.status) }}
+              </Badge>
+            </div>
+            <div class="flex items-center gap-1 shrink-0">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8"
+                :class="{ 'text-primary': detailAutoRefresh }"
+                :title="detailAutoRefresh ? t('ui.stopAutomaticRefresh') : t('ui.enableAutomaticRefreshEvery5Seconds')"
+                @click="toggleDetailAutoRefresh"
+              >
+                <RefreshCw
+                  class="w-4 h-4"
+                  :class="{ 'animate-spin': detailAutoRefresh }"
+                />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8"
+                :title="t('ui.close')"
+                @click="closeDetail"
+              >
+                <X class="w-4 h-4" />
+              </Button>
+            </div>
+          </div>
+          <!-- 第二行：关键元信息 -->
+          <div class="flex items-center flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span class="flex items-center gap-1">
+              <span class="font-medium text-foreground">ID:</span>
+              <span class="font-mono">{{ selectedTask.id.slice(0, 8) }}...</span>
+            </span>
+            <span class="opacity-40">|</span>
+            <span>{{ formatDateTimeFull(selectedTask.created_at) }}</span>
+            <template v-if="isAdmin">
+              <span class="opacity-40">|</span>
+              <span>{{ t('ui.users') }} {{ selectedTask.username }}</span>
+            </template>
+            <span class="opacity-40">|</span>
+            <span>{{ displayTaskSource(selectedTask) }}</span>
+          </div>
+          <!-- 进度条 -->
           <div
-            class="absolute inset-0 bg-black/30 backdrop-blur-sm"
-            @click="closeDetail"
-          />
-          <!-- 抽屉内容 -->
-          <Card class="relative h-full w-full sm:w-[800px] sm:max-w-[90vw] rounded-none shadow-2xl flex flex-col">
-            <!-- 固定头部 -->
-            <div class="sticky top-0 z-10 bg-background border-b px-3 sm:px-6 py-3 sm:py-4 flex-shrink-0">
-              <!-- 第一行：标题、模型、状态、操作按钮 -->
-              <div class="flex items-center justify-between gap-4 mb-3">
-                <div class="flex items-center gap-3 flex-wrap">
-                  <h3 class="text-lg font-semibold">
-                    任务详情
-                  </h3>
-                  <div class="flex items-center gap-1 text-sm font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded">
-                    <Video
-                      v-if="isVideoTask(selectedTask)"
-                      class="w-3.5 h-3.5 mr-1"
-                    />
-                    <span>{{ displayTaskName(selectedTask) }}</span>
-                  </div>
-                  <Badge :variant="getStatusVariant(selectedTask.status)">
-                    {{ getStatusLabel(selectedTask.status) }}
-                  </Badge>
-                </div>
-                <div class="flex items-center gap-1 shrink-0">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    :class="{ 'text-primary': detailAutoRefresh }"
-                    :title="detailAutoRefresh ? '停止自动刷新' : '开启自动刷新（每5秒）'"
-                    @click="toggleDetailAutoRefresh"
-                  >
-                    <RefreshCw
-                      class="w-4 h-4"
-                      :class="{ 'animate-spin': detailAutoRefresh }"
-                    />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    title="关闭"
-                    @click="closeDetail"
-                  >
-                    <X class="w-4 h-4" />
-                  </Button>
-                </div>
-              </div>
-              <!-- 第二行：关键元信息 -->
-              <div class="flex items-center flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <span class="flex items-center gap-1">
-                  <span class="font-medium text-foreground">ID:</span>
-                  <span class="font-mono">{{ selectedTask.id.slice(0, 8) }}...</span>
-                </span>
-                <span class="opacity-40">|</span>
-                <span>{{ formatDateFull(selectedTask.created_at) }}</span>
-                <template v-if="isAdmin">
-                  <span class="opacity-40">|</span>
-                  <span>用户: {{ selectedTask.username }}</span>
-                </template>
-                <span class="opacity-40">|</span>
-                <span>{{ displayTaskSource(selectedTask) }}</span>
-              </div>
-              <!-- 进度条 -->
-              <div
-                v-if="selectedTask.progress_percent > 0 && isRunningStatus(selectedTask.status)"
-                class="mt-3"
-              >
-                <div class="flex items-center gap-3">
-                  <div class="flex-1 h-2 bg-muted rounded-full overflow-hidden">
-                    <div
-                      class="h-full bg-primary transition-all"
-                      :style="{ width: `${selectedTask.progress_percent}%` }"
-                    />
-                  </div>
-                  <span class="text-xs text-muted-foreground font-medium">{{ selectedTask.progress_percent }}%</span>
-                </div>
-                <p
-                  v-if="selectedTask.progress_message"
-                  class="text-xs text-muted-foreground mt-1"
-                >
-                  {{ selectedTask.progress_message }}
-                </p>
-              </div>
-            </div>
-
-            <!-- 可滚动内容区域 -->
-            <div class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-3 sm:py-4 space-y-5">
-              <!-- 错误信息 -->
-              <div
-                v-if="selectedTask.error_message"
-                class="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800"
-              >
-                <div class="flex items-start gap-2">
-                  <AlertCircle class="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <div>
-                    <p
-                      v-if="selectedTask.error_code"
-                      class="text-xs font-medium text-red-600 dark:text-red-400 mb-1"
-                    >
-                      错误码: {{ selectedTask.error_code }}
-                    </p>
-                    <p class="text-sm text-red-600 dark:text-red-400">
-                      {{ selectedTask.error_message }}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <!-- 视频结果（放在最前面） -->
-              <div
-                v-if="selectedTask.video_url || selectedTask.video_urls?.length"
-                class="space-y-3"
-              >
-                <!-- 主视频 -->
-                <div v-if="selectedTask.video_url">
-                  <div class="rounded-lg overflow-hidden border border-border/60 bg-black">
-                    <video
-                      :src="getVideoUrl(selectedTask.id, selectedTask.video_url)"
-                      controls
-                      preload="none"
-                      class="w-full max-h-[300px] object-contain"
-                    />
-                  </div>
-                  <!-- 视频信息 -->
-                  <div class="mt-2 space-y-2">
-                    <!-- 链接 -->
-                    <div class="flex items-center gap-1 p-1.5 bg-muted/50 rounded border border-border/40">
-                      <code
-                        class="flex-1 text-xs text-foreground truncate px-1"
-                        :title="selectedTask.video_url"
-                      >{{ selectedTask.video_url }}</code>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class="h-6 px-2 text-xs shrink-0"
-                        @click="copyToClipboard(selectedTask.video_url)"
-                      >
-                        <Copy class="w-3 h-3" />
-                      </Button>
-                    </div>
-                    <!-- 元信息 -->
-                    <div
-                      v-if="selectedTask.video_size_bytes || selectedTask.video_expires_at"
-                      class="flex items-center gap-3 text-xs text-muted-foreground"
-                    >
-                      <span v-if="selectedTask.video_size_bytes">
-                        大小: {{ formatFileSize(selectedTask.video_size_bytes) }}
-                      </span>
-                      <span
-                        v-if="selectedTask.video_expires_at"
-                        class="text-amber-600 dark:text-amber-400"
-                      >
-                        过期: {{ formatDate(selectedTask.video_expires_at) }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- 多个视频 -->
+            v-if="selectedTask.progress_percent > 0 && isRunningStatus(selectedTask.status)"
+            class="mt-3"
+          >
+            <div class="flex items-center gap-3">
+              <div class="flex-1 h-2 bg-muted rounded-full overflow-hidden">
                 <div
-                  v-else-if="selectedTask.video_urls?.length"
-                  class="space-y-4"
-                >
-                  <div
-                    v-for="(url, index) in selectedTask.video_urls"
-                    :key="index"
-                  >
-                    <p class="text-xs text-muted-foreground font-medium mb-1.5">
-                      视频 {{ index + 1 }}
-                    </p>
-                    <div class="rounded-lg overflow-hidden border border-border/60 bg-black">
-                      <video
-                        :src="getVideoUrl(selectedTask.id, url)"
-                        controls
-                        preload="none"
-                        class="w-full max-h-[250px] object-contain"
-                      />
-                    </div>
-                    <div class="mt-1.5 flex items-center gap-1 p-1.5 bg-muted/50 rounded border border-border/40">
-                      <code
-                        class="flex-1 text-xs text-foreground truncate px-1"
-                        :title="url"
-                      >{{ url }}</code>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class="h-6 px-2 text-xs shrink-0"
-                        @click="copyToClipboard(url)"
-                      >
-                        <Copy class="w-3 h-3" />
-                      </Button>
-                    </div>
-                  </div>
-                </div>
+                  class="h-full bg-primary transition-all"
+                  :style="{ width: `${selectedTask.progress_percent}%` }"
+                />
               </div>
+              <span class="text-xs text-muted-foreground font-medium">{{ selectedTask.progress_percent }}%</span>
+            </div>
+            <p
+              v-if="selectedTask.progress_message"
+              class="text-xs text-muted-foreground mt-1"
+            >
+              {{ selectedTask.progress_message }}
+            </p>
+          </div>
+        </div>
 
-              <!-- 任务完成但无视频 -->
-              <div
-                v-else-if="isSucceededStatus(selectedTask.status) && isVideoTask(selectedTask)"
-                class="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800 text-center"
-              >
-                <Video class="w-8 h-8 mx-auto mb-2 text-amber-500" />
-                <p class="text-sm text-amber-600 dark:text-amber-400">
-                  视频链接不可用或已过期
+        <!-- 可滚动内容区域 -->
+        <div class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-3 sm:py-4 space-y-5">
+          <!-- 错误信息 -->
+          <div
+            v-if="selectedTask.error_message"
+            class="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800"
+          >
+            <div class="flex items-start gap-2">
+              <AlertCircle class="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+              <div>
+                <p
+                  v-if="selectedTask.error_code"
+                  class="text-xs font-medium text-red-600 dark:text-red-400 mb-1"
+                >
+                  {{ t('ui.errorCode') }} {{ selectedTask.error_code }}
+                </p>
+                <p class="text-sm text-red-600 dark:text-red-400">
+                  {{ selectedTask.error_message }}
                 </p>
               </div>
+            </div>
+          </div>
 
-              <!-- Prompt -->
-              <div class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                    Prompt
-                  </h4>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    class="h-6 px-2 text-xs"
-                    @click="copyToClipboard(displayTaskDescription(selectedTask))"
-                  >
-                    <Copy class="w-3 h-3 mr-1" />
-                    复制
-                  </Button>
-                </div>
-                <div class="p-3 bg-muted/50 rounded-lg border border-border/60 text-sm whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-relaxed">
-                  {{ displayTaskDescription(selectedTask) }}
-                </div>
+          <!-- 视频结果（放在最前面） -->
+          <div
+            v-if="selectedTask.video_url || selectedTask.video_urls?.length"
+            class="space-y-3"
+          >
+            <!-- 主视频 -->
+            <div v-if="selectedTask.video_url">
+              <div class="rounded-lg overflow-hidden border border-border/60 bg-black">
+                <video
+                  :src="getVideoUrl(selectedTask.id, selectedTask.video_url)"
+                  controls
+                  preload="none"
+                  class="w-full max-h-[300px] object-contain"
+                />
               </div>
-
-              <!-- 视频信息（网格布局） -->
-              <div
-                v-if="selectedTask.video_duration_seconds || selectedTask.resolution || selectedTask.aspect_ratio || selectedTask.size"
-                class="space-y-2"
-              >
-                <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                  视频信息
-                </h4>
-                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div
-                    v-if="selectedTask.video_duration_seconds"
-                    class="p-3 bg-muted/30 rounded-lg"
-                  >
-                    <p class="text-xs text-muted-foreground mb-0.5">
-                      视频时长
-                    </p>
-                    <p class="text-sm font-medium">
-                      {{ selectedTask.video_duration_seconds.toFixed(1) }}s
-                    </p>
-                  </div>
-                  <div
-                    v-if="selectedTask.resolution"
-                    class="p-3 bg-muted/30 rounded-lg"
-                  >
-                    <p class="text-xs text-muted-foreground mb-0.5">
-                      分辨率
-                    </p>
-                    <p class="text-sm font-medium">
-                      {{ selectedTask.resolution }}
-                    </p>
-                  </div>
-                  <div
-                    v-if="selectedTask.aspect_ratio"
-                    class="p-3 bg-muted/30 rounded-lg"
-                  >
-                    <p class="text-xs text-muted-foreground mb-0.5">
-                      宽高比
-                    </p>
-                    <p class="text-sm font-medium">
-                      {{ selectedTask.aspect_ratio }}
-                    </p>
-                  </div>
-                  <div
-                    v-if="selectedTask.size"
-                    class="p-3 bg-muted/30 rounded-lg"
-                  >
-                    <p class="text-xs text-muted-foreground mb-0.5">
-                      尺寸
-                    </p>
-                    <p class="text-sm font-medium">
-                      {{ selectedTask.size }}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <!-- 执行状态（网格布局） -->
-              <div class="space-y-2">
-                <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                  执行状态
-                </h4>
-                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div class="p-3 bg-muted/30 rounded-lg">
-                    <p class="text-xs text-muted-foreground mb-0.5">
-                      轮询
-                    </p>
-                    <p class="text-sm font-medium">
-                      {{ selectedTask.poll_count ?? selectedTask.attempt ?? 0 }} / {{ selectedTask.max_poll_count ?? selectedTask.max_attempts ?? 1 }}
-                    </p>
-                  </div>
-                  <div class="p-3 bg-muted/30 rounded-lg">
-                    <p class="text-xs text-muted-foreground mb-0.5">
-                      重试
-                    </p>
-                    <p class="text-sm font-medium">
-                      {{ selectedTask.retry_count ?? 0 }} / {{ selectedTask.max_retries ?? selectedTask.max_attempts ?? 1 }}
-                    </p>
-                  </div>
-                  <div class="p-3 bg-muted/30 rounded-lg">
-                    <p class="text-xs text-muted-foreground mb-0.5">
-                      轮询间隔
-                    </p>
-                    <p class="text-sm font-medium">
-                      {{ selectedTask.poll_interval_seconds ? `${selectedTask.poll_interval_seconds}s` : selectedTask.trigger ?? '-' }}
-                    </p>
-                  </div>
-                  <div
-                    v-if="selectedTask.next_poll_at"
-                    class="p-3 bg-muted/30 rounded-lg"
-                  >
-                    <p class="text-xs text-muted-foreground mb-0.5">
-                      下次轮询
-                    </p>
-                    <p class="text-sm font-medium">
-                      {{ formatDate(selectedTask.next_poll_at) }}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <!-- 时间范围 -->
-              <div class="space-y-2">
-                <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                  时间范围
-                </h4>
-                <div class="flex items-center gap-1 text-sm font-medium">
-                  <span>{{ formatTimeWithMs(selectedTask.created_at) }}</span>
-                  <span class="time-arrow-container">
-                    <span
-                      v-if="finishTime(selectedTask)"
-                      class="time-duration"
-                    >+{{ calcDuration(selectedTask.created_at, finishTime(selectedTask) || selectedTask.created_at) }}</span>
-                    <span class="time-arrow">→</span>
-                  </span>
-                  <template v-if="finishTime(selectedTask)">
-                    <span>{{ formatTimeWithMs(finishTime(selectedTask)) }}</span>
-                  </template>
-                  <span
-                    v-else
-                    class="text-muted-foreground"
-                  >处理中...</span>
-                </div>
-              </div>
-
-              <!-- 响应数据 -->
-              <div
-                v-if="selectedTask.request_metadata?.poll_raw_response"
-                class="space-y-2"
-              >
-                <div class="flex items-center justify-between">
-                  <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-2">
-                    <FileJson class="w-3.5 h-3.5" />
-                    响应数据
-                  </h4>
+              <!-- 视频信息 -->
+              <div class="mt-2 space-y-2">
+                <!-- 链接 -->
+                <div class="flex items-center gap-1 p-1.5 bg-muted/50 rounded border border-border/40">
+                  <code
+                    class="flex-1 text-xs text-foreground truncate px-1"
+                    :title="selectedTask.video_url"
+                  >{{ selectedTask.video_url }}</code>
                   <Button
                     variant="ghost"
                     size="sm"
-                    class="h-5 px-1.5 text-xs"
-                    @click="copyToClipboard(JSON.stringify(selectedTask.request_metadata.poll_raw_response, null, 2))"
+                    class="h-6 px-2 text-xs shrink-0"
+                    @click="copyToClipboard(selectedTask.video_url)"
                   >
-                    <Copy class="w-3 h-3 mr-1" />
-                    复制
+                    <Copy class="w-3 h-3" />
                   </Button>
                 </div>
-                <div class="p-3 bg-muted/50 rounded-lg border border-border/40 overflow-x-auto max-h-48 overflow-y-auto">
-                  <pre class="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80">{{ formatJson(selectedTask.request_metadata.poll_raw_response) }}</pre>
+                <!-- 元信息 -->
+                <div
+                  v-if="selectedTask.video_size_bytes || selectedTask.video_expires_at"
+                  class="flex items-center gap-3 text-xs text-muted-foreground"
+                >
+                  <span v-if="selectedTask.video_size_bytes"> {{ t('ui.size') }} {{ formatFileSize(selectedTask.video_size_bytes) }}
+                  </span>
+                  <span
+                    v-if="selectedTask.video_expires_at"
+                    class="text-amber-600 dark:text-amber-400"
+                  > {{ t('ui.expires') }} {{ formatDateTimeCompact(selectedTask.video_expires_at) }}
+                  </span>
                 </div>
               </div>
+            </div>
 
-              <!-- 操作按钮 -->
+            <!-- 多个视频 -->
+            <div
+              v-else-if="selectedTask.video_urls?.length"
+              class="space-y-4"
+            >
               <div
-                v-if="authStore.canOperateAdmin && canCancel(selectedTask.status)"
-                class="pt-4 border-t border-border/60"
+                v-for="(url, index) in selectedTask.video_urls"
+                :key="index"
               >
-                <Button
-                  variant="destructive"
-                  class="w-full"
-                  @click="cancelTask(selectedTask)"
-                >
-                  <XCircle class="w-4 h-4 mr-2" />
-                  取消任务
-                </Button>
+                <p class="text-xs text-muted-foreground font-medium mb-1.5">
+                  {{ t('ui.video') }} {{ index + 1 }}
+                </p>
+                <div class="rounded-lg overflow-hidden border border-border/60 bg-black">
+                  <video
+                    :src="getVideoUrl(selectedTask.id, url)"
+                    controls
+                    preload="none"
+                    class="w-full max-h-[250px] object-contain"
+                  />
+                </div>
+                <div class="mt-1.5 flex items-center gap-1 p-1.5 bg-muted/50 rounded border border-border/40">
+                  <code
+                    class="flex-1 text-xs text-foreground truncate px-1"
+                    :title="url"
+                  >{{ url }}</code>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-2 text-xs shrink-0"
+                    @click="copyToClipboard(url)"
+                  >
+                    <Copy class="w-3 h-3" />
+                  </Button>
+                </div>
               </div>
             </div>
-          </Card>
+          </div>
+
+          <!-- 任务完成但无视频 -->
+          <div
+            v-else-if="isSucceededStatus(selectedTask.status) && isVideoTask(selectedTask)"
+            class="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800 text-center"
+          >
+            <Video class="w-8 h-8 mx-auto mb-2 text-amber-500" />
+            <p class="text-sm text-amber-600 dark:text-amber-400">
+              {{ t('ui.theVideoLinkIsUnavailableOrHasExpired') }}
+            </p>
+          </div>
+
+          <!-- Prompt -->
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Prompt
+              </h4>
+              <Button
+                variant="outline"
+                size="sm"
+                class="h-6 px-2 text-xs"
+                @click="copyToClipboard(displayTaskDescription(selectedTask))"
+              >
+                <Copy class="w-3 h-3 mr-1" /> {{ t('common.copy') }}
+              </Button>
+            </div>
+            <div class="p-3 bg-muted/50 rounded-lg border border-border/60 text-sm whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-relaxed">
+              {{ displayTaskDescription(selectedTask) }}
+            </div>
+          </div>
+
+          <!-- 视频信息（网格布局） -->
+          <div
+            v-if="selectedTask.video_duration_seconds || selectedTask.resolution || selectedTask.aspect_ratio || selectedTask.size"
+            class="space-y-2"
+          >
+            <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              {{ t('ui.videoInformation') }}
+            </h4>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div
+                v-if="selectedTask.video_duration_seconds"
+                class="p-3 bg-muted/30 rounded-lg"
+              >
+                <p class="text-xs text-muted-foreground mb-0.5">
+                  {{ t('ui.videoDuration') }}
+                </p>
+                <p class="text-sm font-medium">
+                  {{ selectedTask.video_duration_seconds.toFixed(1) }}s
+                </p>
+              </div>
+              <div
+                v-if="selectedTask.resolution"
+                class="p-3 bg-muted/30 rounded-lg"
+              >
+                <p class="text-xs text-muted-foreground mb-0.5">
+                  {{ t('ui.resolution') }}
+                </p>
+                <p class="text-sm font-medium">
+                  {{ selectedTask.resolution }}
+                </p>
+              </div>
+              <div
+                v-if="selectedTask.aspect_ratio"
+                class="p-3 bg-muted/30 rounded-lg"
+              >
+                <p class="text-xs text-muted-foreground mb-0.5">
+                  {{ t('ui.aspectRatio') }}
+                </p>
+                <p class="text-sm font-medium">
+                  {{ selectedTask.aspect_ratio }}
+                </p>
+              </div>
+              <div
+                v-if="selectedTask.size"
+                class="p-3 bg-muted/30 rounded-lg"
+              >
+                <p class="text-xs text-muted-foreground mb-0.5">
+                  {{ t('ui.dimensions') }}
+                </p>
+                <p class="text-sm font-medium">
+                  {{ selectedTask.size }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 执行状态（网格布局） -->
+          <div class="space-y-2">
+            <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              {{ t('ui.executionStatus') }}
+            </h4>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div class="p-3 bg-muted/30 rounded-lg">
+                <p class="text-xs text-muted-foreground mb-0.5">
+                  {{ t('ui.polling') }}
+                </p>
+                <p class="text-sm font-medium">
+                  {{ selectedTask.poll_count ?? selectedTask.attempt ?? 0 }} / {{ selectedTask.max_poll_count ?? selectedTask.max_attempts ?? 1 }}
+                </p>
+              </div>
+              <div class="p-3 bg-muted/30 rounded-lg">
+                <p class="text-xs text-muted-foreground mb-0.5">
+                  {{ t('vscodex.connection.retry') }}
+                </p>
+                <p class="text-sm font-medium">
+                  {{ selectedTask.retry_count ?? 0 }} / {{ selectedTask.max_retries ?? selectedTask.max_attempts ?? 1 }}
+                </p>
+              </div>
+              <div class="p-3 bg-muted/30 rounded-lg">
+                <p class="text-xs text-muted-foreground mb-0.5">
+                  {{ t('ui.pollingInterval') }}
+                </p>
+                <p class="text-sm font-medium">
+                  {{ selectedTask.poll_interval_seconds ? `${selectedTask.poll_interval_seconds}s` : selectedTask.trigger ?? '-' }}
+                </p>
+              </div>
+              <div
+                v-if="selectedTask.next_poll_at"
+                class="p-3 bg-muted/30 rounded-lg"
+              >
+                <p class="text-xs text-muted-foreground mb-0.5">
+                  {{ t('ui.nextPoll') }}
+                </p>
+                <p class="text-sm font-medium">
+                  {{ formatDateTimeCompact(selectedTask.next_poll_at) }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 时间范围 -->
+          <div class="space-y-2">
+            <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              {{ t('ui.timeRange') }}
+            </h4>
+            <div class="flex items-center gap-1 text-sm font-medium">
+              <span>{{ formatTimeWithMs(selectedTask.created_at) }}</span>
+              <span class="time-arrow-container">
+                <span
+                  v-if="finishTime(selectedTask)"
+                  class="time-duration"
+                >+{{ calcDuration(selectedTask.created_at, finishTime(selectedTask) || selectedTask.created_at) }}</span>
+                <span class="time-arrow">→</span>
+              </span>
+              <template v-if="finishTime(selectedTask)">
+                <span>{{ formatTimeWithMs(finishTime(selectedTask)) }}</span>
+              </template>
+              <span
+                v-else
+                class="text-muted-foreground"
+              >{{ t('ui.processingc1fd812') }}</span>
+            </div>
+          </div>
+
+          <!-- 响应数据 -->
+          <div
+            v-if="selectedTask.request_metadata?.poll_raw_response"
+            class="space-y-2"
+          >
+            <div class="flex items-center justify-between">
+              <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-2">
+                <FileJson class="w-3.5 h-3.5" /> {{ t('ui.responseData') }}
+              </h4>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-5 px-1.5 text-xs"
+                @click="copyToClipboard(JSON.stringify(selectedTask.request_metadata.poll_raw_response, null, 2))"
+              >
+                <Copy class="w-3 h-3 mr-1" /> {{ t('common.copy') }}
+              </Button>
+            </div>
+            <div class="p-3 bg-muted/50 rounded-lg border border-border/40 overflow-x-auto max-h-48 overflow-y-auto">
+              <pre class="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80">{{ formatJson(selectedTask.request_metadata.poll_raw_response) }}</pre>
+            </div>
+          </div>
+
+          <!-- 操作按钮 -->
+          <div
+            v-if="authStore.canOperateAdmin && canCancel(selectedTask.status)"
+            class="pt-4 border-t border-border/60"
+          >
+            <Button
+              variant="destructive"
+              class="w-full"
+              @click="cancelTask(selectedTask)"
+            >
+              <XCircle class="w-4 h-4 mr-2" /> {{ t('ui.cancelTask') }}
+            </Button>
+          </div>
         </div>
-      </Transition>
-    </Teleport>
+      </template>
+    </Drawer>
 
     <!-- 使用记录详情抽屉 -->
     <RequestDetailDrawer
@@ -862,8 +845,9 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { asyncTasksApi, type AsyncTaskItem, type AsyncTaskDetail, type AsyncTaskStatsResponse, type AsyncTaskStatus } from '@/api/async-tasks'
 import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
-import { getI18nLocale, useI18n } from '@/i18n'
+import { useI18n } from '@/i18n'
 import Card from '@/components/ui/card.vue'
+import Drawer from '@/components/ui/drawer/Drawer.vue'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
 import Badge from '@/components/ui/badge.vue'
@@ -879,7 +863,7 @@ import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import Pagination from '@/components/ui/pagination.vue'
-import { RequestDetailDrawer } from '@/features/usage/components'
+import RequestDetailDrawer from '@/features/usage/components/RequestDetailDrawer.vue'
 import {
   Zap,
   Video,
@@ -901,11 +885,12 @@ import {
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { log } from '@/utils/logger'
+import { formatDateTimeCompact, formatDateTimeFull } from '@/utils/format'
 
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.canAccessAdmin)
 const { toast } = useToast()
-const { legacyT } = useI18n()
+const { t } = useI18n()
 const { copyToClipboard } = useClipboard()
 
 // 状态
@@ -986,7 +971,7 @@ async function fetchTasks() {
     total.value = response.total
   } catch (error: unknown) {
     toast({
-      title: '获取任务列表失败',
+      get title() { return t('ui.failedToLoadTaskList') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive',
     })
@@ -1023,7 +1008,7 @@ async function openTaskDetail(task: AsyncTaskItem) {
     await loadAuthenticatedVideo(detail)
   } catch (error: unknown) {
     toast({
-      title: '获取任务详情失败',
+      get title() { return t('ui.failedToLoadTaskDetails') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive',
     })
@@ -1039,7 +1024,7 @@ async function refreshTaskDetail() {
     await loadAuthenticatedVideo(detail)
   } catch (error: unknown) {
     toast({
-      title: '刷新失败',
+      get title() { return t('ui.refreshFailed') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive',
     })
@@ -1101,14 +1086,14 @@ async function openUsageRecord(task: AsyncTaskItem) {
       usageDetailOpen.value = true
     } else {
       toast({
-        title: '无法打开使用记录',
-        description: '该任务没有关联的请求ID',
+        get title() { return t('ui.unableToOpenUsageRecord') },
+        get description() { return t('ui.thisTaskHasNoLinkedRequestId') },
         variant: 'destructive',
       })
     }
   } catch (error: unknown) {
     toast({
-      title: '获取任务信息失败',
+      get title() { return t('ui.failedToLoadTaskInformation') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive',
     })
@@ -1117,11 +1102,11 @@ async function openUsageRecord(task: AsyncTaskItem) {
 
 // 取消任务
 async function cancelTask(task: AsyncTaskItem | AsyncTaskDetail) {
-  if (!confirm(legacyT('确定要取消这个任务吗？'))) return
+  if (!confirm(t('ui.cancelThisTask'))) return
   try {
     await asyncTasksApi.cancel(task.id)
     toast({
-      title: '任务已取消',
+      get title() { return t('ui.taskCanceled') },
     })
     await refreshOverview()
     if (showDetail.value) {
@@ -1129,7 +1114,7 @@ async function cancelTask(task: AsyncTaskItem | AsyncTaskDetail) {
     }
   } catch (error: unknown) {
     toast({
-      title: '取消任务失败',
+      get title() { return t('ui.failedToCancelTask') },
       description: error instanceof Error ? error.message : String(error),
       variant: 'destructive',
     })
@@ -1153,49 +1138,23 @@ function getStatusVariant(status: string): 'default' | 'secondary' | 'destructiv
 
 function getStatusLabel(status: string): string {
   const labels: Record<string, string> = {
-    pending: '待处理',
+    get pending() { return t('ui.actionNeeded') },
     submitted: '已提交',
-    queued: '排队中',
-    running: '运行中',
-    retrying: '重试中',
-    processing: '处理中',
-    succeeded: '成功',
-    completed: '已完成',
-    failed: '失败',
-    cancelled: '已取消',
-    skipped: '已跳过',
+    get queued() { return t('ui.queuedd6f766f') },
+    get running() { return t('ui.running1f0eb99') },
+    get retrying() { return t('ui.retrying') },
+    get processing() { return t('ui.processing694b71b') },
+    get succeeded() { return t('ui.success') },
+    get completed() { return t('site.home.status.completed') },
+    get failed() { return t('ui.failed28384d7') },
+    get cancelled() { return t('ui.canceled') },
+    get skipped() { return t('ui.skipped71e95b2') },
   }
   return labels[status] || status
 }
 
 function canCancel(status: string): boolean {
   return ['pending', 'submitted', 'queued', 'processing', 'running', 'retrying'].includes(status)
-}
-
-// 格式化日期（简短格式，用于表格列表）
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleString(getI18nLocale(), {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-// 格式化日期（完整格式，用于详情）
-function formatDateFull(dateStr: string | null): string {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleString(getI18nLocale(), {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
 }
 
 // 格式化时间（带毫秒，用于时间范围）
@@ -1284,7 +1243,6 @@ function calcDuration(startStr: string, endStr: string): string {
   const secs = Math.floor(diffS % 60)
   return `${mins}m${secs}s`
 }
-
 
 // 格式化 JSON
 function formatJson(obj: unknown): string {
@@ -1388,27 +1346,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.drawer-enter-active,
-.drawer-leave-active {
-  transition: all 0.3s ease;
-}
-.drawer-enter-active > div:first-child,
-.drawer-leave-active > div:first-child {
-  transition: opacity 0.3s ease;
-}
-.drawer-enter-active > div:last-child,
-.drawer-leave-active > div:last-child {
-  transition: transform 0.3s ease;
-}
-.drawer-enter-from,
-.drawer-leave-to {
-  opacity: 0;
-}
-.drawer-enter-from > div:last-child,
-.drawer-leave-to > div:last-child {
-  transform: translateX(100%);
-}
-
 /* 时间范围箭头容器 */
 .time-arrow-container {
   position: relative;

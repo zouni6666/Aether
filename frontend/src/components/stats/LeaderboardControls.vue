@@ -12,17 +12,17 @@
       @update:model-value="emitMetric"
     >
       <SelectTrigger class="h-8 text-xs w-28">
-        <SelectValue placeholder="指标" />
+        <SelectValue :placeholder="t('stats.metric.placeholder')" />
       </SelectTrigger>
       <SelectContent>
         <SelectItem value="requests">
-          请求数
+          {{ t('stats.metric.requests') }}
         </SelectItem>
         <SelectItem value="tokens">
           Tokens
         </SelectItem>
         <SelectItem value="cost">
-          成本
+          {{ t('stats.metric.cost') }}
         </SelectItem>
       </SelectContent>
     </Select>
@@ -30,6 +30,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { TimeRangePicker } from '@/components/common'
 import {
   Select,
@@ -53,6 +55,8 @@ const emit = defineEmits<{
   (e: 'update:timeRange', value: DateRangeParams): void
 }>()
 
+const { t } = useI18n()
+
 const timeRangePresetOptions: LeaderboardTimeRangePreset[] = [
   'today',
   'yesterday',
@@ -67,4 +71,5 @@ function emitMetric(value: string) {
     emit('update:metric', value)
   }
 }
+
 </script>

@@ -9,15 +9,13 @@ const source = readFileSync(
 
 describe('ProviderDetailDrawer loading priorities', () => {
   it('plays the drawer transition when the lazily mounted component first appears', () => {
-    const transitionTemplate = source
-      .split('<Transition')[1]
+    const drawerTemplate = source
+      .split('<Drawer')[1]
       ?.split('>')[0]
 
-    expect(transitionTemplate).toContain('name="drawer"')
-    expect(transitionTemplate).toContain('appear')
-    expect(source).toContain('class="drawer-panel relative')
-    expect(source).toContain('.drawer-enter-from .drawer-panel')
-    expect(source).not.toContain('.drawer-enter-from .relative')
+    expect(drawerTemplate).toBeTruthy()
+    expect(drawerTemplate).toContain('appear')
+    expect(drawerTemplate).toContain('backdrop-class="bg-black/30"')
   })
 
   it('loads mapping preview after first-screen provider data', () => {
@@ -43,12 +41,11 @@ describe('ProviderDetailDrawer loading priorities', () => {
   })
 
   it('shows the provider-wide key total in the paginated footer', () => {
-    expect(source).toContain("{{ legacyT('共') }} {{ providerKeysTotal }}")
-    expect(source).not.toContain("{{ legacyT('共') }} {{ allKeys.length }}")
+    expect(source).toContain("{{ t('ui.total76e547a') }} {{ providerKeysTotal }}")
+    expect(source).not.toContain("{{ t('ui.total76e547a') }} {{ allKeys.length }}")
   })
 
   it('does not mount closed child dialogs or blur the page behind the drawer', () => {
-    expect(source).toContain('class="absolute inset-0 bg-black/30"')
     expect(source).not.toContain('backdrop-blur-sm')
     expect(source).toContain('v-if="provider && open && endpointDialogOpen"')
     expect(source).toContain('v-if="open && keyFormDialogOpen"')

@@ -25,12 +25,12 @@
             v-if="mappingModel"
             class="min-w-0 break-all whitespace-normal"
             data-usage-model-mapping
-          ><span class="mr-1 text-[10px] text-muted-foreground/70">映射模型</span>{{ mappingModel }}</span>
+          ><span class="mr-1 text-[10px] text-muted-foreground/70">{{ t('ui.mappedModel') }}</span>{{ mappingModel }}</span>
           <span
             v-if="responseModel"
             class="min-w-0 break-all whitespace-normal"
             data-usage-model-response
-          ><span class="mr-1 text-[10px] text-muted-foreground/70">响应模型</span>{{ responseModel }}</span>
+          ><span class="mr-1 text-[10px] text-muted-foreground/70">{{ t('ui.responseModel') }}</span>{{ responseModel }}</span>
         </div>
       </template>
       <template v-if="!shouldStackBadges">
@@ -74,6 +74,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed } from 'vue'
 
 import { Badge } from '@/components/ui'
@@ -124,6 +126,8 @@ const props = withDefaults(defineProps<{
   showReasoningBadge: true,
 })
 
+const { t } = useI18n()
+
 const mappingModel = computed(() => {
   const targetModel = normalizeText(props.record.target_model)
   if (targetModel && targetModel !== normalizeText(props.record.model)) return targetModel
@@ -152,10 +156,10 @@ const modelBadges = computed<ModelBadgePresentation[]>(() => {
   if (normalizeText(props.record.request_type)?.toLowerCase() === 'compact') {
     badges.push({
       key: 'compact',
-      label: '会话压缩',
+      get label() { return t('ui.sessionCompaction') },
       variant: 'outline',
       className: 'border-sky-500/30 bg-sky-500/5 text-sky-700 dark:text-sky-300',
-      title: '会话压缩',
+      get title() { return t('ui.sessionCompaction') },
       ariaLabel: '会话压缩',
     })
   }
@@ -189,7 +193,7 @@ const modelBadges = computed<ModelBadgePresentation[]>(() => {
       label: 'Cyber',
       variant: 'outline',
       className: 'border-primary/30 bg-primary/5 text-rose-500 dark:text-rose-300',
-      title: '上游 Cyber Policy 拒绝',
+      get title() { return t('ui.rejectedByUpstreamCyberPolicy') },
       ariaLabel: '上游 Cyber Policy 拒绝',
     })
   }
@@ -219,4 +223,5 @@ function formatCompactTokens(value: number): string {
   if (value < 1000) return `${value} Tokens`
   return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K Tokens`
 }
+
 </script>

@@ -4,7 +4,7 @@
       v-if="showSchedulingMode"
       class="space-y-1 text-sm"
     >
-      <span class="text-muted-foreground">调度策略</span>
+      <span class="text-muted-foreground">{{ t('nav.routing') }}</span>
       <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/40 p-1">
         <button
           v-for="mode in schedulingModes"
@@ -25,7 +25,7 @@
       <div class="flex flex-col gap-3 border-b border-border/60 px-4 py-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h3 class="text-sm font-medium">
-            提供商排序
+            {{ t('ui.providerOrder') }}
           </h3>
           <p class="mt-1 text-xs text-muted-foreground">
             {{ subtitle }}
@@ -41,7 +41,7 @@
             @click="toggleProviderMultiSelect"
           >
             <ListChecks class="h-3.5 w-3.5" />
-            {{ providerMultiSelectEnabled ? '退出多选' : '多选' }}
+            {{ providerMultiSelectEnabled ? t('ui.exitMultiselect') : t('ui.multiselect') }}
             <span v-if="providerMultiSelectEnabled && selectedProviderIds.size">{{ selectedProviderIds.size }}</span>
           </button>
         </div>
@@ -49,8 +49,7 @@
 
       <div class="space-y-3 border-b border-border/60 bg-muted/15 px-4 py-3">
         <p class="text-xs leading-relaxed text-muted-foreground">
-          {{ schedulingDescription }}
-          优先级数字越小越先，可填写相同数字。移动或拖动会重新编号，未拆开的同级组保留。
+          {{ schedulingDescription }} {{ t('ui.lowerNumbersHaveHigherPriorityEqualValuesAreAllowedMoving') }}
         </p>
         <div class="flex flex-wrap items-center gap-3">
           <label class="relative min-w-0 flex-1 sm:max-w-sm">
@@ -58,20 +57,19 @@
             <input
               v-model="searchQuery"
               type="search"
-              aria-label="搜索调度提供商"
-              placeholder="搜索提供商名称"
+              :aria-label="t('ui.searchSchedulingProviders')"
+              :placeholder="t('ui.searchProviderNamesccb6d4a')"
               class="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm"
             >
           </label>
           <span class="text-xs text-muted-foreground">
-            {{ visibleRowCount }} / {{ totalRowCount }} 项
-          </span>
+            {{ visibleRowCount }} / {{ totalRowCount }} {{ t('ui.items') }} </span>
         </div>
         <p
           v-if="searchQuery.trim()"
           class="text-xs text-muted-foreground"
         >
-          搜索仅用于定位；移动按完整列表执行，置顶和置底会越过隐藏项。
+          {{ t('ui.searchHelpsLocateProvidersMovesUseTheFullListMoving') }}
         </p>
       </div>
 
@@ -80,7 +78,7 @@
           v-if="loading"
           class="py-10 text-center text-sm text-muted-foreground"
         >
-          正在加载
+          {{ t('ui.loadingf020e46') }}
         </div>
         <div
           v-else-if="loadError"
@@ -96,7 +94,7 @@
             v-if="filteredProviderRows.length === 0"
             class="rounded-lg border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground"
           >
-            {{ providerRows.length ? '没有匹配的提供商' : '暂无 Provider' }}
+            {{ providerRows.length ? t('ui.noMatchingProviders9ada1d4') : t('ui.noProviderse1e945c') }}
           </div>
           <div
             v-for="row in filteredProviderRows"
@@ -115,7 +113,7 @@
               v-if="providerMultiSelectEnabled"
               class="shrink-0"
               :checked="isProviderSelected(row.id)"
-              :aria-label="`选择 ${row.name}`"
+              :aria-label="t('ui.selectValue', { name: row.name })"
               @click.stop
               @change.stop
               @update:checked="checked => setProviderSelected(row.id, checked)"
@@ -142,7 +140,7 @@
             </div>
             <input
               :value="row.priority"
-              :aria-label="`${row.name} 优先级`"
+              :aria-label="t('ui.valuePriority', { name: row.name })"
               type="number"
               min="0"
               class="priority-input h-8 w-14 rounded-md border border-border bg-background px-2 text-center text-sm"
@@ -153,7 +151,7 @@
                 <button
                   type="button"
                   class="truncate text-left text-sm font-medium hover:text-primary hover:underline"
-                  :aria-label="`查看提供商 ${row.name}`"
+                  :aria-label="t('ui.viewProviderValue', { name: row.name })"
                   @click="emit('inspect-provider', row.id)"
                 >
                   {{ row.name }}
@@ -165,16 +163,16 @@
                 <span
                   v-if="!row.is_active"
                   class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
-                >停用</span>
+                >{{ t('ui.disable4e6fd0e') }}</span>
                 <span
                   v-if="!isRoutingProviderEnabled(config, row.id, targetModelPolicy)"
                   class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
-                >本组禁用</span>
+                >{{ t('ui.disabledInGroup') }}</span>
               </div>
               <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                <span v-if="row.active_keys != null">可用 Key {{ row.active_keys }} / {{ row.total_keys }}</span>
+                <span v-if="row.active_keys != null">{{ t('ui.availableKeys') }} {{ row.active_keys }} / {{ row.total_keys }}</span>
                 <span :class="row.health_score != null && row.health_score < 0.8 ? 'text-amber-600 dark:text-amber-400' : ''">
-                  {{ row.health_score == null ? '健康度暂无数据' : `健康度 ${Math.round(row.health_score * 100)}%` }}
+                  {{ row.health_score == null ? t('ui.noHealthDataAvailable') : t('ui.healthValue', { value: Math.round(row.health_score * 100) }) }}
                 </span>
                 <slot
                   name="provider-status"
@@ -198,6 +196,26 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const props = defineProps<{
+  config: RoutingGroupConfig
+  model?: string
+  modelId?: string
+  providerModelIds?: string[]
+  schedulingMode?: RoutingSchedulingMode
+  showSchedulingMode?: boolean
+  subtitle?: string
+  refreshRevision?: number
+}>()
+
+const emit = defineEmits<{
+  'update:config': [value: RoutingGroupConfig]
+  'update:scheduling-mode': [value: RoutingSchedulingMode]
+  'inspect-provider': [providerId: string]
+}>()
+
+const { t } = useI18n()
+
 import { computed, onMounted, ref, watch } from 'vue'
 import { ArrowDown, ArrowUp, ChevronsDown, ChevronsUp, GripVertical, ListChecks, Search } from 'lucide-vue-next'
 
@@ -234,33 +252,16 @@ interface ProviderPriorityRow {
   health_score: number | null
 }
 
-const props = defineProps<{
-  config: RoutingGroupConfig
-  model?: string
-  modelId?: string
-  providerModelIds?: string[]
-  schedulingMode?: RoutingSchedulingMode
-  showSchedulingMode?: boolean
-  subtitle?: string
-  refreshRevision?: number
-}>()
-
-const emit = defineEmits<{
-  'update:config': [value: RoutingGroupConfig]
-  'update:scheduling-mode': [value: RoutingSchedulingMode]
-  'inspect-provider': [providerId: string]
-}>()
-
 const schedulingModes: Array<{ value: RoutingDefaultPolicy['scheduling_mode']; label: string }> = [
-  { value: 'cache_affinity', label: '缓存亲和' },
-  { value: 'load_balance', label: '负载均衡' },
-  { value: 'fixed_order', label: '固定顺序' },
+  { value: 'cache_affinity', get label() { return t('ui.cacheAffinity951ca1e') } },
+  { value: 'load_balance', get label() { return t('ui.loadBalancing9550295') } },
+  { value: 'fixed_order', get label() { return t('ui.fixedOrder2d32d74') } },
 ]
 const providerMoveActions = [
-  { label: '置顶', direction: -1, edge: 'start', icon: ChevronsUp },
-  { label: '上移', direction: -1, edge: null, icon: ArrowUp },
-  { label: '下移', direction: 1, edge: null, icon: ArrowDown },
-  { label: '置底', direction: 1, edge: 'end', icon: ChevronsDown },
+  { get label() { return t('ui.pin') }, direction: -1, edge: 'start', icon: ChevronsUp },
+  { get label() { return t('ui.moveUp') }, direction: -1, edge: null, icon: ArrowUp },
+  { get label() { return t('ui.moveDown') }, direction: 1, edge: null, icon: ArrowDown },
+  { get label() { return t('routing.moveToBottom') }, direction: 1, edge: 'end', icon: ChevronsDown },
 ] as const
 
 const providers = ref<ProviderWithEndpointsSummary[]>([])
@@ -280,11 +281,11 @@ const targetModelPolicy = computed(() => targetModel.value === DEFAULT_ROUTING_P
   : getModelPolicy(config.value, targetModel.value))
 const showSchedulingMode = computed(() => props.showSchedulingMode !== false)
 const effectiveSchedulingMode = computed(() => props.schedulingMode ?? config.value.default_policy.scheduling_mode)
-const subtitle = computed(() => props.subtitle ?? '默认作用于全部模型')
+const subtitle = computed(() => props.subtitle ?? t('routing.defaultModelScope'))
 const schedulingDescription = computed(() => {
-  if (effectiveSchedulingMode.value === 'fixed_order') return '固定顺序：优先级决定候选的尝试次序，实际可用候选还受模型能力和 API 格式影响。'
-  if (effectiveSchedulingMode.value === 'load_balance') return '负载均衡：请求会分散到可用候选，列表优先级不代表实际尝试顺序。'
-  return '缓存亲和：会优先复用缓存命中的候选，实际顺序可能与列表不同。'
+  if (effectiveSchedulingMode.value === 'fixed_order') return t('routing.fixedOrderDescription')
+  if (effectiveSchedulingMode.value === 'load_balance') return t('routing.loadBalanceDescription')
+  return t('routing.cacheAffinityDescription')
 })
 const loading = computed(() => loadingProviders.value)
 const providerGridClass = computed(() => providerMultiSelectEnabled.value
@@ -398,7 +399,7 @@ async function loadProviders(): Promise<void> {
     providers.value = response.items
   } catch (err) {
     if (requestId !== providerLoadRequestId) return
-    loadError.value = parseApiError(err, '加载 Provider 失败')
+    loadError.value = parseApiError(err, t('routing.providerLoadFailed'))
     providers.value = []
   } finally {
     if (requestId === providerLoadRequestId) {
@@ -657,6 +658,7 @@ function comparePriorityRows(left: ProviderPriorityRow, right: ProviderPriorityR
     || left.name.localeCompare(right.name)
     || left.id.localeCompare(right.id)
 }
+
 </script>
 
 <style scoped>

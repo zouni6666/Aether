@@ -59,7 +59,7 @@
                 v-else-if="entry.status === 'added'"
                 class="flex items-start bg-muted/30 px-3 py-0.5"
               >
-                <span class="text-muted-foreground/30 italic">（无）</span>
+                <span class="text-muted-foreground/30 italic">{{ t('ui.none') }}</span>
               </div>
               <!-- 未变化的行 -->
               <div
@@ -131,7 +131,7 @@
         :view-mode="viewMode"
         :expand-depth="currentExpandDepth"
         :is-dark="isDark"
-        empty-message="无请求头信息"
+        :empty-message="t('ui.noRequestHeaders1eaacce')"
       />
     </div>
 
@@ -141,7 +141,7 @@
         v-if="!currentHeaderData || Object.keys(currentHeaderData).length === 0"
         class="text-sm text-muted-foreground"
       >
-        无请求头信息
+        {{ t('ui.noRequestHeaders1eaacce') }}
       </div>
       <Card
         v-else
@@ -156,6 +156,8 @@
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+
 import { computed, ref } from 'vue'
 import Card from '@/components/ui/card.vue'
 import JsonContent from './JsonContent.vue'
@@ -179,10 +181,12 @@ const props = withDefaults(defineProps<{
 }>(), {
   clientHeaders: undefined,
   providerHeaders: undefined,
-  clientLabel: '客户端请求头',
-  providerLabel: '提供商请求头',
-  emptyMessage: '无请求头信息',
+  clientLabel: undefined,
+  providerLabel: undefined,
+  emptyMessage: undefined,
 })
+
+const { t } = useI18n()
 
 // 解析实际使用的 header 数据
 const resolvedClientHeaders = computed(() =>
@@ -246,4 +250,10 @@ const sortedEntries = computed(() => {
     }
   })
 })
+
+const clientLabel = computed(() => props.clientLabel ?? t('ui.clientRequestHeaders'))
+
+const providerLabel = computed(() => props.providerLabel ?? t('ui.providerRequestHeaders'))
+
+const emptyMessage = computed(() => props.emptyMessage ?? t('ui.noRequestHeaders1eaacce'))
 </script>

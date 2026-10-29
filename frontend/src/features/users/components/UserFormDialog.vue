@@ -21,10 +21,10 @@
           </div>
           <div class="flex-1 min-w-0">
             <h3 class="text-lg font-semibold text-foreground leading-tight">
-              {{ legacyT(isEditMode ? '编辑用户' : '新增用户') }}
+              {{ isEditMode ? t('ui.editUser') : t('ui.addUser') }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ legacyT(isEditMode ? '修改用户账户信息' : '创建新的系统用户账户') }}
+              {{ isEditMode ? t('ui.editUserAccountInformation') : t('ui.createANewSystemUserAccount') }}
             </p>
           </div>
         </div>
@@ -41,7 +41,7 @@
             <Label
               for="form-username"
               class="text-sm font-medium"
-            >{{ legacyT('用户名') }} <span class="text-muted-foreground">*</span></Label>
+            >{{ t('auth.register.username') }} <span class="text-muted-foreground">*</span></Label>
             <Input
               id="form-username"
               v-model="form.username"
@@ -64,7 +64,7 @@
             <Label
               for="form-role"
               class="text-sm font-medium"
-            >{{ legacyT('用户角色') }}</Label>
+            >{{ t('ui.userRole') }}</Label>
             <div class="w-full">
               <Select v-model="form.role">
                 <SelectTrigger
@@ -75,13 +75,13 @@
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="user">
-                    {{ legacyT('普通用户') }}
+                    {{ t('ui.user') }}
                   </SelectItem>
                   <SelectItem value="admin">
-                    {{ legacyT('管理员') }}
+                    {{ t('auth.role.admin') }}
                   </SelectItem>
                   <SelectItem value="audit_admin">
-                    {{ legacyT('审计管理员') }}
+                    {{ t('auth.role.auditAdmin') }}
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -93,7 +93,7 @@
           <Label
             for="form-email"
             class="text-sm font-medium"
-          >{{ legacyT('邮箱') }}</Label>
+          >{{ t('auth.register.email') }}</Label>
           <Input
             id="form-email"
             v-model="form.email"
@@ -106,7 +106,7 @@
 
         <div class="space-y-2">
           <Label class="text-sm font-medium">
-            {{ legacyT(isEditMode ? '新密码 (留空保持不变)' : '密码') }}
+            {{ isEditMode ? t('ui.newPasswordLeaveEmptyToKeepUnchanged') : t('auth.register.password') }}
             <span
               v-if="!isEditMode"
               class="text-muted-foreground"
@@ -122,7 +122,7 @@
             :name="`field-${formNonce}`"
             :required="!isEditMode"
             minlength="6"
-            :placeholder="isEditMode ? legacyT('留空保持原密码') : legacyT(getPasswordPolicyPlaceholder(passwordPolicyLevel))"
+            :placeholder="isEditMode ? t('ui.leaveEmptyToKeepTheCurrentPassword') : getPasswordPolicyPlaceholder(passwordPolicyLevel)"
             class="h-10"
             :class="[
               passwordError ? 'border-destructive' : '',
@@ -132,13 +132,13 @@
             v-if="passwordError"
             class="text-xs text-destructive"
           >
-            {{ legacyT(passwordError) }}
+            {{ passwordError }}
           </p>
           <p
             v-else-if="!isEditMode"
             class="text-xs text-muted-foreground"
           >
-            {{ legacyT(passwordHint) }}
+            {{ passwordHint }}
           </p>
         </div>
 
@@ -147,7 +147,7 @@
           class="space-y-2"
         >
           <Label class="text-sm font-medium">
-            {{ legacyT('确认新密码') }} <span class="text-muted-foreground">*</span>
+            {{ t('ui.confirmNewPassword') }} <span class="text-muted-foreground">*</span>
           </Label>
           <Input
             :id="`pwd-confirm-${formNonce}`"
@@ -160,7 +160,7 @@
             :name="`confirm-${formNonce}`"
             required
             minlength="6"
-            :placeholder="legacyT('再次输入新密码')"
+            :placeholder="t('ui.enterTheNewPasswordAgain')"
             class="h-10"
           />
           <p
@@ -170,24 +170,24 @@
             "
             class="text-xs text-destructive"
           >
-            {{ legacyT('两次输入的密码不一致') }}
+            {{ t('auth.register.passwordMismatch') }}
           </p>
         </div>
 
         <div class="space-y-2">
-          <Label class="text-sm font-medium">{{ legacyT('所属分组') }}</Label>
+          <Label class="text-sm font-medium">{{ t('ui.groups') }}</Label>
           <MultiSelect
             v-model="form.group_ids"
             :options="groupOptions"
             :search-threshold="0"
-            :placeholder="legacyT('可选择多个分组')"
-            :empty-text="legacyT('暂无分组')"
-            :no-results-text="legacyT('未找到匹配的分组')"
+            :placeholder="t('ui.selectOneOrMoreGroups')"
+            :empty-text="t('ui.noGroups')"
+            :no-results-text="t('ui.noMatchingGroupsFound')"
           />
         </div>
 
         <div class="space-y-2">
-          <Label class="text-sm font-medium">{{ legacyT('额度') }}</Label>
+          <Label class="text-sm font-medium">{{ t('poolQuota.claudeCode.unknownWindow') }}</Label>
           <div class="flex items-center gap-3">
             <div class="flex-1 min-w-0">
               <Input
@@ -197,14 +197,14 @@
                 type="number"
                 step="0.01"
                 min="0.01"
-                :placeholder="legacyT('初始额度 (USD)')"
+                :placeholder="t('ui.initialQuotaUsd')"
                 class="h-10"
                 @update:model-value="(v) => form.initial_gift_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
               />
               <span
                 v-else
                 class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-              >{{ legacyT(form.unlimited ? '无限制' : '按钱包余额限制') }}</span>
+              >{{ form.unlimited ? t('ui.unlimited9ee3c07') : t('ui.limitedByWalletBalance') }}</span>
             </div>
             <Switch
               v-model="form.unlimited"
@@ -215,14 +215,14 @@
 
         <div class="rounded-lg border border-border bg-muted/30 p-3">
           <div class="mb-3 text-xs font-semibold text-muted-foreground">
-            {{ legacyT('功能权限') }}
+            {{ t('ui.featurePermissions') }}
           </div>
           <div class="flex items-center justify-between gap-3">
-            <Label class="text-sm font-medium">{{ legacyT('敏感信息保护') }}</Label>
+            <Label class="text-sm font-medium">{{ t('ui.sensitiveInformationProtection') }}</Label>
             <Switch v-model="form.chat_pii_redaction_enabled" />
           </div>
           <div class="mt-3 flex items-center justify-between gap-3">
-            <Label class="text-sm font-medium">{{ legacyT('占位符说明') }}</Label>
+            <Label class="text-sm font-medium">{{ t('ui.placeholderNotes') }}</Label>
             <Switch
               v-model="form.chat_pii_redaction_placeholder_notice"
               :disabled="!form.chat_pii_redaction_enabled"
@@ -230,9 +230,9 @@
           </div>
           <div class="mt-3 flex items-center justify-between gap-3 border-t border-border/60 pt-3">
             <div>
-              <Label class="text-sm font-medium">{{ legacyT('通知推送服务') }}</Label>
+              <Label class="text-sm font-medium">{{ t('ui.notificationPushService') }}</Label>
               <p class="mt-1 text-xs text-muted-foreground">
-                {{ legacyT('允许用户配置自己的第三方推送渠道') }}
+                {{ t('ui.allowUsersToConfigureTheirOwnThirdPartyPushChannels') }}
               </p>
             </div>
             <Switch v-model="form.notification_push_service_enabled" />
@@ -248,14 +248,14 @@
         class="h-10 px-5"
         @click="handleCancel"
       >
-        {{ legacyT('取消') }}
+        {{ t('common.cancel') }}
       </Button>
       <Button
         class="h-10 px-5"
         :disabled="saving || !isFormValid"
         @click="handleSubmit"
       >
-        {{ legacyT(saving ? '处理中...' : isEditMode ? '更新' : '创建') }}
+        {{ saving ? t('ui.processingc1fd812') : isEditMode ? t('ui.update') : t('ui.create') }}
       </Button>
     </template>
   </Dialog>
@@ -345,7 +345,7 @@ const groupOptions = computed(() => (props.groups || []).map((group) => ({
   label: group.name,
   value: group.id,
 })))
-const { legacyT } = useI18n()
+const { t } = useI18n()
 
 function createFieldNonce(): string {
   return Math.random().toString(36).slice(2, 10)
@@ -405,10 +405,10 @@ const usernameRegex = /^[a-zA-Z0-9_.-]+$/
 const usernameError = computed(() => {
   const username = form.value.username.trim()
   if (!username) return ''
-  if (username.length < 3) return legacyT('用户名长度至少为3个字符')
-  if (username.length > 30) return legacyT('用户名长度不能超过30个字符')
+  if (username.length < 3) return t('auth.register.usernameTooShort')
+  if (username.length > 30) return t('auth.register.usernameTooLong')
   if (!usernameRegex.test(username))
-    return legacyT('用户名只能包含字母、数字、下划线、连字符和点号')
+    return t('auth.register.usernameInvalid')
   return ''
 })
 
@@ -438,7 +438,6 @@ const isFormValid = computed(() => {
     (typeof form.value.initial_gift_usd === 'number' && form.value.initial_gift_usd >= 0.01)
   return hasUsername && usernameValid && passwordValid && passwordConfirmed && initialGiftValid
 })
-
 
 async function loadPasswordPolicy(): Promise<void> {
   try {

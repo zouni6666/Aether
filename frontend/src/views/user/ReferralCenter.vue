@@ -2,10 +2,10 @@
   <div class="max-w-6xl space-y-6 pb-8">
     <div>
       <h1 class="text-2xl font-semibold text-foreground">
-        我的邀请
+        {{ t('nav.myReferral') }}
       </h1>
       <p class="mt-1 text-sm text-muted-foreground">
-        分享邀请链接，邀请好友注册
+        {{ t('ui.shareYourInviteLinkToInviteFriendsToSignUp') }}
       </p>
     </div>
 
@@ -17,8 +17,7 @@
       <Loader2
         class="h-4 w-4 animate-spin"
         aria-hidden="true"
-      />
-      正在加载...
+      /> {{ t('site.privacy.loading') }}
     </Card>
 
     <template v-else-if="dashboard">
@@ -33,18 +32,16 @@
             </div>
             <div>
               <h2 class="text-lg font-semibold">
-                邀请好友
+                {{ t('ui.inviteFriends') }}
               </h2>
               <p class="mt-1 text-sm text-muted-foreground">
-                将链接发送给好友，注册时会自动带上你的邀请码。
+                {{ t('ui.sendThisLinkToFriendsYourInviteCodeIsIncluded') }}
               </p>
             </div>
           </div>
 
           <div>
-            <Label for="referral-invitation-link">
-              邀请链接
-            </Label>
+            <Label for="referral-invitation-link"> {{ t('ui.inviteLink') }} </Label>
             <div class="mt-2 flex min-w-0 flex-col gap-3 sm:flex-row">
               <Input
                 id="referral-invitation-link"
@@ -61,15 +58,14 @@
                 <Copy
                   class="h-4 w-4"
                   aria-hidden="true"
-                />
-                复制邀请链接
+                /> {{ t('ui.copyInviteLink') }}
               </Button>
             </div>
           </div>
         </div>
 
         <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border/60 bg-muted/30 px-5 py-3 sm:px-6">
-          <span class="text-sm text-muted-foreground">邀请码</span>
+          <span class="text-sm text-muted-foreground">{{ t('auth.register.inviteCodeLabel') }}</span>
           <code class="break-all font-mono text-sm font-semibold tracking-wide">{{ dashboard.invite_code }}</code>
           <Button
             type="button"
@@ -81,27 +77,26 @@
             <Copy
               class="h-3.5 w-3.5"
               aria-hidden="true"
-            />
-            复制邀请码
+            /> {{ t('ui.copyInviteCode') }}
           </Button>
-          <span class="text-xs text-muted-foreground">邀请码已包含在上方链接中</span>
+          <span class="text-xs text-muted-foreground">{{ t('ui.yourInviteCodeIsIncludedInTheLinkAbove') }}</span>
         </div>
       </Card>
 
       <Card class="p-5 sm:p-6">
         <div class="mb-5">
           <h2 class="text-base font-semibold">
-            邀请与返利
+            {{ t('ui.referralsAndRewards') }}
           </h2>
           <p class="mt-1 text-sm text-muted-foreground">
-            符合规则的返利会进入赠款余额，可在钱包中心查看。
+            {{ t('ui.eligibleRewardsAreCreditedToYourGiftBalanceAndCan') }}
           </p>
         </div>
 
         <dl class="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-5">
           <div>
             <dt class="text-xs text-muted-foreground">
-              总邀请
+              {{ t('ui.totalReferrals') }}
             </dt>
             <dd class="mt-2 text-2xl font-semibold tabular-nums">
               {{ dashboard.summary.total_invites }}
@@ -109,7 +104,7 @@
           </div>
           <div>
             <dt class="text-xs text-muted-foreground">
-              有效邀请
+              {{ t('ui.effectiveReferrals') }}
             </dt>
             <dd class="mt-2 text-2xl font-semibold tabular-nums">
               {{ dashboard.summary.effective_invites }}
@@ -117,7 +112,7 @@
           </div>
           <div>
             <dt class="text-xs text-muted-foreground">
-              已发返利
+              {{ t('ui.issuedRewards') }}
             </dt>
             <dd class="mt-2 break-all text-2xl font-semibold tabular-nums text-primary">
               {{ formatUsd(dashboard.summary.paid_reward_usd) }}
@@ -125,7 +120,7 @@
           </div>
           <div>
             <dt class="text-xs text-muted-foreground">
-              待发返利
+              {{ t('ui.pendingRewards') }}
             </dt>
             <dd class="mt-2 break-all text-2xl font-semibold tabular-nums">
               {{ formatUsd(dashboard.summary.pending_reward_usd) }}
@@ -133,7 +128,7 @@
           </div>
           <div>
             <dt class="text-xs text-muted-foreground">
-              已冲回返利
+              {{ t('ui.reversedRewards') }}
             </dt>
             <dd class="mt-2 break-all text-2xl font-semibold tabular-nums">
               {{ formatUsd(dashboard.summary.reversed_reward_usd) }}
@@ -151,17 +146,17 @@
           />
           <div>
             <p class="text-sm font-medium">
-              还没有邀请记录
+              {{ t('ui.noReferralsYet') }}
             </p>
             <p class="mt-1 text-sm text-muted-foreground">
-              复制上方链接，开始邀请第一位好友。
+              {{ t('ui.copyTheLinkAboveToInviteYourFirstFriend') }}
             </p>
           </div>
         </div>
 
         <div class="mt-5 space-y-1 border-t border-border/60 pt-4 text-xs leading-relaxed text-muted-foreground">
-          <p>有效邀请：已完成首次付款的受邀用户。</p>
-          <p>待发返利尚未入账；返利发放与冲回明细以钱包流水为准。</p>
+          <p>{{ t('ui.effectiveReferralsInvitedUsersWhoHaveCompletedTheirFirstPayment') }}</p>
+          <p>{{ t('ui.pendingRewardsHaveNotBeenCreditedYetSeeTheWallet') }}</p>
         </div>
       </Card>
     </template>
@@ -171,7 +166,7 @@
       class="space-y-3 p-6"
     >
       <p class="text-sm text-muted-foreground">
-        邀请数据暂不可用
+        {{ t('ui.referralDataIsCurrentlyUnavailable') }}
       </p>
       <Button
         type="button"
@@ -183,14 +178,16 @@
         <RefreshCw
           class="h-4 w-4"
           aria-hidden="true"
-        />
-        重新加载
+        /> {{ t('ui.reload') }}
       </Button>
     </Card>
   </div>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from '@/i18n'
+const { t } = useI18n()
+
 import { computed, onMounted, ref } from 'vue'
 import { Copy, Gift, Loader2, RefreshCw, Users } from 'lucide-vue-next'
 import { referralApi, type ReferralDashboardResponse } from '@/api/referrals'
@@ -222,7 +219,7 @@ async function loadReferralDashboard() {
     dashboard.value = await referralApi.getMyReferral()
   } catch {
     dashboard.value = null
-    showError('加载邀请数据失败')
+    showError(t('ui.failedToLoadReferralData'))
   } finally {
     loading.value = false
   }
@@ -231,4 +228,5 @@ async function loadReferralDashboard() {
 onMounted(() => {
   void loadReferralDashboard()
 })
+
 </script>

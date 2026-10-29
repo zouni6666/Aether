@@ -1,7 +1,7 @@
 <template>
   <div class="container mx-auto px-4 py-8">
     <h2 class="text-2xl font-bold text-foreground mb-6">
-      个人设置
+      {{ t('breadcrumb.personalSettings') }}
     </h2>
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -15,20 +15,20 @@
           >
             <div class="flex flex-wrap items-center justify-between gap-3">
               <h3 class="text-lg font-medium text-foreground">
-                基本信息
+                {{ t('ui.basicInformation') }}
               </h3>
               <Button
                 type="submit"
                 :disabled="savingProfile || !hasProfileChanges"
                 class="shadow-none hover:shadow-none"
               >
-                {{ savingProfile ? '保存中...' : '保存' }}
+                {{ savingProfile ? t('ui.saving') : t('ui.save') }}
               </Button>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <Label for="username">用户名</Label>
+                <Label for="username">{{ t('auth.register.username') }}</Label>
                 <Input
                   id="username"
                   v-model="profileForm.username"
@@ -36,7 +36,7 @@
                 />
               </div>
               <div>
-                <Label for="avatar">头像 URL</Label>
+                <Label for="avatar">{{ t('ui.avatarUrl') }}</Label>
                 <Input
                   id="avatar"
                   v-model="preferencesForm.avatar_url"
@@ -47,7 +47,7 @@
             </div>
 
             <div>
-              <Label for="bio">个人简介</Label>
+              <Label for="bio">{{ t('ui.bio') }}</Label>
               <Textarea
                 id="bio"
                 v-model="preferencesForm.bio"
@@ -62,7 +62,7 @@
               class="grid grid-cols-1 md:grid-cols-2 gap-4"
             >
               <div>
-                <Label for="email">邮箱</Label>
+                <Label for="email">{{ t('auth.register.email') }}</Label>
                 <Input
                   id="email"
                   v-model="profileForm.email"
@@ -74,7 +74,7 @@
                   v-if="!emailConfigured && profileForm.email"
                   class="mt-1 text-xs text-muted-foreground"
                 >
-                  邮箱服务未配置，暂不可修改
+                  {{ t('ui.emailServiceIsNotConfiguredSoItCannotBeChanged') }}
                 </p>
               </div>
             </div>
@@ -85,10 +85,10 @@
           <div class="flex flex-col items-start gap-3 mb-4 sm:flex-row sm:justify-between">
             <div class="min-w-0 flex-1">
               <h3 class="text-lg font-medium text-foreground">
-                敏感信息保护
+                {{ t('ui.sensitiveInformationProtection') }}
               </h3>
               <p class="text-sm text-muted-foreground mt-1">
-                管理员开启功能后，可默认应用到你的账户和 API Key
+                {{ t('ui.afterTheAdministratorEnablesThisFeatureItCanBeApplied') }}
               </p>
             </div>
             <Button
@@ -97,24 +97,24 @@
               :disabled="savingFeatureSettings || !hasFeatureSettingsChanges"
               @click="updateFeatureSettings"
             >
-              {{ savingFeatureSettings ? '保存中...' : '保存' }}
+              {{ savingFeatureSettings ? t('ui.saving') : t('ui.save') }}
             </Button>
           </div>
           <div class="space-y-4">
             <div class="flex items-center justify-between gap-4 rounded-lg border border-border/60 bg-muted/30 px-4 py-3">
               <div>
-                <Label class="text-sm font-medium">默认启用</Label>
+                <Label class="text-sm font-medium">{{ t('ui.enabledByDefault') }}</Label>
                 <p class="mt-1 text-xs text-muted-foreground">
-                  未单独配置的 API Key 会跟随此设置
+                  {{ t('ui.apiKeysWithoutSeparateConfigurationFollowThisSetting') }}
                 </p>
               </div>
               <Switch v-model="featureSettingsForm.chatPiiRedactionEnabled" />
             </div>
             <div class="flex items-center justify-between gap-4 rounded-lg border border-border/60 bg-muted/30 px-4 py-3">
               <div>
-                <Label class="text-sm font-medium">占位符说明</Label>
+                <Label class="text-sm font-medium">{{ t('ui.placeholderNotes') }}</Label>
                 <p class="mt-1 text-xs text-muted-foreground">
-                  向模型说明占位符含义
+                  {{ t('ui.explainPlaceholderMeaningToTheModel') }}
                 </p>
               </div>
               <Switch
@@ -132,14 +132,14 @@
           <div class="flex items-center justify-between gap-4">
             <div>
               <h3 class="text-lg font-medium text-foreground">
-                通知推送服务
+                {{ t('ui.notificationPushService') }}
               </h3>
               <p class="mt-1 text-sm text-muted-foreground">
-                管理员已允许你配置自己的第三方推送渠道
+                {{ t('ui.yourAdministratorAllowsYouToConfigureYourOwnPushNotification') }}
               </p>
             </div>
             <Badge variant="success">
-              已开放
+              {{ t('ui.available') }}
             </Badge>
           </div>
         </Card>
@@ -155,18 +155,18 @@
           >
             <div class="flex flex-wrap items-center justify-between gap-3">
               <h3 class="text-lg font-medium text-foreground">
-                {{ profile?.has_password ? '修改密码' : '设置密码' }}
+                {{ profile?.has_password ? t('ui.changePassword') : t('ui.setPassword') }}
               </h3>
               <Button
                 type="submit"
                 :disabled="changingPassword || !hasPasswordChanges"
                 class="shadow-none hover:shadow-none"
               >
-                {{ changingPassword ? '保存中...' : '保存' }}
+                {{ changingPassword ? t('ui.saving') : t('ui.save') }}
               </Button>
             </div>
             <div v-if="profile?.has_password">
-              <Label for="old-password">当前密码</Label>
+              <Label for="old-password">{{ t('ui.currentPassword') }}</Label>
               <Input
                 id="old-password"
                 v-model="passwordForm.old_password"
@@ -176,7 +176,7 @@
               />
             </div>
             <div>
-              <Label for="new-password">{{ profile?.has_password ? '新密码' : '密码' }}</Label>
+              <Label for="new-password">{{ profile?.has_password ? t('ui.newPassword') : t('auth.register.password') }}</Label>
               <Input
                 id="new-password"
                 v-model="passwordForm.new_password"
@@ -199,20 +199,20 @@
               </p>
             </div>
             <div>
-              <Label for="confirm-password">{{ profile?.has_password ? '确认新密码' : '确认密码' }}</Label>
+              <Label for="confirm-password">{{ profile?.has_password ? t('ui.confirmNewPassword') : t('auth.register.confirmPassword') }}</Label>
               <Input
                 id="confirm-password"
                 v-model="passwordForm.confirm_password"
                 type="text"
                 masked
-                placeholder="再次输入密码"
+                :placeholder="t('auth.register.confirmPasswordPlaceholder')"
                 class="mt-1"
               />
               <p
                 v-if="passwordForm.confirm_password && passwordForm.new_password !== passwordForm.confirm_password"
                 class="mt-1 text-xs text-destructive"
               >
-                两次输入的密码不一致
+                {{ t('auth.register.passwordMismatch') }}
               </p>
             </div>
           </form>
@@ -222,10 +222,10 @@
           <div class="flex flex-col items-start gap-3 mb-4 sm:flex-row sm:justify-between">
             <div class="min-w-0 flex-1">
               <h3 class="text-lg font-medium text-foreground">
-                登录设备
+                {{ t('ui.signedInDevices') }}
               </h3>
               <p class="text-sm text-muted-foreground mt-1">
-                管理当前账号在各设备上的登录状态
+                {{ t('ui.manageSignInStatusForThisAccountAcrossDevices') }}
               </p>
             </div>
             <Button
@@ -234,7 +234,7 @@
               :disabled="sessionsLoading || otherSessionCount === 0 || sessionActionLoading === 'others'"
               @click="handleRevokeOtherSessions"
             >
-              {{ sessionActionLoading === 'others' ? '处理中...' : '退出其他设备' }}
+              {{ sessionActionLoading === 'others' ? t('ui.processingc1fd812') : t('ui.signOutOtherDevices') }}
             </Button>
           </div>
 
@@ -242,13 +242,13 @@
             v-if="sessionsLoading"
             class="text-sm text-muted-foreground"
           >
-            正在加载设备列表...
+            {{ t('ui.loadingDevices') }}
           </div>
           <div
             v-else-if="userSessions.length === 0"
             class="text-sm text-muted-foreground"
           >
-            暂无登录设备记录
+            {{ t('ui.noSignInDevicesRecorded') }}
           </div>
           <div
             v-else
@@ -279,14 +279,14 @@
                     v-if="session.is_current"
                     variant="secondary"
                   >
-                    当前设备
+                    {{ t('ui.currentDevice') }}
                   </Badge>
                 </div>
                 <p class="mt-1 text-xs text-muted-foreground">
                   {{ formatSessionMeta(session) }}
                 </p>
                 <p class="mt-1 text-xs text-muted-foreground">
-                  最近活跃 {{ formatDate(session.last_seen_at || session.created_at) }}
+                  {{ t('ui.lastActive') }} {{ formatDate(session.last_seen_at || session.created_at) }}
                   <span v-if="session.ip_address"> · IP {{ session.ip_address }}</span>
                 </p>
               </div>
@@ -297,7 +297,7 @@
                     :disabled="sessionActionLoading === session.id || !sessionLabelDraft.trim()"
                     @click="saveSessionLabel(session.id)"
                   >
-                    {{ sessionActionLoading === session.id ? '保存中...' : '保存' }}
+                    {{ sessionActionLoading === session.id ? t('ui.saving') : t('ui.save') }}
                   </Button>
                   <Button
                     variant="outline"
@@ -305,7 +305,7 @@
                     :disabled="sessionActionLoading === session.id"
                     @click="cancelSessionLabelEdit"
                   >
-                    取消
+                    {{ t('common.cancel') }}
                   </Button>
                 </template>
                 <template v-else>
@@ -315,7 +315,7 @@
                     :disabled="sessionActionLoading !== null"
                     @click="startSessionLabelEdit(session)"
                   >
-                    重命名
+                    {{ t('ui.rename') }}
                   </Button>
                   <Button
                     v-if="!session.is_current"
@@ -324,7 +324,7 @@
                     :disabled="sessionActionLoading === session.id"
                     @click="handleRevokeSession(session.id)"
                   >
-                    {{ sessionActionLoading === session.id ? '处理中...' : '退出' }}
+                    {{ sessionActionLoading === session.id ? t('ui.processingc1fd812') : t('ui.signOut') }}
                   </Button>
                 </template>
               </div>
@@ -335,21 +335,21 @@
         <!-- OAuth 绑定 -->
         <Card class="p-6">
           <h3 class="text-lg font-medium text-foreground mb-4">
-            OAuth 绑定
+            {{ t('ui.oauthBindings') }}
           </h3>
 
           <div
             v-if="profile?.auth_source === 'ldap'"
             class="text-sm text-muted-foreground"
           >
-            LDAP 用户不支持 OAuth 绑定
+            {{ t('site.auth.ldapNoOauth') }}
           </div>
 
           <div
             v-else-if="oauthUnavailable"
             class="text-sm text-muted-foreground"
           >
-            OAuth 模块未启用或暂不可用
+            {{ t('ui.theOauthModuleIsDisabledOrUnavailable') }}
           </div>
 
           <div
@@ -361,7 +361,7 @@
               v-if="oauthLinks.length === 0 && bindableProviders.length === 0"
               class="text-sm text-muted-foreground"
             >
-              暂无可用的 OAuth Provider
+              {{ t('ui.noOauthProvidersAvailable') }}
             </div>
             <div
               v-else
@@ -385,7 +385,7 @@
                       {{ link.display_name }}
                     </div>
                     <div class="text-xs text-muted-foreground truncate">
-                      {{ link.provider_username || link.provider_email || '已绑定' }}
+                      {{ link.provider_username || link.provider_email || t('ui.linkedf70c000') }}
                     </div>
                   </div>
                 </div>
@@ -395,7 +395,7 @@
                   :disabled="oauthActionLoading"
                   @click="handleUnbind(link.provider_type)"
                 >
-                  解绑
+                  {{ t('ui.unlink') }}
                 </Button>
               </div>
 
@@ -417,7 +417,7 @@
                       {{ p.display_name }}
                     </div>
                     <div class="text-xs text-muted-foreground">
-                      未绑定
+                      {{ t('ui.notBound') }}
                     </div>
                   </div>
                 </div>
@@ -427,7 +427,7 @@
                   :disabled="oauthActionLoading"
                   @click="handleBind(p.provider_type)"
                 >
-                  绑定
+                  {{ t('ui.bind') }}
                 </Button>
               </div>
             </div>
@@ -437,12 +437,12 @@
         <!-- 偏好设置 -->
         <Card class="p-6">
           <h3 class="text-lg font-medium text-foreground mb-4">
-            偏好设置
+            {{ t('ui.preferences') }}
           </h3>
           <div class="space-y-4">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <Label for="theme">主题</Label>
+                <Label for="theme">{{ t('ui.theme') }}</Label>
                 <Select
                   v-model="preferencesForm.theme"
                   v-model:open="themeSelectOpen"
@@ -456,20 +456,20 @@
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="light">
-                      浅色
+                      {{ t('ui.light') }}
                     </SelectItem>
                     <SelectItem value="dark">
-                      深色
+                      {{ t('ui.dark') }}
                     </SelectItem>
                     <SelectItem value="system">
-                      跟随系统
+                      {{ t('theme.system') }}
                     </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
               <div>
-                <Label for="language">语言</Label>
+                <Label for="language">{{ t('common.language') }}</Label>
                 <Select
                   v-model="preferencesForm.language"
                   v-model:open="languageSelectOpen"
@@ -483,7 +483,7 @@
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="zh-CN">
-                      简体中文
+                      {{ t('common.chinese') }}
                     </SelectItem>
                     <SelectItem value="en-US">
                       English
@@ -493,7 +493,7 @@
               </div>
 
               <div>
-                <Label for="timezone">时区</Label>
+                <Label for="timezone">{{ t('ui.timeZone') }}</Label>
                 <Input
                   id="timezone"
                   v-model="preferencesForm.timezone"
@@ -505,21 +505,19 @@
 
             <div class="space-y-3">
               <h4 class="font-medium text-foreground">
-                额度使用
+                {{ t('ui.quotaUsage') }}
               </h4>
               <div class="flex items-center justify-between gap-4 py-2">
                 <div class="flex-1">
                   <Label
                     for="allow-wallet-overage"
                     class="text-sm font-medium cursor-pointer"
-                  >
-                    套餐额度不可用时使用余额
-                  </Label>
+                  > {{ t('ui.useBalanceWhenPlanQuotaIsUnavailable') }} </Label>
                   <p
                     id="allow-wallet-overage-description"
                     class="text-xs text-muted-foreground mt-1"
                   >
-                    默认关闭，套餐额度不足时不会自动扣除钱包余额。开启后优先使用套餐额度，额度耗尽、不可用或处于恢复期时使用钱包余额。
+                    {{ t('ui.disabledByDefaultAnInsufficientPlanQuotaWillNotAutomatically') }}
                   </p>
                 </div>
                 <Switch
@@ -534,7 +532,7 @@
 
             <div class="space-y-3">
               <h4 class="font-medium text-foreground">
-                通知设置
+                {{ t('ui.notificationSettings') }}
               </h4>
               <div class="space-y-3">
                 <!-- 邮件通知：仅当系统配置了邮箱服务时显示 -->
@@ -546,11 +544,9 @@
                     <Label
                       for="email-notifications"
                       class="text-sm font-medium cursor-pointer"
-                    >
-                      邮件通知
-                    </Label>
+                    > {{ t('ui.emailNotifications') }} </Label>
                     <p class="text-xs text-muted-foreground mt-1">
-                      接收系统通知邮件
+                      {{ t('ui.receiveSystemNotificationsByEmail') }}
                     </p>
                   </div>
                   <Switch
@@ -564,11 +560,9 @@
                     <Label
                       for="usage-alerts"
                       class="text-sm font-medium cursor-pointer"
-                    >
-                      使用提醒
-                    </Label>
+                    > {{ t('ui.usageReminders') }} </Label>
                     <p class="text-xs text-muted-foreground mt-1">
-                      当余额接近不足时提醒
+                      {{ t('ui.notifyWhenBalanceIsGettingLow') }}
                     </p>
                   </div>
                   <Switch
@@ -582,11 +576,9 @@
                     <Label
                       for="announcement-notifications"
                       class="text-sm font-medium cursor-pointer"
-                    >
-                      公告通知
-                    </Label>
+                    > {{ t('ui.announcementNotifications') }} </Label>
                     <p class="text-xs text-muted-foreground mt-1">
-                      接收系统公告
+                      {{ t('ui.receiveSystemAnnouncements') }}
                     </p>
                   </div>
                   <Switch
@@ -606,31 +598,31 @@
         <!-- 账户信息 -->
         <Card class="p-6">
           <h3 class="text-lg font-medium text-foreground mb-4">
-            账户信息
+            {{ t('ui.accountInformation') }}
           </h3>
           <div class="space-y-3">
             <div class="flex justify-between">
-              <span class="text-muted-foreground">角色</span>
+              <span class="text-muted-foreground">{{ t('ui.role') }}</span>
               <Badge :variant="profile?.role === 'admin' ? 'default' : 'secondary'">
                 {{ profileRoleLabel }}
               </Badge>
             </div>
             <div class="flex justify-between">
-              <span class="text-muted-foreground">账户状态</span>
+              <span class="text-muted-foreground">{{ t('ui.accountStatus') }}</span>
               <span :class="profile?.is_active ? 'text-success' : 'text-destructive'">
-                {{ profile?.is_active ? '活跃' : '停用' }}
+                {{ profile?.is_active ? t('ui.activee85e590') : t('ui.disable4e6fd0e') }}
               </span>
             </div>
             <div class="flex justify-between">
-              <span class="text-muted-foreground">注册时间</span>
+              <span class="text-muted-foreground">{{ t('ui.registeredAt') }}</span>
               <span class="text-foreground">
                 {{ formatDate(profile?.created_at) }}
               </span>
             </div>
             <div class="flex justify-between">
-              <span class="text-muted-foreground">最后登录</span>
+              <span class="text-muted-foreground">{{ t('ui.lastSignIn') }}</span>
               <span class="text-foreground">
-                {{ profile?.last_login_at ? formatDate(profile.last_login_at) : '未记录' }}
+                {{ profile?.last_login_at ? formatDate(profile.last_login_at) : t('ui.notRecorded') }}
               </span>
             </div>
           </div>
@@ -639,36 +631,34 @@
         <!-- 钱包状态 -->
         <Card class="p-6">
           <h3 class="text-lg font-medium text-foreground mb-4">
-            钱包状态
+            {{ t('ui.walletStatus') }}
           </h3>
           <div class="space-y-4">
             <div class="flex justify-between text-sm">
-              <span class="text-muted-foreground">总余额</span>
+              <span class="text-muted-foreground">{{ t('ui.totalBalance') }}</span>
               <span class="text-foreground">
-                <template v-if="isUnlimitedBilling()">
-                  无限制
-                </template>
+                <template v-if="isUnlimitedBilling()"> {{ t('ui.unlimited9ee3c07') }} </template>
                 <template v-else>
                   {{ formatCurrency(profile?.billing?.balance || 0) }}
                 </template>
               </span>
             </div>
             <div class="flex justify-between text-sm">
-              <span class="text-muted-foreground">充值余额</span>
+              <span class="text-muted-foreground">{{ t('ui.topUpBalance') }}</span>
               <span class="text-foreground">{{ formatCurrency(profile?.billing?.recharge_balance || 0) }}</span>
             </div>
             <div class="flex justify-between text-sm">
-              <span class="text-muted-foreground">赠款余额</span>
+              <span class="text-muted-foreground">{{ t('ui.grantBalance') }}</span>
               <span class="text-foreground">{{ formatCurrency(profile?.billing?.gift_balance || 0) }}</span>
             </div>
             <div class="flex justify-between text-sm">
-              <span class="text-muted-foreground">累计消费</span>
+              <span class="text-muted-foreground">{{ t('ui.cumulativeSpending') }}</span>
               <span class="text-foreground">{{ formatCurrency(profile?.billing?.total_consumed || 0) }}</span>
             </div>
 
             <div v-if="!isUnlimitedBilling()">
               <div class="flex justify-between text-sm mb-1">
-                <span class="text-muted-foreground">累计消费占比</span>
+                <span class="text-muted-foreground">{{ t('ui.cumulativeSpendingRatio') }}</span>
                 <span class="text-foreground">{{ getBillingUsagePercentage().toFixed(1) }}%</span>
               </div>
               <div class="w-full bg-muted rounded-full h-2.5">
@@ -687,7 +677,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { getI18nLocale, normalizeLocale, useI18n } from '@/i18n'
+import { normalizeLocale, useI18n } from '@/i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { meApi, type Profile } from '@/api/me'
@@ -716,7 +706,7 @@ import SelectContent from '@/components/ui/select-content.vue'
 import SelectItem from '@/components/ui/select-item.vue'
 import Switch from '@/components/ui/switch.vue'
 import { useToast } from '@/composables/useToast'
-import { formatCurrency } from '@/utils/format'
+import { formatCurrency, formatDate } from '@/utils/format'
 import { log } from '@/utils/logger'
 import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 import { getErrorMessage, getErrorStatus } from '@/types/api-error'
@@ -731,14 +721,14 @@ const route = useRoute()
 const router = useRouter()
 const { success, error: showError } = useToast()
 const { setThemeMode } = useDarkMode()
-const { locale, setLocale } = useI18n()
+const { t, locale, setLocale } = useI18n()
 
 const profile = ref<Profile | null>(null)
 const userSessions = ref<UserSession[]>([])
 const profileRoleLabel = computed(() => {
-  if (profile.value?.role === 'admin') return '管理员'
-  if (profile.value?.role === 'audit_admin') return '审计管理员'
-  return '普通用户'
+  if (profile.value?.role === 'admin') return t('auth.role.admin')
+  if (profile.value?.role === 'audit_admin') return t('auth.role.auditAdmin')
+  return t('ui.user')
 })
 
 const profileForm = ref({
@@ -894,7 +884,7 @@ async function loadProfile() {
     originalFeatureSettingsForm.value = { ...featureSettingsForm.value }
   } catch (error) {
     log.error('加载个人信息失败:', error)
-    showError('加载个人信息失败')
+    showError(t('ui.failedToLoadProfile'))
   }
 }
 
@@ -914,10 +904,10 @@ async function updateFeatureSettings() {
       })
     }
     originalFeatureSettingsForm.value = { ...featureSettingsForm.value }
-    success('敏感信息保护设置已保存')
+    success(t('ui.sensitiveDataProtectionSettingsSaved'))
   } catch (err) {
     log.error('更新敏感信息保护设置失败:', err)
-    showError(getErrorMessage(err), '更新敏感信息保护设置失败')
+    showError(getErrorMessage(err), t('ui.failedToUpdateSensitiveDataProtectionSettings'))
   } finally {
     savingFeatureSettings.value = false
   }
@@ -983,7 +973,7 @@ function handleBind(providerType: string) {
     .then((authorizeUrl) => {
       const bindUrl = safeExternalHttpsUrl(authorizeUrl)
       if (!bindUrl) {
-        throw new Error('OAuth 服务返回了不安全的授权地址')
+        throw new Error(t('ui.theOauthServiceReturnedAnUnsafeAuthorizationUrl'))
       }
 
       // Keep a handle for close detection, but sever opener before the tab reaches
@@ -1021,7 +1011,7 @@ async function handleUnbind(providerType: string) {
   oauthActionLoading.value = true
   try {
     await oauthApi.unbind(providerType)
-    success('解绑成功')
+    success(t('ui.accountUnlinked'))
     await loadOAuthBindings()
   } catch (err) {
     showError(getErrorMessage(err, '解绑失败'))
@@ -1098,11 +1088,11 @@ async function updateProfile() {
       bio: preferencesForm.value.bio
     }
 
-    success('个人信息已更新')
+    success(t('ui.profileUpdated'))
     authStore.fetchCurrentUser()
   } catch (err) {
     log.error('更新个人信息失败:', err)
-    showError(getErrorMessage(err), '更新个人信息失败')
+    showError(getErrorMessage(err), t('ui.failedToUpdateProfile'))
   } finally {
     savingProfile.value = false
   }
@@ -1110,12 +1100,12 @@ async function updateProfile() {
 
 async function changePassword() {
   if (passwordForm.value.new_password !== passwordForm.value.confirm_password) {
-    showError('两次输入的密码不一致', '密码错误')
+    showError(t('auth.register.passwordMismatch'), t('auth.register.passwordError'))
     return
   }
 
   if (passwordError.value) {
-    showError(passwordError.value, '密码错误')
+    showError(passwordError.value, t('auth.register.passwordError'))
     return
   }
 
@@ -1126,7 +1116,7 @@ async function changePassword() {
       old_password: isSettingPassword ? undefined : passwordForm.value.old_password,
       new_password: passwordForm.value.new_password
     })
-    success(isSettingPassword ? '密码设置成功，请重新登录' : '密码修改成功，请重新登录')
+    success(isSettingPassword ? t('ui.passwordSetSignInAgain') : t('ui.passwordChangedSignInAgain'))
     await authStore.logout()
     await router.replace('/')
   } catch (err) {
@@ -1152,7 +1142,7 @@ function cancelSessionLabelEdit() {
 async function saveSessionLabel(sessionId: string) {
   const nextLabel = sessionLabelDraft.value.trim()
   if (!nextLabel) {
-    showError('设备名称不能为空')
+    showError(t('ui.deviceNameIsRequired'))
     return
   }
 
@@ -1163,7 +1153,7 @@ async function saveSessionLabel(sessionId: string) {
       session.id === sessionId ? updated : session
     )
     cancelSessionLabelEdit()
-    success('设备名称已更新')
+    success(t('ui.deviceNameUpdated'))
   } catch (error) {
     log.error('更新设备名称失败:', error)
     showError(getErrorMessage(error, '更新设备名称失败'))
@@ -1179,7 +1169,7 @@ async function handleRevokeSession(sessionId: string) {
     if (editingSessionId.value === sessionId) {
       cancelSessionLabelEdit()
     }
-    success('设备已退出登录')
+    success(t('ui.deviceSignedOut'))
     await loadSessions()
   } catch (error) {
     log.error('退出设备失败:', error)
@@ -1193,7 +1183,7 @@ async function handleRevokeOtherSessions() {
   sessionActionLoading.value = 'others'
   try {
     const result = await meApi.revokeOtherSessions()
-    success(result.revoked_count > 0 ? `已退出 ${result.revoked_count} 个其他设备` : '没有其他在线设备')
+    success(result.revoked_count > 0 ? `已退出 ${result.revoked_count} 个其他设备` : t('ui.noOtherDevicesAreOnline'))
     await loadSessions()
   } catch (error) {
     log.error('退出其他设备失败:', error)
@@ -1210,11 +1200,11 @@ async function updateWalletOverage(enabled: boolean) {
   savingWalletOverage.value = true
   try {
     await meApi.updatePreferences({ allow_wallet_overage: enabled })
-    success('设置已保存')
+    success(t('ui.settingsSaved'))
   } catch (error) {
     allowWalletOverage.value = previous
     log.error('更新额度使用设置失败:', error)
-    showError('保存设置失败')
+    showError(t('ui.failedToSaveSettings'))
   } finally {
     savingWalletOverage.value = false
   }
@@ -1234,10 +1224,10 @@ async function updatePreferences() {
         announcements: preferencesForm.value.notifications.announcements
       }
     })
-    success('设置已保存')
+    success(t('ui.settingsSaved'))
   } catch (error) {
     log.error('更新偏好设置失败:', error)
-    showError('保存设置失败')
+    showError(t('ui.failedToSaveSettings'))
   }
 }
 
@@ -1254,16 +1244,6 @@ function isUnlimitedBilling(): boolean {
   return profile.value?.billing?.unlimited === true
 }
 
-function formatDate(dateString?: string): string {
-  if (!dateString) return '未知'
-  return new Date(dateString).toLocaleDateString(getI18nLocale(), {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  })
-}
 </script>
 
 <style scoped>

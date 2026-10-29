@@ -1,4 +1,5 @@
 import { computed, watch, type Ref, type ComputedRef } from 'vue'
+import { useDiscardConfirm } from './useDiscardConfirm'
 
 /**
  * 表单对话框通用逻辑
@@ -9,6 +10,7 @@ import { computed, watch, type Ref, type ComputedRef } from 'vue'
  * - 表单重置
  * - 数据加载
  * - Loading 状态阻止关闭
+ * - 存在未保存更改时关闭前确认
  *
  * @example
  * ```typescript
@@ -37,15 +39,17 @@ export interface UseFormDialogOptions<E> {
   resetForm: () => void
   /** 额外的加载状态（如清理缓存等），可选 */
   extraLoadingStates?: Array<Ref<boolean> | ComputedRef<boolean>>
+  /** 表单是否有未保存更改；提供后关闭前会弹出放弃确认 */
+  isDirty?: () => boolean
 }
 
 export interface UseFormDialogReturn {
   /** 是否为编辑模式 */
   isEditMode: ComputedRef<boolean>
   /** 处理对话框更新事件（用于 @update:model-value） */
-  handleDialogUpdate: (value: boolean) => void
+  handleDialogUpdate: (value: boolean) => Promise<void>
   /** 处理取消按钮点击 */
-  handleCancel: () => void
+  handleCancel: () => Promise<void>
 }
 
 export function useFormDialog<E>(
@@ -59,7 +63,10 @@ export function useFormDialog<E>(
     loadData,
     resetForm,
     extraLoadingStates = [],
+    isDirty = () => false,
   } = options
+
+  const { confirmDiscard } = useDiscardConfirm(isDirty)
 
   // 是否为编辑模式
   const isEditMode = computed(() => !!entity())
@@ -71,9 +78,13 @@ export function useFormDialog<E>(
   })
 
   // 处理对话框更新事件
-  function handleDialogUpdate(value: boolean) {
+  async function handleDialogUpdate(value: boolean) {
     // 加载中不允许关闭
     if (!value && isAnyLoading.value) {
+      return
+    }
+    // 存在未保存更改时先确认
+    if (!value && !(await confirmDiscard())) {
       return
     }
     // 关闭时重置表单
@@ -84,8 +95,9 @@ export function useFormDialog<E>(
   }
 
   // 处理取消按钮
-  function handleCancel() {
+  async function handleCancel() {
     if (isAnyLoading.value) return
+    if (!(await confirmDiscard())) return
     onClose()
   }
 
